@@ -137,6 +137,10 @@ impl Vim {
                         ranges.push(selection.start..selection.end);
                         cursor_positions.push(selection.start..selection.start);
                     }
+                    Mode::HelixNormal => {
+                        ranges.push(selection.start..selection.end);
+                        cursor_positions.push(selection.start..selection.end);
+                    }
                     Mode::VisualBlock => {
                         ranges.push(selection.start..selection.end);
                         if cursor_positions.is_empty() {
@@ -176,6 +180,8 @@ impl Vim {
                 })
             });
         });
+        // FIXME: breaks vim
+        vim.switch_mode(Mode::HelixNormal, true, cx)
         self.switch_mode(Mode::Normal, true, cx)
     }
 }

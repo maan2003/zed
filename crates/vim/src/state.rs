@@ -4,6 +4,7 @@ use std::{fmt::Display, ops::Range, sync::Arc};
 use crate::command::command_interceptor;
 use crate::normal::repeat::Replayer;
 use crate::surrounds::SurroundsType;
+use crate::HelixModeSetting;
 use crate::{motion::Motion, object::Object};
 use crate::{UseSystemClipboard, Vim, VimSettings};
 use collections::HashMap;
@@ -26,6 +27,7 @@ pub enum Mode {
     Visual,
     VisualLine,
     VisualBlock,
+    HelixNormal,
 }
 
 impl Display for Mode {
@@ -37,6 +39,7 @@ impl Display for Mode {
             Mode::Visual => write!(f, "VISUAL"),
             Mode::VisualLine => write!(f, "VISUAL LINE"),
             Mode::VisualBlock => write!(f, "VISUAL BLOCK"),
+            Mode::HelixNormal => write!(f, "HELIX"),
         }
     }
 }
@@ -45,14 +48,14 @@ impl Mode {
     pub fn is_visual(&self) -> bool {
         match self {
             Mode::Normal | Mode::Insert | Mode::Replace => false,
-            Mode::Visual | Mode::VisualLine | Mode::VisualBlock => true,
+            Mode::Visual | Mode::VisualLine | Mode::VisualBlock | Mode::HelixNormal => true,
         }
     }
 }
 
 impl Default for Mode {
     fn default() -> Self {
-        Self::Normal
+        Self::HelixNormal
     }
 }
 

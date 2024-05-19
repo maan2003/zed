@@ -6,6 +6,7 @@ mod test;
 mod change_list;
 mod command;
 mod digraph;
+mod helix;
 mod insert;
 mod mode_indicator;
 mod motion;
@@ -20,6 +21,7 @@ use anyhow::Result;
 use collections::HashMap;
 use editor::{
     movement::{self, FindRange},
+    scroll::Autoscroll,
     Anchor, Bias, Editor, EditorEvent, EditorMode, ToPoint,
 };
 use gpui::{
@@ -28,6 +30,7 @@ use gpui::{
 };
 use insert::NormalBefore;
 use language::{CursorShape, Point, Selection, SelectionGoal, TransactionId};
+use helix::hx_replace;
 pub use mode_indicator::ModeIndicator;
 use motion::Motion;
 use normal::search::SearchSubmit;
@@ -36,7 +39,7 @@ use serde::Deserialize;
 use serde_derive::Serialize;
 use settings::{update_settings_file, Settings, SettingsSources, SettingsStore};
 use state::{Mode, Operator, RecordedSelection, SearchState, VimGlobals};
-use std::{ops::Range, sync::Arc};
+use std::{cmp::Ordering, ops::Range, sync::Arc};
 use surrounds::SurroundsType;
 use ui::{IntoElement, VisualContext};
 use workspace::{self, Pane, Workspace};
@@ -88,6 +91,7 @@ impl_actions!(vim, [SwitchMode, PushOperator, Number, SelectRegister]);
 /// Initializes the `vim` crate.
 pub fn init(cx: &mut AppContext) {
     VimModeSetting::register(cx);
+    HelixModeSetting::register(cx);
     VimSettings::register(cx);
     VimGlobals::register(cx);
 
@@ -161,6 +165,7 @@ pub(crate) struct Vim {
     pub(crate) current_tx: Option<TransactionId>,
     pub(crate) current_anchor: Option<Selection<Anchor>>,
     pub(crate) undo_modes: HashMap<TransactionId, Mode>,
+    pub(crate) hx_return_selection: Option<Vec<Range<editor::Anchor>>>,
 
     selected_register: Option<char>,
     pub search: SearchState,
@@ -294,6 +299,7 @@ impl Vim {
             object::register(editor, cx);
             visual::register(editor, cx);
             change_list::register(editor, cx);
+            helix::register(editor, cx);
 
             cx.defer(|vim, cx| {
                 vim.focused(false, cx);
@@ -424,7 +430,10 @@ impl Vim {
         self.sync_vim_settings(cx);
     }
 
-    pub fn switch_mode(&mut self, mode: Mode, leave_selections: bool, cx: &mut ViewContext<Self>) {
+    pub fn switch_mode(&mut self, mut mode: Mode, leave_selections: bool, cx: &mut ViewContext<Self>) {
+        if mode == Mode::Normal {
+            mode = Mode::HelixNormal;
+        }
         let last_mode = self.mode;
         let prior_mode = self.last_mode;
         let prior_tx = self.current_tx;
@@ -461,6 +470,41 @@ impl Vim {
             self.create_visual_marks(last_mode, cx);
         }
 
+        if last_mode == Mode::Insert && mode == Mode::HelixNormal {
+            if let Some(selections) = self.update_state(|state| state.hx_return_selection.take()) {
+                self.update_active_editor(cx, |_, editor, cx| {
+                    dbg!(&selections);
+                    editor.change_selections(Some(Autoscroll::fit()), cx, |s| {
+                        let map = s.display_map();
+                        s.select_anchors(
+                            selections
+                                .into_iter()
+                                .enumerate()
+                                .map(|(id, r)| {
+                                    let (start, end, reversed) =
+                                        match Anchor::cmp(&r.start, &r.end, &map.buffer_snapshot) {
+                                            Ordering::Less | Ordering::Equal => {
+                                                (r.start, r.end, false)
+                                            }
+                                            Ordering::Greater => (r.end, r.start, true),
+                                        };
+                                    Selection {
+                                        id,
+                                        start,
+                                        end,
+                                        reversed,
+                                        goal: SelectionGoal::None,
+                                    }
+                                })
+                                .collect(),
+                        );
+                    });
+                });
+            }
+            return;
+        } else if last_mode == Mode::HelixNormal && mode == Mode::Insert {
+            return;
+        }
         // Adjust selections
         self.update_editor(cx, |vim, editor, cx| {
             if last_mode != Mode::VisualBlock && last_mode.is_visual() && mode == Mode::VisualBlock
@@ -513,7 +557,7 @@ impl Vim {
                         selection.end = movement::right(map, selection.start);
                     }
                 });
-            })
+            });
         });
     }
 
@@ -546,7 +590,9 @@ impl Vim {
                 }
             }
             Mode::Replace => CursorShape::Underscore,
-            Mode::Visual | Mode::VisualLine | Mode::VisualBlock => CursorShape::Block,
+            Mode::Visual | Mode::VisualLine | Mode::VisualBlock | Mode::HelixNormal => {
+                CursorShape::Block
+            }
             Mode::Insert => CursorShape::Bar,
         }
     }
@@ -560,7 +606,7 @@ impl Vim {
                     true
                 }
             }
-            Mode::Normal | Mode::Replace | Mode::Visual | Mode::VisualLine | Mode::VisualBlock => {
+            Mode::Normal | Mode::Replace | Mode::Visual | Mode::VisualLine | Mode::VisualBlock | Mode::HelixNormal => {
                 false
             }
         }
@@ -572,19 +618,27 @@ impl Vim {
 
     pub fn clip_at_line_ends(&self) -> bool {
         match self.mode {
-            Mode::Insert | Mode::Visual | Mode::VisualLine | Mode::VisualBlock | Mode::Replace => {
-                false
-            }
+            Mode::Insert
+            | Mode::Visual
+            | Mode::VisualLine
+            | Mode::VisualBlock
+            | Mode::Replace
+            | Mode::HelixNormal => false,
             Mode::Normal => true,
         }
     }
 
     pub fn extend_key_context(&self, context: &mut KeyContext) {
+        let mut context = KeyContext::new_with_defaults();
+        if HelixModeSetting::get_global(cx).0 {
+            context.add("HelixControl");
+        }
         let mut mode = match self.mode {
             Mode::Normal => "normal",
             Mode::Visual | Mode::VisualLine | Mode::VisualBlock => "visual",
             Mode::Insert => "insert",
             Mode::Replace => "replace",
+            Mode::HelixNormal => "helixnormal",
         }
         .to_string();
 
@@ -898,6 +952,9 @@ impl Vim {
                 });
             }
             Mode::Insert | Mode::Replace => {}
+            Mode::HelixNormal => {
+                // TODO: restore selections
+            }
         }
     }
 
@@ -973,6 +1030,7 @@ impl Vim {
                 Mode::Visual | Mode::VisualLine | Mode::VisualBlock => {
                     self.visual_replace(text, cx)
                 }
+                Mode::HelixNormal => hx_replace(text, cx),
                 _ => self.clear_operator(cx),
             },
             Some(Operator::Digraph { first_char }) => {
@@ -1067,6 +1125,20 @@ impl Vim {
 
 impl Settings for VimModeSetting {
     const KEY: Option<&'static str> = Some("vim_mode");
+
+    type FileContent = Option<bool>;
+
+    fn load(sources: SettingsSources<Self::FileContent>, _: &mut AppContext) -> Result<Self> {
+        Ok(Self(sources.user.copied().flatten().unwrap_or(
+            sources.default.ok_or_else(Self::missing_default)?,
+        )))
+    }
+}
+
+pub struct HelixModeSetting(pub bool);
+
+impl Settings for HelixModeSetting {
+    const KEY: Option<&'static str> = Some("helix_mode");
 
     type FileContent = Option<bool>;
 
