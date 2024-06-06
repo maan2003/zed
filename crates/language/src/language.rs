@@ -515,6 +515,9 @@ async fn try_fetch_server_binary<L: LspAdapter + 'static + Send + Sync + ?Sized>
     container_dir: PathBuf,
     cx: &mut AsyncAppContext,
 ) -> Result<LanguageServerBinary> {
+    if true {
+        anyhow::bail!("downloading server binaries is disabled");
+    }
     if let Some(task) = adapter.will_fetch_server(delegate, cx) {
         task.await?;
     }
