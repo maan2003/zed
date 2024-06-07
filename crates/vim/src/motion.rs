@@ -1130,9 +1130,8 @@ pub(crate) fn next_word_start(
             let right_kind = coerce_punctuation(char_kind(&scope, right), ignore_punctuation);
             let at_newline = right == '\n';
 
-            let found = (left_kind != right_kind && right_kind != CharKind::Whitespace)
-                || at_newline && crossed_newline
-                || at_newline && left == '\n'; // Prevents skipping repeated empty lines
+            let found =
+                (left_kind != right_kind && right_kind != CharKind::Whitespace) || at_newline;
 
             crossed_newline |= at_newline;
             found
@@ -1154,25 +1153,19 @@ pub(crate) fn next_word_end(
 ) -> DisplayPoint {
     let scope = map.buffer_snapshot.language_scope_at(point.to_point(map));
     for _ in 0..times {
-        let new_point = next_char(map, point, allow_cross_newline);
         let mut need_next_char = false;
-        let new_point = movement::find_boundary_exclusive(
-            map,
-            new_point,
-            FindRange::MultiLine,
-            |left, right| {
-                let left_kind = coerce_punctuation(char_kind(&scope, left), ignore_punctuation);
-                let right_kind = coerce_punctuation(char_kind(&scope, right), ignore_punctuation);
-                let at_newline = right == '\n';
+        let new_point = movement::find_boundary(map, point, FindRange::MultiLine, |left, right| {
+            let left_kind = coerce_punctuation(char_kind(&scope, left), ignore_punctuation);
+            let right_kind = coerce_punctuation(char_kind(&scope, right), ignore_punctuation);
+            let at_newline = right == '\n';
 
-                if !allow_cross_newline && at_newline {
-                    need_next_char = true;
-                    return true;
-                }
+            if !allow_cross_newline && at_newline {
+                need_next_char = true;
+                return true;
+            }
 
-                left_kind != right_kind && left_kind != CharKind::Whitespace
-            },
-        );
+            left_kind != right_kind && left_kind != CharKind::Whitespace
+        });
         let new_point = if need_next_char {
             next_char(map, new_point, true)
         } else {
@@ -1187,7 +1180,7 @@ pub(crate) fn next_word_end(
     point
 }
 
-fn previous_word_start(
+pub(crate) fn previous_word_start(
     map: &DisplaySnapshot,
     mut point: DisplayPoint,
     ignore_punctuation: bool,
@@ -1216,7 +1209,7 @@ fn previous_word_start(
     point
 }
 
-fn previous_word_end(
+pub(crate) fn previous_word_end(
     map: &DisplaySnapshot,
     point: DisplayPoint,
     ignore_punctuation: bool,
@@ -1576,7 +1569,7 @@ fn matching(map: &DisplaySnapshot, display_point: DisplayPoint) -> DisplayPoint 
     }
 }
 
-fn find_forward(
+pub(crate) fn find_forward(
     map: &DisplaySnapshot,
     from: DisplayPoint,
     before: bool,
@@ -1612,7 +1605,7 @@ fn find_forward(
     }
 }
 
-fn find_backward(
+pub(crate) fn find_backward(
     map: &DisplaySnapshot,
     from: DisplayPoint,
     after: bool,
