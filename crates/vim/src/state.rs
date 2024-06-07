@@ -230,7 +230,7 @@ impl EditorState {
             Mode::Replace => CursorShape::Underscore,
             Mode::Visual | Mode::VisualLine | Mode::VisualBlock => CursorShape::Block,
             Mode::Insert => CursorShape::Bar,
-            Mode::HelixNormal => CursorShape::Hollow,
+            Mode::HelixNormal => CursorShape::Block,
         }
     }
 
