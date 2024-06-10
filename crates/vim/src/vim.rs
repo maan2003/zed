@@ -768,6 +768,9 @@ impl Vim {
                 });
             }
             Mode::Insert | Mode::Replace => {}
+            Mode::HelixNormal => {
+                // TODO: restore selections
+            }
         }
     }
 

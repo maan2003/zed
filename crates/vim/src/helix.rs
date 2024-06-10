@@ -7,7 +7,7 @@ use editor::{
     Bias, DisplayPoint, ToPoint,
 };
 use gpui::{actions, impl_actions};
-use language::{char_kind, CharKind, Selection};
+use language::{char_kind, CharKind, Selection, SelectionGoal};
 use log::error;
 use settings::Settings;
 use ui::{ViewContext, WindowContext};
@@ -20,15 +20,28 @@ use crate::{
     },
     normal::normal_motion,
     state::{Mode, Operator},
-    utils::coerce_punctuation,
     visual::visual_motion,
     HelixModeSetting, Vim,
 };
 
-actions!(helix, [SelectNextLine,]);
+actions!(
+    helix,
+    [
+        SelectNextLine,
+        Delete,
+        Change,
+        InsertBefore,
+        ExtendLineBelow
+    ]
+);
 
 pub fn register(workspace: &mut Workspace, cx: &mut ViewContext<Workspace>) {
     workspace.register_action(|_: &mut Workspace, _: &SelectNextLine, cx: _| select_next_line(cx));
+    workspace.register_action(|_: &mut Workspace, _: &Delete, cx: _| delete(cx));
+    workspace.register_action(|_: &mut Workspace, _: &Change, cx: _| change(cx));
+    workspace.register_action(|_: &mut Workspace, _: &InsertBefore, cx: _| insert_before(cx));
+    workspace
+        .register_action(|_: &mut Workspace, _: &ExtendLineBelow, cx: _| extend_line_below(cx));
 }
 
 fn select_next_line(cx: &mut WindowContext) {}
@@ -154,12 +167,12 @@ trait CursorSelectionExt {
 
 impl CursorSelectionExt for Selection<DisplayPoint> {
     fn cursor(&self, map: &DisplaySnapshot) -> DisplayPoint {
-        if !self.reversed {
+        if self.end == self.start || self.reversed {
+            self.start
+        } else {
             self.end
                 .prev_char(map)
                 .map_or(self.start, |(_, offset)| offset)
-        } else {
-            self.start
         }
     }
 }
@@ -418,5 +431,118 @@ pub(crate) fn hx_replace(text: Arc<str>, cx: &mut WindowContext) {
             });
         });
         vim.switch_mode(Mode::HelixNormal, false, cx);
+    });
+}
+
+pub(crate) fn delete(cx: &mut WindowContext) {
+    Vim::update(cx, |vim, cx| {
+        vim.update_active_editor(cx, |_, editor, cx| {
+            editor.transact(cx, |editor, cx| {
+                let (display_map, selections) = editor.selections.all_adjusted_display(cx);
+
+                // Selections are biased right at the start. So we need to store
+                // anchors that are biased left so that we can restore the selections
+                // after the change
+                let stable_anchors = editor
+                    .selections
+                    .disjoint_anchors()
+                    .into_iter()
+                    .map(|selection| {
+                        let start = selection.start.bias_left(&display_map.buffer_snapshot);
+                        let end = selection.end.bias_left(&display_map.buffer_snapshot);
+                        start..start
+                    })
+                    .collect::<Vec<_>>();
+
+                let mut edits = Vec::new();
+                for selection in selections.iter() {
+                    let selection = selection.clone();
+                    for row_range in
+                        movement::split_display_range_by_lines(&display_map, selection.range())
+                    {
+                        let range = row_range.start.to_offset(&display_map, Bias::Right)
+                            ..row_range.end.to_offset(&display_map, Bias::Right);
+                        edits.push((range, String::new()));
+                    }
+                }
+
+                editor.buffer().update(cx, |buffer, cx| {
+                    buffer.edit(edits, None, cx);
+                });
+                editor.change_selections(None, cx, |s| s.select_ranges(stable_anchors));
+            });
+        });
+        vim.switch_mode(Mode::HelixNormal, false, cx);
+    });
+}
+pub(crate) fn change(cx: &mut WindowContext) {
+    Vim::update(cx, |vim, cx| {
+        vim.update_active_editor(cx, |_, editor, cx| {
+            editor.transact(cx, |editor, cx| {
+                let (display_map, selections) = editor.selections.all_adjusted_display(cx);
+
+                // Selections are biased right at the start. So we need to store
+                // anchors that are biased left so that we can restore the selections
+                // after the change
+                let stable_anchors = editor
+                    .selections
+                    .disjoint_anchors()
+                    .into_iter()
+                    .map(|selection| {
+                        let start = selection.start.bias_left(&display_map.buffer_snapshot);
+                        let end = selection.end.bias_left(&display_map.buffer_snapshot);
+                        start..start
+                    })
+                    .collect::<Vec<_>>();
+
+                let mut edits = Vec::new();
+                for selection in selections.iter() {
+                    let selection = selection.clone();
+                    for row_range in
+                        movement::split_display_range_by_lines(&display_map, selection.range())
+                    {
+                        let range = row_range.start.to_offset(&display_map, Bias::Right)
+                            ..row_range.end.to_offset(&display_map, Bias::Right);
+                        edits.push((range, String::new()));
+                    }
+                }
+
+                editor.buffer().update(cx, |buffer, cx| {
+                    buffer.edit(edits, None, cx);
+                });
+                editor.change_selections(None, cx, |s| s.select_ranges(stable_anchors));
+            });
+        });
+        vim.switch_mode(Mode::Insert, false, cx);
+    });
+}
+
+pub(crate) fn insert_before(cx: &mut WindowContext) {
+    Vim::update(cx, |vim, cx| {
+        vim.update_active_editor(cx, |_, editor, cx| {
+            editor.change_selections(None, cx, |s| {
+                s.move_with(|map, selection| {
+                    selection.collapse_to(selection.start, SelectionGoal::None);
+                })
+            });
+        });
+        vim.switch_mode(Mode::Insert, true, cx);
+    });
+}
+
+pub(crate) fn extend_line_below(cx: &mut WindowContext) {
+    Vim::update(cx, |vim, cx| {
+        vim.update_active_editor(cx, |_, editor, cx| {
+            editor.change_selections(None, cx, |s| {
+                s.move_with(|map, selection| {
+                    // TODO: times
+                    let cursor = selection.cursor(map);
+                    let range = map
+                        .expand_to_line(selection.start.to_point(map)..selection.end.to_point(map));
+                    selection.start = range.start.to_display_point(map);
+                    selection.end = range.end.to_display_point(map);
+                });
+            });
+        });
     });
 }
