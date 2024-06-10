@@ -1247,7 +1247,7 @@ pub(crate) fn previous_word_end(
     movement::saturating_left(map, point.to_display_point(map))
 }
 
-fn next_subword_start(
+pub(crate) fn next_subword_start(
     map: &DisplaySnapshot,
     mut point: DisplayPoint,
     ignore_punctuation: bool,
@@ -1328,7 +1328,7 @@ pub(crate) fn next_subword_end(
     point
 }
 
-fn previous_subword_start(
+pub(crate) fn previous_subword_start(
     map: &DisplaySnapshot,
     mut point: DisplayPoint,
     ignore_punctuation: bool,
@@ -1369,7 +1369,7 @@ fn previous_subword_start(
     point
 }
 
-fn previous_subword_end(
+pub(crate) fn previous_subword_end(
     map: &DisplaySnapshot,
     point: DisplayPoint,
     ignore_punctuation: bool,
