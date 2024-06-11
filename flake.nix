@@ -1,10 +1,6 @@
 {
   description = "High-performance, multiplayer code editor from the creators of Atom and Tree-sitter";
 
-  inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs?ref=nixos-unstable";
-  };
-
   outputs =
     { self, nixpkgs }:
     let
