@@ -6,6 +6,7 @@ mod test;
 mod change_list;
 mod command;
 mod editor_events;
+mod helix;
 mod insert;
 mod mode_indicator;
 mod motion;
@@ -28,6 +29,7 @@ use gpui::{
     actions, impl_actions, Action, AppContext, EntityId, FocusableView, Global, KeystrokeEvent,
     Subscription, UpdateGlobal, View, ViewContext, WeakView, WindowContext,
 };
+use helix::hx_replace;
 use language::{CursorShape, Point, SelectionGoal, TransactionId};
 pub use mode_indicator::ModeIndicator;
 use motion::Motion;
@@ -95,6 +97,7 @@ impl_actions!(vim, [SwitchMode, PushOperator, Number, SelectRegister]);
 pub fn init(cx: &mut AppContext) {
     cx.set_global(Vim::default());
     VimModeSetting::register(cx);
+    HelixModeSetting::register(cx);
     VimSettings::register(cx);
 
     cx.observe_keystrokes(observe_keystrokes).detach();
@@ -164,6 +167,7 @@ fn register(workspace: &mut Workspace, cx: &mut ViewContext<Workspace>) {
     object::register(workspace, cx);
     visual::register(workspace, cx);
     change_list::register(workspace, cx);
+    helix::register(workspace, cx);
 }
 
 /// Called whenever an keystroke is typed so vim can observe all actions
@@ -764,6 +768,9 @@ impl Vim {
                 });
             }
             Mode::Insert | Mode::Replace => {}
+            Mode::HelixNormal => {
+                // TODO: restore selections
+            }
         }
     }
 
@@ -841,6 +848,7 @@ impl Vim {
             Some(Operator::Replace) => match Vim::read(cx).state().mode {
                 Mode::Normal => normal_replace(text, cx),
                 Mode::Visual | Mode::VisualLine | Mode::VisualBlock => visual_replace(text, cx),
+                Mode::HelixNormal => hx_replace(text, cx),
                 _ => Vim::update(cx, |vim, cx| vim.clear_operator(cx)),
             },
             Some(Operator::AddSurrounds { target }) => match Vim::read(cx).state().mode {
@@ -937,7 +945,11 @@ impl Vim {
                     let active_editor = workspace.active_item_as::<Editor>(cx);
                     if let Some(active_editor) = active_editor {
                         self.activate_editor(active_editor, cx);
-                        self.switch_mode(Mode::Normal, false, cx);
+                        if HelixModeSetting::get_global(cx).0 {
+                            self.switch_mode(Mode::HelixNormal, false, cx);
+                        } else {
+                            self.switch_mode(Mode::Normal, false, cx);
+                        }
                     }
                 })
                 .ok();
@@ -977,10 +989,10 @@ impl Vim {
             editor.set_autoindent(state.should_autoindent());
             editor.selections.line_mode = matches!(state.mode, Mode::VisualLine);
             if editor.is_focused(cx) || editor.mouse_menu_is_focused(cx) {
-                editor.set_keymap_context_layer::<Self>(state.keymap_context_layer(), cx);
+                editor.set_keymap_context_layer::<Self>(state.keymap_context_layer(cx), cx);
                 // disable vim mode if a sub-editor (inline assist, rename, etc.) is focused
             } else if editor.focus_handle(cx).contains_focused(cx) {
-                editor.remove_keymap_context_layer::<Self>(cx);
+                editor.remove_keymap_context_layer::<Self>(cx)
             }
         });
     }
@@ -1000,6 +1012,20 @@ impl Vim {
 
 impl Settings for VimModeSetting {
     const KEY: Option<&'static str> = Some("vim_mode");
+
+    type FileContent = Option<bool>;
+
+    fn load(sources: SettingsSources<Self::FileContent>, _: &mut AppContext) -> Result<Self> {
+        Ok(Self(sources.user.copied().flatten().unwrap_or(
+            sources.default.ok_or_else(Self::missing_default)?,
+        )))
+    }
+}
+
+pub struct HelixModeSetting(pub bool);
+
+impl Settings for HelixModeSetting {
+    const KEY: Option<&'static str> = Some("helix_mode");
 
     type FileContent = Option<bool>;
 

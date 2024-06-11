@@ -14,6 +14,7 @@ use std::ops::Range;
 use workspace::Workspace;
 
 use crate::{
+    helix::helix_normal_motion,
     normal::{mark, normal_motion},
     state::{Mode, Operator},
     surrounds::SurroundsType,
@@ -397,22 +398,19 @@ pub(crate) fn search_motion(m: Motion, cx: &mut WindowContext) {
         prior_selections, ..
     } = &m
     {
-        match Vim::read(cx).state().mode {
-            Mode::Visual | Mode::VisualLine | Mode::VisualBlock => {
-                if !prior_selections.is_empty() {
-                    Vim::update(cx, |vim, cx| {
-                        vim.update_active_editor(cx, |_, editor, cx| {
-                            editor.change_selections(Some(Autoscroll::fit()), cx, |s| {
-                                s.select_ranges(prior_selections.iter().cloned())
-                            })
-                        });
+        if Vim::read(cx).state().mode.is_visual() {
+            if !prior_selections.is_empty() {
+                Vim::update(cx, |vim, cx| {
+                    vim.update_active_editor(cx, |_, editor, cx| {
+                        editor.change_selections(Some(Autoscroll::fit()), cx, |s| {
+                            s.select_ranges(prior_selections.iter().cloned())
+                        })
                     });
-                }
+                });
             }
-            Mode::Normal | Mode::Replace | Mode::Insert => {
-                if Vim::read(cx).active_operator().is_none() {
-                    return;
-                }
+        } else {
+            if Vim::read(cx).active_operator().is_none() {
+                return;
             }
         }
     }
@@ -443,6 +441,7 @@ pub(crate) fn motion(motion: Motion, cx: &mut WindowContext) {
         Mode::Visual | Mode::VisualLine | Mode::VisualBlock => {
             visual_motion(motion.clone(), count, cx)
         }
+        Mode::HelixNormal => helix_normal_motion(motion.clone(), count, cx),
         Mode::Insert => {
             // Shouldn't execute a motion in insert mode. Ignoring
         }
@@ -1122,9 +1121,8 @@ pub(crate) fn next_word_start(
             let right_kind = coerce_punctuation(char_kind(&scope, right), ignore_punctuation);
             let at_newline = right == '\n';
 
-            let found = (left_kind != right_kind && right_kind != CharKind::Whitespace)
-                || at_newline && crossed_newline
-                || at_newline && left == '\n'; // Prevents skipping repeated empty lines
+            let found =
+                (left_kind != right_kind && right_kind != CharKind::Whitespace) || at_newline;
 
             crossed_newline |= at_newline;
             found
@@ -1146,25 +1144,19 @@ pub(crate) fn next_word_end(
 ) -> DisplayPoint {
     let scope = map.buffer_snapshot.language_scope_at(point.to_point(map));
     for _ in 0..times {
-        let new_point = next_char(map, point, allow_cross_newline);
         let mut need_next_char = false;
-        let new_point = movement::find_boundary_exclusive(
-            map,
-            new_point,
-            FindRange::MultiLine,
-            |left, right| {
-                let left_kind = coerce_punctuation(char_kind(&scope, left), ignore_punctuation);
-                let right_kind = coerce_punctuation(char_kind(&scope, right), ignore_punctuation);
-                let at_newline = right == '\n';
+        let new_point = movement::find_boundary(map, point, FindRange::MultiLine, |left, right| {
+            let left_kind = coerce_punctuation(char_kind(&scope, left), ignore_punctuation);
+            let right_kind = coerce_punctuation(char_kind(&scope, right), ignore_punctuation);
+            let at_newline = right == '\n';
 
-                if !allow_cross_newline && at_newline {
-                    need_next_char = true;
-                    return true;
-                }
+            if !allow_cross_newline && at_newline {
+                need_next_char = true;
+                return true;
+            }
 
-                left_kind != right_kind && left_kind != CharKind::Whitespace
-            },
-        );
+            left_kind != right_kind && left_kind != CharKind::Whitespace
+        });
         let new_point = if need_next_char {
             next_char(map, new_point, true)
         } else {
@@ -1179,7 +1171,7 @@ pub(crate) fn next_word_end(
     point
 }
 
-fn previous_word_start(
+pub(crate) fn previous_word_start(
     map: &DisplaySnapshot,
     mut point: DisplayPoint,
     ignore_punctuation: bool,
@@ -1208,7 +1200,7 @@ fn previous_word_start(
     point
 }
 
-fn previous_word_end(
+pub(crate) fn previous_word_end(
     map: &DisplaySnapshot,
     point: DisplayPoint,
     ignore_punctuation: bool,
@@ -1246,7 +1238,7 @@ fn previous_word_end(
     movement::saturating_left(map, point.to_display_point(map))
 }
 
-fn next_subword_start(
+pub(crate) fn next_subword_start(
     map: &DisplaySnapshot,
     mut point: DisplayPoint,
     ignore_punctuation: bool,
@@ -1327,7 +1319,7 @@ pub(crate) fn next_subword_end(
     point
 }
 
-fn previous_subword_start(
+pub(crate) fn previous_subword_start(
     map: &DisplaySnapshot,
     mut point: DisplayPoint,
     ignore_punctuation: bool,
@@ -1368,7 +1360,7 @@ fn previous_subword_start(
     point
 }
 
-fn previous_subword_end(
+pub(crate) fn previous_subword_end(
     map: &DisplaySnapshot,
     point: DisplayPoint,
     ignore_punctuation: bool,
@@ -1568,7 +1560,7 @@ fn matching(map: &DisplaySnapshot, display_point: DisplayPoint) -> DisplayPoint 
     }
 }
 
-fn find_forward(
+pub(crate) fn find_forward(
     map: &DisplaySnapshot,
     from: DisplayPoint,
     before: bool,
@@ -1604,7 +1596,7 @@ fn find_forward(
     }
 }
 
-fn find_backward(
+pub(crate) fn find_backward(
     map: &DisplaySnapshot,
     from: DisplayPoint,
     after: bool,

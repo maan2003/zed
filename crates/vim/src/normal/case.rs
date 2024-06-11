@@ -145,6 +145,10 @@ where
                         ranges.push(selection.start..selection.end);
                         cursor_positions.push(selection.start..selection.start);
                     }
+                    Mode::HelixNormal => {
+                        ranges.push(selection.start..selection.end);
+                        cursor_positions.push(selection.start..selection.end);
+                    }
                     Mode::VisualBlock => {
                         ranges.push(selection.start..selection.end);
                         if cursor_positions.len() == 0 {
@@ -184,7 +188,8 @@ where
                 })
             });
         });
-        vim.switch_mode(Mode::Normal, true, cx)
+        // FIXME: breaks vim
+        vim.switch_mode(Mode::HelixNormal, true, cx)
     })
 }
 

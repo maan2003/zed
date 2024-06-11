@@ -2,13 +2,16 @@ use std::{fmt::Display, ops::Range, sync::Arc};
 
 use crate::normal::repeat::Replayer;
 use crate::surrounds::SurroundsType;
+use crate::HelixModeSetting;
 use crate::{motion::Motion, object::Object};
 use collections::HashMap;
 use editor::{Anchor, ClipboardSelection};
 use gpui::{Action, ClipboardItem, KeyContext};
 use language::{CursorShape, Selection, TransactionId};
 use serde::{Deserialize, Serialize};
+use settings::Settings;
 use ui::SharedString;
+use ui::WindowContext;
 use workspace::searchable::Direction;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -19,6 +22,7 @@ pub enum Mode {
     Visual,
     VisualLine,
     VisualBlock,
+    HelixNormal,
 }
 
 impl Display for Mode {
@@ -30,6 +34,7 @@ impl Display for Mode {
             Mode::Visual => write!(f, "VISUAL"),
             Mode::VisualLine => write!(f, "VISUAL LINE"),
             Mode::VisualBlock => write!(f, "VISUAL BLOCK"),
+            Mode::HelixNormal => write!(f, "HELIX"),
         }
     }
 }
@@ -38,7 +43,7 @@ impl Mode {
     pub fn is_visual(&self) -> bool {
         match self {
             Mode::Normal | Mode::Insert | Mode::Replace => false,
-            Mode::Visual | Mode::VisualLine | Mode::VisualBlock => true,
+            Mode::Visual | Mode::VisualLine | Mode::VisualBlock | Mode::HelixNormal => true,
         }
     }
 }
@@ -225,6 +230,7 @@ impl EditorState {
             Mode::Replace => CursorShape::Underscore,
             Mode::Visual | Mode::VisualLine | Mode::VisualBlock => CursorShape::Block,
             Mode::Insert => CursorShape::Bar,
+            Mode::HelixNormal => CursorShape::Block,
         }
     }
 
@@ -251,9 +257,12 @@ impl EditorState {
 
     pub fn clip_at_line_ends(&self) -> bool {
         match self.mode {
-            Mode::Insert | Mode::Visual | Mode::VisualLine | Mode::VisualBlock | Mode::Replace => {
-                false
-            }
+            Mode::Insert
+            | Mode::Visual
+            | Mode::VisualLine
+            | Mode::VisualBlock
+            | Mode::Replace
+            | Mode::HelixNormal => false,
             Mode::Normal => true,
         }
     }
@@ -262,17 +271,21 @@ impl EditorState {
         self.operator_stack.last().cloned()
     }
 
-    pub fn keymap_context_layer(&self) -> KeyContext {
+    pub fn keymap_context_layer(&self, cx: &mut WindowContext) -> KeyContext {
         let mut context = KeyContext::new_with_defaults();
         context.set(
             "vim_mode",
             match self.mode {
                 Mode::Normal => "normal",
+                Mode::HelixNormal => "helixnormal",
                 Mode::Visual | Mode::VisualLine | Mode::VisualBlock => "visual",
                 Mode::Insert => "insert",
                 Mode::Replace => "replace",
             },
         );
+        if HelixModeSetting::get_global(cx).0 {
+            context.add("HelixControl");
+        }
 
         if self.vim_controlled() {
             context.add("VimControl");
