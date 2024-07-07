@@ -4594,6 +4594,7 @@ async fn complete_with_anthropic(
             stream: true,
             system: system_message,
             max_tokens: 4092,
+            temperature: 1.0,
         },
         None,
     )

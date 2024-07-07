@@ -3,7 +3,12 @@ use futures::{io::BufReader, stream::BoxStream, AsyncBufReadExt, AsyncReadExt, S
 use http::{AsyncBody, HttpClient, Method, Request as HttpRequest};
 use isahc::config::Configurable;
 use serde::{Deserialize, Serialize};
-use std::{convert::TryFrom, time::Duration};
+use std::{
+    convert::TryFrom,
+    env,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use strum::EnumIter;
 
 pub const ANTHROPIC_API_URL: &'static str = "https://api.anthropic.com";
@@ -95,6 +100,7 @@ pub struct Request {
     pub stream: bool,
     pub system: String,
     pub max_tokens: u32,
+    pub temperature: f32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
@@ -158,6 +164,105 @@ pub enum ContentBlock {
 pub enum TextDelta {
     TextDelta { text: String },
 }
+pub async fn stream_completion_2(
+    client: &dyn HttpClient,
+    api_url: &str,
+    api_key: &str,
+    request: Request,
+    low_speed_timeout: Option<Duration>,
+) -> Result<BoxStream<'static, Result<ResponseEvent>>> {
+    let uri = "https://sourcegraph.com/.api/completions/stream?api-version=1";
+    let mut request_builder = HttpRequest::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header("Origin", "https://sourcegraph.com")
+        .header("Cookie", format!("sgs={}", api_key))
+        .header("Content-Type", "application/json; charset=utf-8");
+
+    if let Some(low_speed_timeout) = low_speed_timeout {
+        request_builder = request_builder.low_speed_timeout(100, low_speed_timeout);
+    }
+
+    let messages = [serde_json::json!({
+        "text": request.system,
+        "speaker": "system"
+    })]
+    .into_iter()
+    .chain(request.messages.iter().map(|msg| {
+        serde_json::json!({
+            "text": msg.content,
+            "speaker": match msg.role {
+                Role::User => "human",
+                Role::Assistant => "assistant",
+            }
+        })
+    }))
+    .collect::<Vec<_>>();
+
+    let request_body = serde_json::json!({
+        "temperature": request.temperature,
+        "topK": -1,
+        "topP": -1,
+        "model": format!("anthropic/{}", request.model.id()),
+        "maxTokensToSample": request.max_tokens.min(4000),
+        "messages": messages,
+    });
+    dbg!(&request_body);
+
+    let request = request_builder.body(AsyncBody::from(serde_json::to_string(&request_body)?))?;
+    let mut response = client.send(request).await?;
+
+    if response.status().is_success() {
+        let reader = BufReader::new(response.into_body());
+        let last_text = Arc::new(Mutex::new(String::new()));
+        Ok(reader
+            .lines()
+            .filter_map(move |line| {
+                let last_text = Arc::clone(&last_text);
+                async move {
+                    match line {
+                        Ok(line) => {
+                            let line = line.strip_prefix("data: ")?;
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
+                                if let Some(completion) =
+                                    json.get("completion").and_then(|c| c.as_str())
+                                {
+                                    let text = completion
+                                        .strip_prefix(&*last_text.lock().unwrap())
+                                        .unwrap_or(completion)
+                                        .to_owned();
+                                    *last_text.lock().unwrap() = completion.to_owned();
+                                    Some(Ok(ResponseEvent::ContentBlockDelta {
+                                        index: 0,
+                                        delta: TextDelta::TextDelta { text },
+                                    }))
+                                } else if json.as_object().map_or(false, |x| x.is_empty()) {
+                                    return None;
+                                } else {
+                                    Some(Err(anyhow!("Invalid response format: {line}")))
+                                }
+                            } else {
+                                Some(Err(anyhow!("Failed to parse JSON")))
+                            }
+                        }
+                        Err(error) => Some(Err(anyhow!(error))),
+                    }
+                }
+            })
+            .boxed())
+    } else {
+        let mut body = Vec::new();
+        response.body_mut().read_to_end(&mut body).await?;
+
+        let body_str = std::str::from_utf8(&body)?;
+
+        Err(anyhow!(
+            "Failed to connect to API: {} {}",
+            response.status(),
+            body_str,
+        ))
+    }
+}
 
 pub async fn stream_completion(
     client: &dyn HttpClient,
@@ -166,6 +271,9 @@ pub async fn stream_completion(
     request: Request,
     low_speed_timeout: Option<Duration>,
 ) -> Result<BoxStream<'static, Result<ResponseEvent>>> {
+    if env::var("SG_PROXY").is_ok() {
+        return stream_completion_2(client, api_url, api_key, request, low_speed_timeout).await;
+    }
     let uri = format!("{api_url}/v1/messages");
     let mut request_builder = HttpRequest::builder()
         .method(Method::POST)

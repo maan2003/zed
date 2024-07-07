@@ -209,6 +209,7 @@ impl AnthropicCompletionProvider {
             stream: true,
             system: system_message,
             max_tokens: 4092,
+            temperature: request.temperature,
         }
     }
 }
