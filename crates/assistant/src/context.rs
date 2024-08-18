@@ -2691,7 +2691,13 @@ pub fn parse_next_edit_suggestion(lines: &mut rope::Lines) -> Option<ParsedEditS
                 start_offset,
                 old_text_start_offset,
             } => {
-                if message_line == "---" {
+                if message_line == "<<<<<<< SEARCH" {
+                    state = EditParsingState::InOldText{
+                        path,
+                        start_offset,
+                        old_text_start_offset: lines.offset(),
+                    };
+                } else if message_line == "=======" {
                     state = EditParsingState::InNewText {
                         path,
                         start_offset,
@@ -2712,10 +2718,10 @@ pub fn parse_next_edit_suggestion(lines: &mut rope::Lines) -> Option<ParsedEditS
                 old_text_range,
                 new_text_start_offset,
             } => {
-                if message_line == "```" {
+                if message_line == ">>>>>>> REPLACE" {
                     return Some(ParsedEditSuggestion {
                         path,
-                        outer_range: start_offset..offset + "```".len(),
+                        outer_range: start_offset..lines.offset() + "```".len(),
                         old_text_range,
                         new_text_range: new_text_start_offset..offset,
                     });
