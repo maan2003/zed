@@ -404,6 +404,7 @@ dependencies = [
  "similar",
  "smallvec",
  "smol",
+ "strsim",
  "telemetry_events",
  "terminal",
  "terminal_view",

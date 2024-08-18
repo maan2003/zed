@@ -1,21 +1,10 @@
 use crate::{
-    assistant_settings::{AssistantDockPosition, AssistantSettings},
-    humanize_token_count,
-    prompt_library::open_prompt_library,
-    prompts::PromptBuilder,
-    slash_command::{
+    assistant_settings::{AssistantDockPosition, AssistantSettings}, humanize_token_count, parse_next_edit_suggestion, prompt_library::open_prompt_library, prompts::PromptBuilder, slash_command::{
         default_command::DefaultSlashCommand,
         docs_command::{DocsSlashCommand, DocsSlashCommandArgs},
         file_command::codeblock_fence_for_path,
         SlashCommandCompletionProvider, SlashCommandRegistry,
-    },
-    slash_command_picker,
-    terminal_inline_assistant::TerminalInlineAssistant,
-    Assist, ConfirmCommand, Context, ContextEvent, ContextId, ContextStore, CycleMessageRole,
-    DeployHistory, DeployPromptLibrary, InlineAssist, InlineAssistId, InlineAssistant,
-    InsertIntoEditor, MessageStatus, ModelSelector, PendingSlashCommand, PendingSlashCommandStatus,
-    QuoteSelection, RemoteContextMetadata, SavedContextMetadata, Split, ToggleFocus,
-    ToggleModelSelector, WorkflowStepResolution, WorkflowStepView,
+    }, slash_command_picker, terminal_inline_assistant::TerminalInlineAssistant, ApplyEdit, Assist, ConfirmCommand, Context, ContextEvent, ContextId, ContextStore, CycleMessageRole, DeployHistory, DeployPromptLibrary, EditSuggestion, InlineAssist, InlineAssistId, InlineAssistant, InsertIntoEditor, MessageStatus, ModelSelector, PendingSlashCommand, PendingSlashCommandStatus, QuoteSelection, RemoteContextMetadata, SavedContextMetadata, Split, ToggleFocus, ToggleModelSelector, WorkflowStepResolution, WorkflowStepView
 };
 use crate::{ContextStoreEvent, ModelPickerDelegate};
 use anyhow::{anyhow, Result};
@@ -43,7 +32,8 @@ use gpui::{
 };
 use indexed_docs::IndexedDocsStore;
 use language::{
-    language_settings::SoftWrap, Capability, LanguageRegistry, LspAdapterDelegate, Point, ToOffset,
+    language_settings::SoftWrap, AutoindentMode, Buffer, Capability, LanguageRegistry, LspAdapterDelegate, Point, ToOffset,
+    OffsetRangeExt
 };
 use language_model::{
     provider::cloud::PROVIDER_ID, LanguageModelProvider, LanguageModelProviderId,
@@ -51,7 +41,7 @@ use language_model::{
 };
 use multi_buffer::MultiBufferRow;
 use picker::{Picker, PickerDelegate};
-use project::{Project, ProjectLspAdapterDelegate};
+use project::{Project, ProjectLspAdapterDelegate, ProjectPath, ProjectTransaction};
 use search::{buffer_search::DivRegistrar, BufferSearchBar};
 use settings::{update_settings_file, Settings};
 use smol::stream::StreamExt;
@@ -2304,6 +2294,40 @@ impl ContextEditor {
             ContextEvent::ShowAssistError(error_message) => {
                 self.error_message = Some(error_message.clone());
             }
+            ContextEvent::EditSuggestionsChanged => {
+                self.editor.update(cx, |editor, cx| {
+                    let buffer = editor.buffer().read(cx).snapshot(cx);
+                    let excerpt_id = *buffer.as_singleton().unwrap().0;
+                    let context = self.context.read(cx);
+                    let highlighted_rows = context
+                        .edit_suggestions()
+                        .iter()
+                        .map(|suggestion| {
+                            let start = buffer
+                                .anchor_in_excerpt(excerpt_id, suggestion.source_range.start)
+                                .unwrap();
+                            let end = buffer
+                                .anchor_in_excerpt(excerpt_id, suggestion.source_range.end)
+                                .unwrap();
+                            start..=end
+                        })
+                        .collect::<Vec<_>>();
+
+                    editor.clear_row_highlights::<EditSuggestion>();
+                    for range in highlighted_rows {
+                        editor.highlight_rows::<EditSuggestion>(
+                            range,
+                            Some(
+                                cx.theme()
+                                    .colors()
+                                    .editor_document_highlight_read_background,
+                            ),
+                            false,
+                            cx,
+                        );
+                    }
+                });
+            }
         }
     }
 
@@ -3459,6 +3483,191 @@ impl ContextEditor {
         });
     }
 
+    fn apply_edit(&mut self, _: &ApplyEdit, cx: &mut ViewContext<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let project = workspace.read(cx).project().clone();
+
+        struct Edit {
+            old_text: String,
+            new_text: String,
+        }
+
+        let context = self.context.read(cx);
+        let context_buffer = context.buffer().read(cx);
+        let context_buffer_snapshot = context_buffer.snapshot();
+
+        let selections = self.editor.read(cx).selections.disjoint_anchors();
+        let mut selections = selections.iter().peekable();
+        let selected_suggestions = context
+            .edit_suggestions()
+            .iter()
+            .filter(|suggestion| {
+                while let Some(selection) = selections.peek() {
+                    if selection
+                        .end
+                        .text_anchor
+                        .cmp(&suggestion.source_range.start, context_buffer)
+                        .is_lt()
+                    {
+                        selections.next();
+                        continue;
+                    }
+                    if selection
+                        .start
+                        .text_anchor
+                        .cmp(&suggestion.source_range.end, context_buffer)
+                        .is_gt()
+                    {
+                        break;
+                    }
+                    return true;
+                }
+                false
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut opened_buffers: HashMap<PathBuf, Task<Result<Model<Buffer>>>> = HashMap::default();
+        project.update(cx, |project, cx| {
+            use std::path::Path;
+            for suggestion in &selected_suggestions {
+                opened_buffers
+                    .entry(suggestion.full_path.clone())
+                    .or_insert_with(|| {
+                        let path = &suggestion.full_path;
+                        let project_path = project
+                            .find_project_path(Path::new(&path), cx)
+                            .or_else(|| {
+                                // If we couldn't find a project path for it, put it in the active worktree
+                                // so that when we create the buffer, it can be saved.
+                                let worktree = project
+                                    .active_entry()
+                                    .and_then(|entry_id| project.worktree_for_entry(entry_id, cx))
+                                    .or_else(|| project.worktrees(cx).next())?;
+                                let worktree = worktree.read(cx);
+
+                                Some(ProjectPath {
+                                    worktree_id: worktree.id(),
+                                    path: Arc::from(Path::new(&path)),
+                                })
+                            }).unwrap();
+                        project.open_buffer(project_path, cx)
+                    });
+            }
+        });
+
+        cx.spawn(|this, mut cx| async move {
+            let mut buffers_by_full_path = HashMap::default();
+            for (full_path, buffer) in opened_buffers {
+                if let Some(buffer) = buffer.await.log_err() {
+                    buffers_by_full_path.insert(full_path, buffer);
+                }
+            }
+
+            let mut suggestions_by_buffer = HashMap::default();
+            cx.update(|cx| {
+                for suggestion in selected_suggestions {
+                    if let Some(buffer) = buffers_by_full_path.get(&suggestion.full_path) {
+                        let (_, edits) = suggestions_by_buffer
+                            .entry(buffer.clone())
+                            .or_insert_with(|| (buffer.read(cx).snapshot(), Vec::new()));
+
+                        let mut lines = context_buffer_snapshot
+                            .as_rope()
+                            .chunks_in_range(
+                                suggestion.source_range.to_offset(&context_buffer_snapshot),
+                            )
+                            .lines();
+                        if let Some(suggestion) = parse_next_edit_suggestion(&mut lines) {
+                            let old_text = context_buffer_snapshot
+                                .text_for_range(suggestion.old_text_range)
+                                .collect();
+                            let new_text = context_buffer_snapshot
+                                .text_for_range(suggestion.new_text_range)
+                                .collect();
+                            edits.push(Edit { old_text, new_text });
+                        }
+                    }
+                }
+            })?;
+
+            let edits_by_buffer = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut result = HashMap::default();
+                    for (buffer, (snapshot, suggestions)) in suggestions_by_buffer {
+                        let edits =
+                            result
+                                .entry(buffer)
+                                .or_insert(Vec::<(Range<language::Anchor>, _)>::new());
+                        for suggestion in suggestions {
+                            if let Some(range) =
+                                fuzzy_search_lines(snapshot.as_rope(), &suggestion.old_text)
+                            {
+                                let edit_start = snapshot.anchor_after(range.start);
+                                let edit_end = snapshot.anchor_before(range.end);
+                                if let Err(ix) = edits.binary_search_by(|(range, _)| {
+                                    range.start.cmp(&edit_start, &snapshot)
+                                }) {
+                                    edits.insert(
+                                        ix,
+                                        (edit_start..edit_end, suggestion.new_text.clone()),
+                                    );
+                                }
+                            } else {
+                                log::info!(
+                                    "assistant edit did not match any text in buffer {:?}",
+                                    &suggestion.old_text
+                                );
+                            }
+                        }
+                    }
+                    result
+                })
+                .await;
+
+            let mut project_transaction = ProjectTransaction::default();
+            let (editor, workspace, title) = this.update(&mut cx, |this, cx| {
+                for (buffer_handle, edits) in edits_by_buffer {
+                    buffer_handle.update(cx, |buffer, cx| {
+                        buffer.start_transaction();
+                        buffer.edit(
+                            edits,
+                            Some(AutoindentMode::Block {
+                                original_indent_columns: Vec::new(),
+                            }),
+                            cx,
+                        );
+                        buffer.end_transaction(cx);
+                        if let Some(transaction) = buffer.finalize_last_transaction() {
+                            project_transaction
+                                .0
+                                .insert(buffer_handle.clone(), transaction.clone());
+                        }
+                    });
+                }
+
+                (
+                    this.editor.downgrade(),
+                    this.workspace.clone(),
+                    this.title(cx).to_string(),
+                )
+            })?;
+
+            Editor::open_project_transaction(
+                &editor,
+                workspace,
+                project_transaction,
+                format!("Edits from {}", title),
+                cx,
+            )
+            .await
+        })
+        .detach_and_log_err(cx);
+    }
+
     fn save(&mut self, _: &Save, cx: &mut ViewContext<Self>) {
         self.context.update(cx, |context, cx| {
             context.save(Some(Duration::from_millis(500)), self.fs.clone(), cx)
@@ -3660,6 +3869,7 @@ impl Render for ContextEditor {
             .capture_action(cx.listener(ContextEditor::confirm_command))
             .on_action(cx.listener(ContextEditor::assist))
             .on_action(cx.listener(ContextEditor::split))
+            .on_action(cx.listener(ContextEditor::apply_edit))
             .size_full()
             .children(self.render_notice(cx))
             .child(
@@ -4795,4 +5005,175 @@ fn configuration_error(cx: &AppContext) -> Option<ConfigurationError> {
     }
 
     None
+}
+
+use language::Rope;
+
+/// Search the given buffer for the given substring, ignoring any differences
+/// in line indentation between the query and the buffer.
+///
+/// Returns a vector of ranges of byte offsets in the buffer corresponding
+/// to the entire lines of the buffer.
+pub fn fuzzy_search_lines(haystack: &Rope, needle: &str) -> Option<Range<usize>> {
+    const SIMILARITY_THRESHOLD: f64 = 0.8;
+
+    let mut best_match: Option<(Range<usize>, f64)> = None; // (range, score)
+    let mut haystack_lines = haystack.chunks().lines();
+    let mut haystack_line_start = 0;
+    while let Some(mut haystack_line) = haystack_lines.next() {
+        let next_haystack_line_start = haystack_line_start + haystack_line.len() + 1;
+        let mut advanced_to_next_haystack_line = false;
+
+        let mut matched = true;
+        let match_start = haystack_line_start;
+        let mut match_end = next_haystack_line_start;
+        let mut match_score = 0.0;
+        let mut needle_lines = needle.lines().peekable();
+        while let Some(needle_line) = needle_lines.next() {
+            let similarity = line_similarity(haystack_line, needle_line);
+            if similarity >= SIMILARITY_THRESHOLD {
+                match_end = haystack_lines.offset();
+                match_score += similarity;
+
+                if needle_lines.peek().is_some() {
+                    if let Some(next_haystack_line) = haystack_lines.next() {
+                        advanced_to_next_haystack_line = true;
+                        haystack_line = next_haystack_line;
+                    } else {
+                        matched = false;
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            } else {
+                matched = false;
+                break;
+            }
+        }
+
+        if matched
+            && best_match
+                .as_ref()
+                .map(|(_, best_score)| match_score > *best_score)
+                .unwrap_or(true)
+        {
+            best_match = Some((match_start..match_end, match_score));
+        }
+
+        if advanced_to_next_haystack_line {
+            haystack_lines.seek(next_haystack_line_start);
+        }
+        haystack_line_start = next_haystack_line_start;
+    }
+
+    best_match.map(|(range, _)| range)
+}
+
+/// Calculates the similarity between two lines, ignoring leading and trailing whitespace,
+/// using the Jaro-Winkler distance.
+///
+/// Returns a value between 0.0 and 1.0, where 1.0 indicates an exact match.
+fn line_similarity(line1: &str, line2: &str) -> f64 {
+    strsim::jaro_winkler(line1.trim(), line2.trim())
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use gpui::{AppContext, Context as _};
+    use language::Buffer;
+    use unindent::Unindent as _;
+    use util::test::marked_text_ranges;
+
+    #[gpui::test]
+    fn test_fuzzy_search_lines(cx: &mut AppContext) {
+        let (text, expected_ranges) = marked_text_ranges(
+            &r#"
+            fn main() {
+                if a() {
+                    assert_eq!(
+                        1 + 2,
+                        does_not_match,
+                    );
+                }
+
+                println!("hi");
+
+                assert_eq!(
+                    1 + 2,
+                    3,
+                ); // this last line does not match
+
+            «    assert_eq!(
+                    1 + 2,
+                    3,
+                );
+            »
+
+            «    assert_eq!(
+                    "something",
+                    "else",
+                );
+            »
+            }
+            "#
+            .unindent(),
+            false,
+        );
+
+        let buffer = cx.new_model(|cx| Buffer::local(&text, cx));
+        let snapshot = buffer.read_with(cx, |buffer, _| buffer.snapshot());
+
+        let actual_range = fuzzy_search_lines(
+            snapshot.as_rope(),
+            &"
+            assert_eq!(
+                1 + 2,
+                3,
+            );
+            "
+            .unindent(),
+        )
+        .unwrap();
+        assert_eq!(actual_range, expected_ranges[0]);
+
+        let actual_range = fuzzy_search_lines(
+            snapshot.as_rope(),
+            &"
+            assert_eq!(
+                1 + 2,
+                3,
+            );
+            "
+            .unindent(),
+        )
+        .unwrap();
+        assert_eq!(actual_range, expected_ranges[0]);
+
+        let actual_range = fuzzy_search_lines(
+            snapshot.as_rope(),
+            &"
+            asst_eq!(
+                \"something\",
+                \"els\"
+            )
+            "
+            .unindent(),
+        )
+        .unwrap();
+        assert_eq!(actual_range, expected_ranges[1]);
+
+        let actual_range = fuzzy_search_lines(
+            snapshot.as_rope(),
+            &"
+            assert_eq!(
+                2 + 1,
+                3,
+            );
+            "
+            .unindent(),
+        );
+        assert_eq!(actual_range, None);
+    }
 }

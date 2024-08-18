@@ -297,6 +297,7 @@ pub enum ContextEvent {
         run_commands_in_output: bool,
     },
     Operation(ContextOperation),
+    EditSuggestionsChanged,
 }
 
 #[derive(Clone, Default, Debug)]
@@ -402,6 +403,19 @@ pub struct ImageAnchor {
     pub image: Shared<Task<Option<LanguageModelImage>>>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct EditSuggestion {
+    pub source_range: Range<language::Anchor>,
+    pub full_path: PathBuf,
+}
+
+pub struct ParsedEditSuggestion {
+    pub path: PathBuf,
+    pub outer_range: Range<usize>,
+    pub old_text_range: Range<usize>,
+    pub new_text_range: Range<usize>,
+}
+
 struct PendingCompletion {
     id: usize,
     assistant_message_id: MessageId,
@@ -444,6 +458,8 @@ pub struct Context {
     telemetry: Option<Arc<Telemetry>>,
     language_registry: Arc<LanguageRegistry>,
     workflow_steps: Vec<WorkflowStepEntry>,
+    edit_suggestions: Vec<EditSuggestion>,
+    pending_edit_suggestion_parse: Option<Task<()>>,
     edits_since_last_workflow_step_prune: language::Subscription,
     project: Option<Model<Project>>,
     prompt_builder: Arc<PromptBuilder>,
@@ -527,6 +543,8 @@ impl Context {
             workflow_steps: Vec::new(),
             edits_since_last_workflow_step_prune,
             prompt_builder,
+            edit_suggestions: Vec::new(),
+            pending_edit_suggestion_parse: None
         };
 
         let first_message_id = MessageId(clock::Lamport {
@@ -942,6 +960,7 @@ impl Context {
             language::Event::Edited => {
                 self.count_remaining_tokens(cx);
                 self.reparse_slash_commands(cx);
+                self.reparse_edit_suggestions(cx);
                 // Use `inclusive = true` to invalidate a step when an edit occurs
                 // at the start/end of a parsed step.
                 self.prune_invalid_workflow_steps(true, cx);
@@ -2274,6 +2293,69 @@ impl Context {
         summary.text = custom_summary;
         cx.emit(ContextEvent::SummaryChanged);
     }
+
+    pub fn edit_suggestions(&self) -> &[EditSuggestion] {
+        &self.edit_suggestions
+    }
+
+    fn reparse_edit_suggestions(&mut self, cx: &mut ModelContext<Self>) {
+        self.pending_edit_suggestion_parse = Some(cx.spawn(|this, mut cx| async move {
+            cx.background_executor()
+                .timer(Duration::from_millis(200))
+                .await;
+
+            this.update(&mut cx, |this, cx| {
+                this.reparse_edit_suggestions_in_range(0..this.buffer.read(cx).len(), cx);
+            })
+            .ok();
+        }));
+    }
+
+    fn reparse_edit_suggestions_in_range(
+        &mut self,
+        range: Range<usize>,
+        cx: &mut ModelContext<Self>,
+    ) {
+        self.buffer.update(cx, |buffer, _| {
+            let range_start = buffer.anchor_before(range.start);
+            let range_end = buffer.anchor_after(range.end);
+            let start_ix = self
+                .edit_suggestions
+                .binary_search_by(|probe| {
+                    probe
+                        .source_range
+                        .end
+                        .cmp(&range_start, buffer)
+                        .then(Ordering::Greater)
+                })
+                .unwrap_err();
+            let end_ix = self
+                .edit_suggestions
+                .binary_search_by(|probe| {
+                    probe
+                        .source_range
+                        .start
+                        .cmp(&range_end, buffer)
+                        .then(Ordering::Less)
+                })
+                .unwrap_err();
+
+            let mut new_edit_suggestions = Vec::new();
+            let mut message_lines = buffer.as_rope().chunks_in_range(range).lines();
+            while let Some(suggestion) = parse_next_edit_suggestion(&mut message_lines) {
+                let start_anchor = buffer.anchor_after(suggestion.outer_range.start);
+                let end_anchor = buffer.anchor_before(suggestion.outer_range.end);
+                new_edit_suggestions.push(EditSuggestion {
+                    source_range: start_anchor..end_anchor,
+                    full_path: suggestion.path,
+                });
+            }
+            self.edit_suggestions
+                .splice(start_ix..end_ix, new_edit_suggestions);
+        });
+        cx.emit(ContextEvent::EditSuggestionsChanged);
+        cx.notify();
+    }
 }
 
 #[derive(Debug, Default)]
@@ -2584,4 +2666,84 @@ pub struct SavedContextMetadata {
     pub title: String,
     pub path: PathBuf,
     pub mtime: chrono::DateTime<chrono::Local>,
+}
+
+pub fn parse_next_edit_suggestion(lines: &mut rope::Lines) -> Option<ParsedEditSuggestion> {
+    let mut state = EditParsingState::None;
+    loop {
+        let offset = lines.offset();
+        let message_line = lines.next()?;
+        match state {
+            EditParsingState::None => {
+                if let Some(rest) = message_line.strip_prefix("```edit ") {
+                    let path = rest.trim();
+                    if !path.is_empty() {
+                        state = EditParsingState::InOldText {
+                            path: PathBuf::from(path),
+                            start_offset: offset,
+                            old_text_start_offset: lines.offset(),
+                        };
+                    }
+                }
+            }
+            EditParsingState::InOldText {
+                path,
+                start_offset,
+                old_text_start_offset,
+            } => {
+                if message_line == "---" {
+                    state = EditParsingState::InNewText {
+                        path,
+                        start_offset,
+                        old_text_range: old_text_start_offset..offset,
+                        new_text_start_offset: lines.offset(),
+                    };
+                } else {
+                    state = EditParsingState::InOldText {
+                        path,
+                        start_offset,
+                        old_text_start_offset,
+                    };
+                }
+            }
+            EditParsingState::InNewText {
+                path,
+                start_offset,
+                old_text_range,
+                new_text_start_offset,
+            } => {
+                if message_line == "```" {
+                    return Some(ParsedEditSuggestion {
+                        path,
+                        outer_range: start_offset..offset + "```".len(),
+                        old_text_range,
+                        new_text_range: new_text_start_offset..offset,
+                    });
+                } else {
+                    state = EditParsingState::InNewText {
+                        path,
+                        start_offset,
+                        old_text_range,
+                        new_text_start_offset,
+                    };
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum EditParsingState {
+    None,
+    InOldText {
+        path: PathBuf,
+        start_offset: usize,
+        old_text_start_offset: usize,
+    },
+    InNewText {
+        path: PathBuf,
+        start_offset: usize,
+        old_text_range: Range<usize>,
+        new_text_start_offset: usize,
+    },
 }

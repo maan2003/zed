@@ -64,6 +64,7 @@ actions!(
         DeployPromptLibrary,
         ConfirmCommand,
         ToggleModelSelector,
+        ApplyEdit,
     ]
 );
 
