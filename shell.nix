@@ -17,6 +17,8 @@ else
       pkg-config
       protobuf
       rustPlatform.bindgenHook
+      cargo
+      rust-analyzer
     ];
 
     buildInputs = with pkgs; [
@@ -53,5 +55,6 @@ else
         ];
       };
       PROTOC = "${pkgs.protobuf}/bin/protoc";
+      RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
     };
   }

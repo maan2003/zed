@@ -83,6 +83,9 @@ pub enum ContextOperation {
         version: clock::Global,
     },
     BufferOperation(language::Operation),
+    DeleteLastMessage {
+        version: clock::Global,
+    },
 }
 
 impl ContextOperation {
@@ -720,6 +723,9 @@ impl Context {
         for op in ops {
             match op {
                 ContextOperation::BufferOperation(buffer_op) => buffer_ops.push(buffer_op),
+                ContextOperation::DeleteLastMessage { .. } => {
+                    self.delete_last_message(cx);
+                },
                 op @ _ => self.pending_ops.push(op),
             }
         }
@@ -1689,6 +1695,16 @@ impl Context {
         }
     }
 
+    pub fn delete_last_message(&mut self, cx: &mut ModelContext<Self>) -> Option<MessageId> {
+        let deleted_message_id = self.delete_last_message(cx);
+        if deleted_message_id.is_some() {
+            let version = self.version.clone();
+            let operation = ContextOperation::DeleteLastMessage { version };
+            self.push_op(operation, cx);
+        }
+        deleted_message_id
+    }
+
     pub fn cycle_message_roles(&mut self, ids: HashSet<MessageId>, cx: &mut ModelContext<Self>) {
         for id in ids {
             if let Some(metadata) = self.messages_metadata.get(&id) {
@@ -2112,6 +2128,31 @@ impl Context {
 
     pub fn messages<'a>(&'a self, cx: &'a AppContext) -> impl 'a + Iterator<Item = Message> {
         self.messages_from_anchors(self.message_anchors.iter(), cx)
+    }
+
+    pub fn delete_last_message(&mut self, cx: &mut ModelContext<Self>) -> Option<MessageId> {
+        if self.message_anchors.len() <= 1 {
+            return None; // Don't delete the first message
+        }
+
+        let last_message = self.message_anchors.pop()?;
+        let message_id = last_message.id;
+
+        // Remove the message metadata
+        self.messages_metadata.remove(&message_id);
+
+        // Remove the message content from the buffer
+        self.buffer.update(cx, |buffer, cx| {
+            let start = last_message.start.to_offset(buffer);
+            let end = buffer.len();
+            buffer.edit([(start..end, "")], None, cx);
+        });
+
+        // Emit events and update state
+        cx.emit(ContextEvent::MessagesEdited);
+        self.count_remaining_tokens(cx);
+
+        Some(message_id)
     }
 
     pub fn messages_from_iters<'a>(
