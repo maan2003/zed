@@ -1266,6 +1266,7 @@ impl CompletionsMenu {
     }
 
     pub async fn filter(&mut self, query: Option<&str>, executor: BackgroundExecutor) {
+        let start = std::time::Instant::now();
         let mut matches = if let Some(query) = query {
             fuzzy::match_strings(
                 &self.match_candidates,
@@ -4258,12 +4259,6 @@ impl Editor {
         let sort_completions = provider.sort_completions();
 
         let id = post_inc(&mut self.next_completion_id);
-        dbg!(
-            id,
-            &options.trigger,
-            &should_cancel_previous,
-            &self.completion_tasks,
-        );
         if should_cancel_previous {
             self.completion_tasks = CompletionsTasks::None;
             // maybe even close the menu?
@@ -4273,9 +4268,6 @@ impl Editor {
                 // TODO: if a menu exists already, then filter it before wait for completions.
                 // looks like this is something else filtering the completion menu.
                 let completions = completions.await.log_err();
-                cx.background_executor()
-                    .timer(Duration::from_millis(1000))
-                    .await;
                 let menu = if let Some(completions) = completions {
                     let mut menu = CompletionsMenu {
                         id,
@@ -4305,7 +4297,7 @@ impl Editor {
                         Self::completion_query(&this.buffer.read(cx).read(cx), position)
                     })?;
                     let query = completion_query.or(query);
-                    menu.filter(dbg!(query.as_deref()), cx.background_executor().clone())
+                    menu.filter(query.as_deref(), cx.background_executor().clone())
                         .await;
 
                     if menu.matches.is_empty() {
@@ -4421,7 +4413,7 @@ impl Editor {
                 backup_task,
             } => {
                 // replace the latest task
-                self.completion_tasks = &CompletionsTasks::WithBackup {
+                self.completion_tasks = CompletionsTasks::WithBackup {
                     latest_id: id,
                     latest_task: task,
                     backup_id,
