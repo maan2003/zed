@@ -29,7 +29,7 @@ use std::{
         atomic::{AtomicU32, Ordering::SeqCst},
         Arc,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tempfile::TempDir;
 
@@ -158,113 +158,113 @@ impl SshSession {
         let (incoming_tx, incoming_rx) = mpsc::unbounded::<Envelope>();
 
         let socket = client_state.socket.clone();
-        run_cmd(socket.ssh_command(&remote_binary_path).arg("version")).await?;
 
-        let mut remote_server_child = socket
-            .ssh_command(format!(
-                "RUST_LOG={} RUST_BACKTRACE={} {:?} run",
-                std::env::var("RUST_LOG").unwrap_or_default(),
-                std::env::var("RUST_BACKTRACE").unwrap_or_default(),
-                remote_binary_path,
-            ))
-            .spawn()
-            .context("failed to spawn remote server")?;
+        let mut remote_server_child = if let Ok(proc) = std::env::var("ZED_REMOTE_PROC") {
+            process::Command::new(proc)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .context("failed to start remote server")?
+        } else {
+            socket
+                .ssh_command(format!(
+                    "RUST_LOG={} RUST_BACKTRACE={} {:?} run",
+                    std::env::var("RUST_LOG").unwrap_or_default(),
+                    std::env::var("RUST_BACKTRACE").unwrap_or_default(),
+                    "/home/manmeet/.local/zed-remote-server-dev",
+                ))
+                .spawn()
+                .context("failed to spawn remote server")?
+        };
         let mut child_stderr = remote_server_child.stderr.take().unwrap();
         let mut child_stdout = remote_server_child.stdout.take().unwrap();
         let mut child_stdin = remote_server_child.stdin.take().unwrap();
 
+        log::error!("started");
         let executor = cx.background_executor().clone();
-        executor.clone().spawn(async move {
+        use std::time::Duration;
+        let outgoing_task = async move {
             let mut stdin_buffer = Vec::new();
-            let mut stdout_buffer = Vec::new();
-            let mut stderr_buffer = Vec::new();
-            let mut stderr_offset = 0;
-
-            loop {
-                stdout_buffer.resize(MESSAGE_LEN_SIZE, 0);
-                stderr_buffer.resize(stderr_offset + 1024, 0);
-
-                select_biased! {
-                    outgoing = outgoing_rx.next().fuse() => {
-                        let Some(outgoing) = outgoing else {
-                            return anyhow::Ok(());
-                        };
-
-                        write_message(&mut child_stdin, &mut stdin_buffer, outgoing).await?;
-                    }
-
-                    request = spawn_process_rx.next().fuse() => {
-                        let Some(request) = request else {
-                            return Ok(());
-                        };
-
-                        log::info!("spawn process: {:?}", request.command);
-                        let child = client_state.socket
-                            .ssh_command(&request.command)
-                            .spawn()
-                            .context("failed to create channel")?;
-                        request.process_tx.send(child).ok();
-                    }
-
-                    result = child_stdout.read(&mut stdout_buffer).fuse() => {
-                        match result {
-                            Ok(len) => {
-                                if len == 0 {
-                                    child_stdin.close().await?;
-                                    let status = remote_server_child.status().await?;
-                                    if !status.success() {
-                                        log::info!("channel exited with status: {status:?}");
-                                    }
-                                    return Ok(());
-                                }
-
-                                if len < stdout_buffer.len() {
-                                    child_stdout.read_exact(&mut stdout_buffer[len..]).await?;
-                                }
-
-                                let message_len = message_len_from_buffer(&stdout_buffer);
-                                match read_message_with_len(&mut child_stdout, &mut stdout_buffer, message_len).await {
-                                    Ok(envelope) => {
-                                        incoming_tx.unbounded_send(envelope).ok();
-                                    }
-                                    Err(error) => {
-                                        log::error!("error decoding message {error:?}");
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                Err(anyhow!("error reading stdout: {error:?}"))?;
-                            }
-                        }
-                    }
-
-                    result = child_stderr.read(&mut stderr_buffer[stderr_offset..]).fuse() => {
-                        match result {
-                            Ok(len) => {
-                                stderr_offset += len;
-                                let mut start_ix = 0;
-                                while let Some(ix) = stderr_buffer[start_ix..stderr_offset].iter().position(|b| b == &b'\n') {
-                                    let line_ix = start_ix + ix;
-                                    let content = &stderr_buffer[start_ix..line_ix];
-                                    start_ix = line_ix + 1;
-                                    if let Ok(mut record) = serde_json::from_slice::<LogRecord>(content) {
-                                        record.message = format!("(remote) {}", record.message);
-                                        record.log(log::logger())
-                                    } else {
-                                        eprintln!("(remote) {}", String::from_utf8_lossy(content));
-                                    }
-                                }
-                                stderr_buffer.drain(0..start_ix);
-                                stderr_offset -= start_ix;
-                            }
-                            Err(error) => {
-                                Err(anyhow!("error reading stderr: {error:?}"))?;
-                            }
-                        }
-                    }
+            while let Some(outgoing) = outgoing_rx.next().await {
+                let start = std::time::Instant::now();
+                write_message(&mut child_stdin, &mut stdin_buffer, outgoing).await?;
+                let time = start.elapsed();
+                if time > Duration::from_millis(20) {
+                    log::error!("## took {:#?} to write", time);
                 }
             }
-        }).detach();
+            anyhow::Ok(())
+        };
+        let spawn_process_task = async move {
+            while let Some(request) = spawn_process_rx.next().await {
+                log::info!("spawn process: {:?}", request.command);
+                let child = client_state
+                    .socket
+                    .ssh_command(&request.command)
+                    .spawn()
+                    .context("failed to create channel")?;
+                request.process_tx.send(child).ok();
+            }
+            anyhow::Ok(())
+        };
+        executor.clone().spawn(outgoing_task).detach();
+        executor.clone().spawn(spawn_process_task).detach();
+        executor
+            .clone()
+            .spawn(async move {
+                let mut stdout_buffer = Vec::new();
+                let mut stderr_buffer = Vec::new();
+                let mut stderr_offset = 0;
+
+                use std::time::Duration;
+                loop {
+                    stdout_buffer.resize(MESSAGE_LEN_SIZE, 0);
+                    stderr_buffer.resize(stderr_offset + 1024, 0);
+
+                    let result = child_stdout.read(&mut stdout_buffer).await;
+                    let start = std::time::Instant::now();
+                    match result {
+                        Ok(len) => {
+                            if len == 0 {
+                                let status = remote_server_child.status().await?;
+                                if !status.success() {
+                                    log::info!("channel exited with status: {status:?}");
+                                }
+                                return anyhow::Ok(());
+                            }
+
+                            if len < stdout_buffer.len() {
+                                child_stdout.read_exact(&mut stdout_buffer[len..]).await?;
+                            }
+
+                            let message_len = message_len_from_buffer(&stdout_buffer);
+                            match read_message_with_len(
+                                &mut child_stdout,
+                                &mut stdout_buffer,
+                                message_len,
+                            )
+                            .await
+                            {
+                                Ok(envelope) => {
+                                    incoming_tx.unbounded_send(envelope).ok();
+                                }
+                                Err(error) => {
+                                    log::error!("error decoding message {error:?}");
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            Err(anyhow!("error reading stdout: {error:?}"))?;
+                        }
+                    }
+                    let time = start.elapsed();
+                    if time > Duration::from_millis(20) {
+                        log::error!("## took {:#?} to read", time);
+                    }
+                }
+            })
+            .detach();
 
         cx.update(|cx| Self::new(incoming_rx, outgoing_tx, spawn_process_tx, Some(socket), cx))
     }
@@ -329,20 +329,30 @@ impl SshSession {
             async move {
                 let peer_id = PeerId { owner_id: 0, id: 0 };
                 while let Some(incoming) = incoming_rx.next().await {
+                    let start = std::time::Instant::now();
                     if let Some(request_id) = incoming.responding_to {
                         let request_id = MessageId(request_id);
                         let sender = this.response_channels.lock().remove(&request_id);
                         if let Some(sender) = sender {
+                            use prost::Message;
                             let (tx, rx) = oneshot::channel();
+                            let len = incoming.encoded_len();
                             if incoming.payload.is_some() {
-                                sender.send((incoming, tx)).ok();
+                                if sender.send((incoming, tx)).is_err() {
+                                    log::error!("#### SENDING TASK WAS CANCELLED, WASTED={}", len);
+                                }
                             }
                             rx.await.ok();
+                            let time = start.elapsed();
+                            if time > Duration::from_millis(1) {
+                                log::error!("## rx await took {:#?} to read", time);
+                            }
                         }
                     } else if let Some(envelope) =
                         build_typed_envelope(peer_id, Instant::now(), incoming)
                     {
                         let type_name = envelope.payload_type_name();
+                        let start = std::time::Instant::now();
                         if let Some(future) = ProtoMessageHandlerSet::handle_message(
                             &this.state,
                             envelope,
@@ -352,6 +362,10 @@ impl SshSession {
                             log::debug!("ssh message received. name:{type_name}");
                             match future.await {
                                 Ok(_) => {
+                                    let time = start.elapsed();
+                                    if time > Duration::from_millis(1) {
+                                        log::error!("## HANDLE took {:#?}", time);
+                                    }
                                     log::debug!("ssh message handled. name:{type_name}");
                                 }
                                 Err(error) => {
@@ -398,6 +412,7 @@ impl SshSession {
         type_name: &'static str,
     ) -> impl 'static + Future<Output = Result<proto::Envelope>> {
         envelope.id = self.next_message_id.fetch_add(1, SeqCst);
+        let start = std::time::Instant::now();
         let (tx, rx) = oneshot::channel();
         let mut response_channels_lock = self.response_channels.lock();
         response_channels_lock.insert(MessageId(envelope.id), tx);
@@ -405,6 +420,16 @@ impl SshSession {
         self.outgoing_tx.unbounded_send(envelope).ok();
         async move {
             let response = rx.await.context("connection lost")?.0;
+            use prost::Message;
+            let time = start.elapsed();
+            if time > Duration::from_millis(300) {
+                log::error!(
+                    "time = {:#?}, type = {}, len = {}",
+                    time,
+                    type_name,
+                    response.encoded_len()
+                );
+            }
             if let Some(proto::envelope::Payload::Error(error)) = &response.payload {
                 return Err(RpcError::from_proto(error, type_name));
             }
@@ -597,15 +622,15 @@ impl SshClientState {
         }
 
         let mut server_binary_exists = false;
-        if cfg!(not(debug_assertions)) {
-            if let Ok(installed_version) =
-                run_cmd(self.socket.ssh_command(dst_path).arg("version")).await
-            {
-                if installed_version.trim() == version.to_string() {
-                    server_binary_exists = true;
-                }
+        // if cfg!(not(debug_assertions)) {
+        if let Ok(installed_version) =
+            run_cmd(self.socket.ssh_command(dst_path).arg("version")).await
+        {
+            if installed_version.trim() == version.to_string() {
+                server_binary_exists = true;
             }
         }
+        // }
 
         if server_binary_exists {
             log::info!("remote development server already present",);

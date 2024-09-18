@@ -7165,6 +7165,10 @@ impl LspAdapter for SshLspAdapter {
     async fn installation_test_binary(&self, _: PathBuf) -> Option<LanguageServerBinary> {
         None
     }
+
+    async fn process_completions(&self, completions: &mut [lsp::CompletionItem]) {
+        completions.iter_mut().for_each(|x| x.documentation = None);
+    }
 }
 pub fn language_server_settings<'a, 'b: 'a>(
     delegate: &'a dyn LspAdapterDelegate,
