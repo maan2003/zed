@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use clap::Subcommand;
 use cli::{ipc::IpcOneShotServer, CliRequest, CliResponse, IpcHandshake};
 use collections::HashMap;
 use parking_lot::Mutex;
@@ -39,14 +40,11 @@ struct Args {
     /// Create a new workspace
     #[arg(short, long, overrides_with = "add")]
     new: bool,
-    /// A sequence of space-separated paths that you want to open.
-    ///
-    /// Use `path:line:row` syntax to open a file at a specific location.
-    /// Non-existing paths and directories will ignore `:line:row` suffix.
-    paths_with_position: Vec<String>,
     /// Print Zed's version and the app path.
     #[arg(short, long)]
     version: bool,
+    #[clap(subcommand)]
+    command: Action,
     /// Run zed in the foreground (useful for debugging)
     #[arg(long)]
     foreground: bool,
@@ -56,6 +54,22 @@ struct Args {
     /// Run zed in dev-server mode
     #[arg(long)]
     dev_server_token: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Action {
+    Open {
+        /// A sequence of space-separated paths that you want to open.
+        ///
+        /// Use `path:line:row` syntax to open a file at a specific location.
+        /// Non-existing paths and directories will ignore `:line:row` suffix.
+        paths_with_position: Vec<String>,
+    },
+    ListWorkspaces {},
+    Diagnostics {
+        #[arg(short)]
+        workspace_id: u64,
+    },
 }
 
 fn parse_path_with_position(argument_str: &str) -> anyhow::Result<String> {
@@ -130,26 +144,6 @@ fn main() -> Result<()> {
 
     let env = Some(std::env::vars().collect::<HashMap<_, _>>());
     let exit_status = Arc::new(Mutex::new(None));
-    let mut paths = vec![];
-    let mut urls = vec![];
-    let mut stdin_tmp_file: Option<fs::File> = None;
-    for path in args.paths_with_position.iter() {
-        if path.starts_with("zed://")
-            || path.starts_with("http://")
-            || path.starts_with("https://")
-            || path.starts_with("file://")
-            || path.starts_with("ssh://")
-        {
-            urls.push(path.to_string());
-        } else if path == "-" && args.paths_with_position.len() == 1 {
-            let file = NamedTempFile::new()?;
-            paths.push(file.path().to_string_lossy().to_string());
-            let (file, _) = file.keep()?;
-            stdin_tmp_file = Some(file);
-        } else {
-            paths.push(parse_path_with_position(path)?)
-        }
-    }
 
     if let Some(_) = args.dev_server_token {
         return Err(anyhow::anyhow!(
@@ -160,20 +154,55 @@ fn main() -> Result<()> {
     let sender: JoinHandle<anyhow::Result<()>> = thread::spawn({
         let exit_status = exit_status.clone();
         move || {
+            let request = match args.command {
+                Action::Open {
+                    paths_with_position,
+                } => {
+                    let mut paths = vec![];
+                    let mut urls = vec![];
+                    let mut stdin_tmp_file: Option<fs::File> = None;
+                    for path in paths_with_position.iter() {
+                        if path.starts_with("zed://")
+                            || path.starts_with("http://")
+                            || path.starts_with("https://")
+                            || path.starts_with("file://")
+                            || path.starts_with("ssh://")
+                        {
+                            urls.push(path.to_string());
+                        } else if path == "-" && paths_with_position.len() == 1 {
+                            let file = NamedTempFile::new()?;
+                            paths.push(file.path().to_string_lossy().to_string());
+                            let (file, _) = file.keep()?;
+                            stdin_tmp_file = Some(file);
+                        } else {
+                            paths.push(parse_path_with_position(path)?)
+                        }
+                    }
+                    CliRequest::Open {
+                        paths,
+                        urls,
+                        wait: args.wait,
+                        open_new_workspace,
+                        env,
+                    }
+                }
+                Action::ListWorkspaces {} => CliRequest::ListWorkspaces {},
+                Action::Diagnostics { workspace_id } => CliRequest::Diagnostics { workspace_id },
+            };
             let (_, handshake) = server.accept().context("Handshake after Zed spawn")?;
             let (tx, rx) = (handshake.requests, handshake.responses);
 
-            tx.send(CliRequest::Open {
-                paths,
-                urls,
-                wait: args.wait,
-                open_new_workspace,
-                env,
-            })?;
+            tx.send(request)?;
 
             while let Ok(response) = rx.recv() {
                 match response {
                     CliResponse::Ping => {}
+                    CliResponse::ListWorkspacesResponse { workspaces } => {
+                        println!("{workspaces:?}");
+                    }
+                    CliResponse::DiagnosticsResponse { errors } => {
+                        println!("{errors} errors found!");
+                    }
                     CliResponse::Stdout { message } => println!("{message}"),
                     CliResponse::Stderr { message } => eprintln!("{message}"),
                     CliResponse::Exit { status } => {
@@ -188,21 +217,21 @@ fn main() -> Result<()> {
     });
 
     let pipe_handle: JoinHandle<anyhow::Result<()>> = thread::spawn(move || {
-        if let Some(mut tmp_file) = stdin_tmp_file {
-            let mut stdin = std::io::stdin().lock();
-            if io::IsTerminal::is_terminal(&stdin) {
-                return Ok(());
-            }
-            let mut buffer = [0; 8 * 1024];
-            loop {
-                let bytes_read = io::Read::read(&mut stdin, &mut buffer)?;
-                if bytes_read == 0 {
-                    break;
-                }
-                io::Write::write(&mut tmp_file, &buffer[..bytes_read])?;
-            }
-            io::Write::flush(&mut tmp_file)?;
-        }
+        // if let Some(mut tmp_file) = None {
+        //     let mut stdin = std::io::stdin().lock();
+        //     if io::IsTerminal::is_terminal(&stdin) {
+        //         return Ok(());
+        //     }
+        //     let mut buffer = [0; 8 * 1024];
+        //     loop {
+        //         let bytes_read = io::Read::read(&mut stdin, &mut buffer)?;
+        //         if bytes_read == 0 {
+        //             break;
+        //         }
+        //         io::Write::write(&mut tmp_file, &buffer[..bytes_read])?;
+        //     }
+        //     io::Write::flush(&mut tmp_file)?;
+        // }
         Ok(())
     });
 
@@ -287,8 +316,10 @@ mod linux {
 
         fn launch(&self, ipc_url: String) -> anyhow::Result<()> {
             let sock_path = paths::support_dir().join(format!("zed-{}.sock", *RELEASE_CHANNEL));
+            dbg!(&sock_path);
             let sock = UnixDatagram::unbound()?;
             if sock.connect(&sock_path).is_err() {
+                panic!("booting is not allowed");
                 self.boot_background(ipc_url)?;
             } else {
                 sock.send(ipc_url.as_bytes())?;

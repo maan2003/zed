@@ -1,6 +1,6 @@
 use crate::handle_open_request;
 use crate::restorable_workspace_locations;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Context as _, Result};
 use cli::{ipc, IpcHandshake};
 use cli::{ipc::IpcSender, CliRequest, CliResponse};
 use client::parse_zed_link;
@@ -13,6 +13,7 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use futures::channel::{mpsc, oneshot};
 use futures::future::join_all;
 use futures::{FutureExt, SinkExt, StreamExt};
+use gpui::Entity;
 use gpui::{AppContext, AsyncAppContext, Global, WindowHandle};
 use language::{Bias, Point};
 use recent_projects::{open_ssh_project, SshSettings};
@@ -22,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+use ui::Context;
 use util::paths::PathWithPosition;
 use util::ResultExt;
 use welcome::{show_welcome_view, FIRST_OPEN};
@@ -298,6 +300,45 @@ pub async fn handle_cli_connection(
 
                 let status = if open_workspace_result.is_err() { 1 } else { 0 };
                 responses.send(CliResponse::Exit { status }).log_err();
+            }
+            CliRequest::ListWorkspaces {} => {
+                println!("LIST WORKSPACES was here");
+                let ids = cx
+                    .update(|cx| {
+                        let state = app_state.workspace_store.read(cx);
+                        state
+                            .workspaces
+                            .iter()
+                            .map(|x| x.root_view(cx).unwrap().entity_id().as_u64())
+                            .collect()
+                    })
+                    .unwrap();
+                println!("LIST WORKSPACES ended here, {ids:?}");
+                responses.send(CliResponse::ListWorkspacesResponse { workspaces: ids });
+            }
+            CliRequest::Diagnostics { workspace_id } => {
+                println!("DIAGNO was here");
+                let errors = cx
+                    .update(|cx| {
+                        let state = app_state.workspace_store.read(cx);
+                        let Some(workspace) = state.workspaces.iter().find(|x| true) else {
+                            println!("STILL NOTHING?");
+                            log::error!("workspace not found");
+                            return 0;
+                        };
+
+                        let workspace = workspace.read(cx).unwrap();
+                        let project = workspace.project().read(cx);
+                        let lsp = project.lsp_store().read(cx);
+                        lsp.diagnostic_summaries(true, cx)
+                            .map(|(_, _, sum)| sum.error_count)
+                            .sum()
+                    })
+                    .unwrap();
+                println!("END {errors}");
+                responses.send(CliResponse::DiagnosticsResponse {
+                    errors: errors as _,
+                });
             }
         }
     }

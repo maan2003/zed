@@ -569,7 +569,7 @@ struct GlobalAppState(Weak<AppState>);
 impl Global for GlobalAppState {}
 
 pub struct WorkspaceStore {
-    workspaces: HashSet<WindowHandle<Workspace>>,
+    pub workspaces: HashSet<WindowHandle<Workspace>>,
     client: Arc<Client>,
     _subscriptions: Vec<client::Subscription>,
 }

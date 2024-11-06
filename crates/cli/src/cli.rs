@@ -17,11 +17,17 @@ pub enum CliRequest {
         open_new_workspace: Option<bool>,
         env: Option<HashMap<String, String>>,
     },
+    ListWorkspaces {},
+    Diagnostics {
+        workspace_id: u64,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum CliResponse {
     Ping,
+    ListWorkspacesResponse { workspaces: Vec<u64> },
+    DiagnosticsResponse { errors: u64 },
     Stdout { message: String },
     Stderr { message: String },
     Exit { status: i32 },
