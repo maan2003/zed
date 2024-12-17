@@ -188,6 +188,21 @@
     }
   },
   {
+    "context": "AssistantPanel2",
+    "bindings": {
+      "ctrl-n": "sidekar::NewThread",
+      "ctrl-shift-h": "sidekar::OpenHistory",
+      "ctrl-shift-m": "sidekar::ToggleModelSelector",
+      "ctrl-shift-a": "sidekar::ToggleContextPicker"
+    }
+  },
+  {
+    "context": "MessageEditor > Editor",
+    "bindings": {
+      "enter": "sidekar::Chat"
+    }
+  },
+  {
     "context": "PromptLibrary",
     "bindings": {
       "new": "prompt_library::NewPrompt",

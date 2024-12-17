@@ -17,7 +17,7 @@ pkgs.mkShell rec {
       pkgs.rust-analyzer
     ]
     ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
-      pkgs.mold
+      pkgs.mold-wrapped
     ];
 
   buildInputs =
@@ -32,6 +32,8 @@ pkgs.mkShell rec {
       pkgs.stdenv.cc.cc
       pkgs.zlib
       pkgs.zstd
+      pkgs.bzip2
+      pkgs.vulkan-loader
       pkgs.rustToolchain
     ]
     ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
