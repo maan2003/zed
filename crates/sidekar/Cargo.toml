@@ -77,6 +77,9 @@ util.workspace = true
 uuid.workspace = true
 workspace.workspace = true
 zed_actions.workspace = true
+axum = "0.8.1"
+tokio = { workspace = true, features = ["rt", "net"] }
+send_wrapper = "0.6.0"
 
 [dev-dependencies]
 rand.workspace = true

@@ -117,7 +117,7 @@ impl ThreadStore {
                 messages: thread
                     .messages()
                     .map(|message| SavedMessage {
-                        id: message.id,
+                        id: message.id.clone(),
                         role: message.role,
                         text: message.text.clone(),
                     })

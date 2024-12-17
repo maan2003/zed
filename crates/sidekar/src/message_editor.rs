@@ -7,8 +7,6 @@ use gpui::{
     pulsating_between, Animation, AnimationExt, App, DismissEvent, Entity, Focusable, Subscription,
     TextStyle, WeakEntity,
 };
-use language_model::{LanguageModelRegistry, LanguageModelRequestTool};
-use language_model_selector::LanguageModelSelector;
 use rope::Point;
 use settings::Settings;
 use std::time::Duration;
@@ -18,13 +16,13 @@ use ui::{
 };
 use workspace::Workspace;
 
-use crate::assistant_model_selector::AssistantModelSelector;
 use crate::context_picker::{ConfirmBehavior, ContextPicker};
 use crate::context_store::{refresh_context_store_text, ContextStore};
 use crate::context_strip::{ContextStrip, ContextStripEvent, SuggestContextKind};
+use crate::sidecar::Sidecar;
 use crate::thread::{RequestKind, Thread};
 use crate::thread_store::ThreadStore;
-use crate::{Chat, ChatMode, RemoveAllContext, ToggleContextPicker, ToggleModelSelector};
+use crate::{Chat, ChatMode, RemoveAllContext, ToggleContextPicker};
 
 pub struct MessageEditor {
     thread: Entity<Thread>,
@@ -34,25 +32,24 @@ pub struct MessageEditor {
     context_picker_menu_handle: PopoverMenuHandle<ContextPicker>,
     inline_context_picker: Entity<ContextPicker>,
     inline_context_picker_menu_handle: PopoverMenuHandle<ContextPicker>,
-    model_selector: Entity<AssistantModelSelector>,
-    model_selector_menu_handle: PopoverMenuHandle<LanguageModelSelector>,
-    use_tools: bool,
+    reasoning: bool,
+    sidecar: Entity<Sidecar>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl MessageEditor {
     pub fn new(
-        fs: Arc<dyn Fs>,
+        _fs: Arc<dyn Fs>,
         workspace: WeakEntity<Workspace>,
         thread_store: WeakEntity<ThreadStore>,
         thread: Entity<Thread>,
+        sidecar: Entity<Sidecar>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let context_store = cx.new(|_cx| ContextStore::new(workspace.clone()));
         let context_picker_menu_handle = PopoverMenuHandle::default();
         let inline_context_picker_menu_handle = PopoverMenuHandle::default();
-        let model_selector_menu_handle = PopoverMenuHandle::default();
 
         let editor = cx.new(|cx| {
             let mut editor = Editor::auto_height(10, window, cx);
@@ -105,32 +102,14 @@ impl MessageEditor {
             context_picker_menu_handle,
             inline_context_picker,
             inline_context_picker_menu_handle,
-            model_selector: cx.new(|cx| {
-                AssistantModelSelector::new(
-                    fs,
-                    model_selector_menu_handle.clone(),
-                    editor.focus_handle(cx),
-                    window,
-                    cx,
-                )
-            }),
-            model_selector_menu_handle,
-            use_tools: false,
+            reasoning: false,
+            sidecar,
             _subscriptions: subscriptions,
         }
     }
 
-    fn toggle_model_selector(
-        &mut self,
-        _: &ToggleModelSelector,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.model_selector_menu_handle.toggle(window, cx)
-    }
-
     fn toggle_chat_mode(&mut self, _: &ChatMode, _window: &mut Window, cx: &mut Context<Self>) {
-        self.use_tools = !self.use_tools;
+        self.reasoning = !self.reasoning;
         cx.notify();
     }
 
@@ -154,17 +133,19 @@ impl MessageEditor {
     }
 
     fn chat(&mut self, _: &Chat, window: &mut Window, cx: &mut Context<Self>) {
-        self.send_to_model(RequestKind::Chat, window, cx);
+        self.send_to_model(
+            if self.reasoning {
+                RequestKind::Reasoning
+            } else {
+                RequestKind::Chat
+            },
+            window,
+            cx,
+        );
     }
 
     fn is_editor_empty(&self, cx: &App) -> bool {
         self.editor.read(cx).text(cx).is_empty()
-    }
-
-    fn is_model_selected(&self, cx: &App) -> bool {
-        LanguageModelRegistry::read_global(cx)
-            .active_model()
-            .is_some()
     }
 
     fn send_to_model(
@@ -173,20 +154,6 @@ impl MessageEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let provider = LanguageModelRegistry::read_global(cx).active_provider();
-        if provider
-            .as_ref()
-            .map_or(false, |provider| provider.must_accept_terms(cx))
-        {
-            cx.notify();
-            return;
-        }
-
-        let model_registry = LanguageModelRegistry::read_global(cx);
-        let Some(model) = model_registry.active_model() else {
-            return;
-        };
-
         let user_message = self.editor.update(cx, |editor, cx| {
             let text = editor.text(cx);
             editor.clear(window, cx);
@@ -197,29 +164,20 @@ impl MessageEditor {
 
         let thread = self.thread.clone();
         let context_store = self.context_store.clone();
-        let use_tools = self.use_tools;
+        let sidecar = self.sidecar.clone();
         cx.spawn(move |_, mut cx| async move {
             refresh_task.await;
             thread
                 .update(&mut cx, |thread, cx| {
                     let context = context_store.read(cx).snapshot(cx).collect::<Vec<_>>();
                     thread.insert_user_message(user_message, context, cx);
-                    let mut request = thread.to_completion_request(request_kind, cx);
-
-                    if use_tools {
-                        request.tools = thread
-                            .tools()
-                            .tools(cx)
-                            .into_iter()
-                            .map(|tool| LanguageModelRequestTool {
-                                name: tool.name(),
-                                description: tool.description(),
-                                input_schema: tool.input_schema(),
-                            })
-                            .collect();
-                    }
-
-                    thread.stream_completion(request, model, cx)
+                    let root = sidecar.read(cx).root(cx);
+                    let request = thread.to_completion_request(
+                        request_kind,
+                        root.to_string_lossy().into_owned(),
+                        cx,
+                    );
+                    thread.stream_completion(request, sidecar, cx)
                 })
                 .ok();
         })
@@ -306,7 +264,6 @@ impl Render for MessageEditor {
         let bg_color = cx.theme().colors().editor_background;
         let is_streaming_completion = self.thread.read(cx).is_streaming();
         let button_width = px(64.);
-        let is_model_selected = self.is_model_selected(cx);
         let is_editor_empty = self.is_editor_empty(cx);
         let submit_label_color = if is_editor_empty {
             Color::Muted
@@ -317,7 +274,6 @@ impl Render for MessageEditor {
         v_flex()
             .key_context("MessageEditor")
             .on_action(cx.listener(Self::chat))
-            .on_action(cx.listener(Self::toggle_model_selector))
             .on_action(cx.listener(Self::toggle_context_picker))
             .on_action(cx.listener(Self::remove_all_context))
             .on_action(cx.listener(Self::move_up))
@@ -377,10 +333,10 @@ impl Render for MessageEditor {
                         h_flex()
                             .justify_between()
                             .child(
-                                Switch::new("use-tools", self.use_tools.into())
+                                Switch::new("use-reasoning", self.reasoning.into())
                                     .label("Tools")
                                     .on_click(cx.listener(|this, selection, _window, _cx| {
-                                        this.use_tools = match selection {
+                                        this.reasoning = match selection {
                                             ToggleState::Selected => true,
                                             ToggleState::Unselected
                                             | ToggleState::Indeterminate => false,
@@ -392,7 +348,7 @@ impl Render for MessageEditor {
                                         window,
                                     )),
                             )
-                            .child(h_flex().gap_1().child(self.model_selector.clone()).child(
+                            .child(h_flex().gap_1().child(
                                 if is_streaming_completion {
                                     ButtonLike::new("cancel-generation")
                                         .width(button_width.into())
@@ -434,7 +390,7 @@ impl Render for MessageEditor {
                                     ButtonLike::new("submit-message")
                                         .width(button_width.into())
                                         .style(ButtonStyle::Filled)
-                                        .disabled(is_editor_empty || !is_model_selected)
+                                        .disabled(is_editor_empty)
                                         .child(
                                             h_flex()
                                                 .w_full()
@@ -459,11 +415,6 @@ impl Render for MessageEditor {
                                         .when(is_editor_empty, |button| {
                                             button
                                                 .tooltip(Tooltip::text("Type a message to submit"))
-                                        })
-                                        .when(!is_model_selected, |button| {
-                                            button.tooltip(Tooltip::text(
-                                                "Select a model to continue",
-                                            ))
                                         })
                                 },
                             )),

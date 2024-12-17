@@ -10,19 +10,19 @@ mod context_strip;
 mod inline_assistant;
 mod inline_prompt_editor;
 mod message_editor;
+mod sidecar;
 mod terminal_codegen;
 mod terminal_inline_assistant;
 mod thread;
 mod thread_history;
 mod thread_store;
+mod types;
 mod ui;
 
 use std::sync::Arc;
 
 use assistant_settings::AssistantSettings;
 use client::Client;
-use command_palette_hooks::CommandPaletteFilter;
-use feature_flags::{Assistant2FeatureFlag, FeatureFlagAppExt};
 use fs::Fs;
 use gpui::{actions, App};
 use prompt_library::PromptBuilder;
@@ -32,8 +32,9 @@ pub use crate::assistant_panel::{AssistantPanel, ConcreteAssistantPanelDelegate}
 pub use crate::inline_assistant::InlineAssistant;
 
 actions!(
-    assistant2,
+    sidekar,
     [
+        SendRequest,
         NewThread,
         NewPromptEditor,
         ToggleContextPicker,
@@ -56,9 +57,7 @@ actions!(
     ]
 );
 
-const NAMESPACE: &str = "assistant2";
-
-/// Initializes the `assistant2` crate.
+/// Initializes the `sidekar` crate.
 pub fn init(
     fs: Arc<dyn Fs>,
     client: Arc<Client>,
@@ -80,25 +79,4 @@ pub fn init(
         client.telemetry().clone(),
         cx,
     );
-
-    feature_gate_assistant2_actions(cx);
-}
-
-fn feature_gate_assistant2_actions(cx: &mut App) {
-    CommandPaletteFilter::update_global(cx, |filter, _cx| {
-        filter.hide_namespace(NAMESPACE);
-    });
-
-    cx.observe_flag::<Assistant2FeatureFlag, _>(move |is_enabled, cx| {
-        if is_enabled {
-            CommandPaletteFilter::update_global(cx, |filter, _cx| {
-                filter.show_namespace(NAMESPACE);
-            });
-        } else {
-            CommandPaletteFilter::update_global(cx, |filter, _cx| {
-                filter.hide_namespace(NAMESPACE);
-            });
-        }
-    })
-    .detach();
 }

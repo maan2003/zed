@@ -111,7 +111,7 @@ impl ActiveThread {
         cx: &mut Context<Self>,
     ) {
         let old_len = self.messages.len();
-        self.messages.push(*id);
+        self.messages.push(id.clone());
         self.list_state.splice(old_len..old_len, 1);
 
         let theme_settings = ThemeSettings::get_global(cx);
@@ -187,7 +187,7 @@ impl ActiveThread {
                 cx,
             )
         });
-        self.rendered_messages_by_id.insert(*id, markdown);
+        self.rendered_messages_by_id.insert(id.clone(), markdown);
         self.list_state.scroll_to(ListOffset {
             item_ix: old_len,
             offset_in_item: Pixels(0.0),
@@ -223,10 +223,10 @@ impl ActiveThread {
                 if let Some(message_text) = self
                     .thread
                     .read(cx)
-                    .message(*message_id)
+                    .message(&message_id)
                     .map(|message| message.text.clone())
                 {
-                    self.push_message(message_id, message_text, window, cx);
+                    self.push_message(&message_id, message_text, window, cx);
                 }
 
                 self.thread_store
@@ -267,7 +267,7 @@ impl ActiveThread {
     }
 
     fn render_message(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
-        let message_id = self.messages[ix];
+        let message_id = &self.messages[ix];
         let Some(message) = self.thread.read(cx).message(message_id) else {
             return Empty.into_any();
         };
@@ -276,7 +276,7 @@ impl ActiveThread {
             return Empty.into_any();
         };
 
-        let context = self.thread.read(cx).context_for_message(message_id);
+        let context = self.thread.read(cx).context_for_message(&message_id);
         let colors = cx.theme().colors();
 
         let message_content = v_flex()

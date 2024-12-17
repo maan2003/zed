@@ -381,6 +381,11 @@ fn initialize_panels(
             workspace_handle.clone(),
             cx.clone(),
         );
+        let sidekar_panel = sidekar::AssistantPanel::load(
+            workspace_handle.clone(),
+            prompt_builder.clone(),
+            cx.clone(),
+        );
 
         let (
             project_panel,
@@ -389,6 +394,7 @@ fn initialize_panels(
             channels_panel,
             chat_panel,
             notification_panel,
+            sidekar_panel,
         ) = futures::try_join!(
             project_panel,
             outline_panel,
@@ -396,6 +402,7 @@ fn initialize_panels(
             channels_panel,
             chat_panel,
             notification_panel,
+            sidekar_panel,
         )?;
 
         workspace_handle.update_in(&mut cx, |workspace, window, cx| {
@@ -405,6 +412,7 @@ fn initialize_panels(
             workspace.add_panel(channels_panel, window, cx);
             workspace.add_panel(chat_panel, window, cx);
             workspace.add_panel(notification_panel, window, cx);
+            workspace.add_panel(sidekar_panel, window, cx);
         })?;
 
         let git_ui_enabled = git_ui_feature_flag.await;

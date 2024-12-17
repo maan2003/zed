@@ -1071,7 +1071,7 @@ impl LocalLspStore {
             })
     }
 
-    fn primary_language_server_for_buffer<'a>(
+    pub fn primary_language_server_for_buffer<'a>(
         &'a self,
         buffer: &'a Buffer,
         cx: &'a App,

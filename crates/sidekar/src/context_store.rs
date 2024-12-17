@@ -347,7 +347,7 @@ impl ContextStore {
             let found_file_context = self.context.iter().find(|context| match &context {
                 AssistantContext::File(file_context) => {
                     let buffer = file_context.context_buffer.buffer.read(cx);
-                    if let Some(file_path) = buffer_path_log_err(buffer) {
+                    if let Some(file_path) = buffer_path_log_err(buffer, cx) {
                         *file_path == *path
                     } else {
                         false
@@ -408,7 +408,7 @@ impl ContextStore {
             .filter_map(|context| match context {
                 AssistantContext::File(file) => {
                     let buffer = file.context_buffer.buffer.read(cx);
-                    buffer_path_log_err(buffer).map(|p| p.to_path_buf())
+                    buffer_path_log_err(buffer, cx).map(|p| p.to_path_buf())
                 }
                 AssistantContext::Directory(_)
                 | AssistantContext::FetchedUrl(_)
@@ -462,9 +462,9 @@ fn collect_buffer_info_and_text(
     (buffer_info, text_task)
 }
 
-pub fn buffer_path_log_err(buffer: &Buffer) -> Option<Arc<Path>> {
+pub fn buffer_path_log_err(buffer: &Buffer, cx: &App) -> Option<PathBuf> {
     if let Some(file) = buffer.file() {
-        Some(file.path().clone())
+        Some(file.as_local()?.abs_path(cx))
     } else {
         log::error!("Buffer that had a path unexpectedly no longer has a path.");
         None
@@ -644,10 +644,10 @@ fn refresh_context_buffer(
     cx: &App,
 ) -> Option<impl Future<Output = ContextBuffer>> {
     let buffer = context_buffer.buffer.read(cx);
-    let path = buffer_path_log_err(buffer)?;
+    let path = buffer_path_log_err(buffer, cx)?;
     if buffer.version.changed_since(&context_buffer.version) {
         let (buffer_info, text_task) = collect_buffer_info_and_text(
-            path,
+            path.into(),
             context_buffer.buffer.clone(),
             buffer,
             cx.to_async(),

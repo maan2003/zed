@@ -1,7 +1,8 @@
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use assistant_context_editor::{
     make_lsp_adapter_delegate, AssistantPanelDelegate, ConfigurationError, ContextEditor,
     ContextHistory, SlashCommandCompletionProvider,
@@ -11,28 +12,31 @@ use assistant_slash_command::SlashCommandWorkingSet;
 use assistant_tool::ToolWorkingSet;
 
 use client::zed_urls;
-use editor::Editor;
+use collections::HashMap;
+use editor::{Editor, ProposedChangeLocation, ProposedChangesEditor};
 use fs::Fs;
 use gpui::{
     prelude::*, px, svg, Action, AnyElement, App, AsyncWindowContext, Corner, Entity, EventEmitter,
     FocusHandle, Focusable, FontWeight, Pixels, Subscription, Task, UpdateGlobal, WeakEntity,
 };
-use language::LanguageRegistry;
+use language::{Buffer, LanguageRegistry};
 use language_model::{LanguageModelProviderTosView, LanguageModelRegistry};
 use project::Project;
 use prompt_library::{open_prompt_library, PromptBuilder, PromptLibrary};
 use settings::{update_settings_file, Settings};
+use text::Anchor;
 use time::UtcOffset;
 use ui::{prelude::*, ContextMenu, KeyBinding, PopoverMenu, PopoverMenuHandle, Tab, Tooltip};
 use util::ResultExt as _;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
-use workspace::Workspace;
+use workspace::{SaveIntent, Workspace};
 use zed_actions::assistant::{DeployPromptLibrary, ToggleFocus};
 
 use crate::active_thread::ActiveThread;
 use crate::assistant_configuration::{AssistantConfiguration, AssistantConfigurationEvent};
 use crate::message_editor::MessageEditor;
-use crate::thread::{Thread, ThreadError, ThreadId};
+use crate::sidecar::{Sidecar, SidecarEvent};
+use crate::thread::{MessageId, Thread, ThreadError, ThreadId};
 use crate::thread_history::{PastThread, ThreadHistory};
 use crate::thread_store::ThreadStore;
 use crate::{
@@ -108,6 +112,21 @@ pub struct AssistantPanel {
     open_history_context_menu_handle: PopoverMenuHandle<ContextMenu>,
     width: Option<Pixels>,
     height: Option<Pixels>,
+    sidecar: Entity<Sidecar>,
+    patch_view: PatchEntity,
+}
+
+#[derive(Debug, Clone)]
+pub struct SidecarPatch {
+    pub original: Range<text::Anchor>,
+    pub replacement: String,
+    pub done: bool,
+}
+
+pub struct PatchEntity {
+    editor: Option<WeakEntity<ProposedChangesEditor>>,
+    patches: HashMap<MessageId, Vec<(Entity<Buffer>, Vec<SidecarPatch>)>>,
+    active_id: Option<MessageId>,
 }
 
 impl AssistantPanel {
@@ -161,6 +180,7 @@ impl AssistantPanel {
         let language_registry = project.read(cx).languages().clone();
         let workspace = workspace.weak_handle();
         let weak_self = cx.entity().downgrade();
+        let sidecar = Sidecar::new(thread_store.clone(), workspace.clone(), cx);
 
         let message_editor = cx.new(|cx| {
             MessageEditor::new(
@@ -168,11 +188,14 @@ impl AssistantPanel {
                 workspace.clone(),
                 thread_store.downgrade(),
                 thread.clone(),
+                sidecar.clone(),
                 window,
                 cx,
             )
         });
 
+        cx.subscribe_in(&sidecar, window, Self::on_sidecar_event)
+            .detach();
         Self {
             active_view: ActiveView::Thread,
             workspace: workspace.clone(),
@@ -207,6 +230,12 @@ impl AssistantPanel {
             open_history_context_menu_handle: PopoverMenuHandle::default(),
             width: None,
             height: None,
+            sidecar,
+            patch_view: PatchEntity {
+                editor: None,
+                patches: Default::default(),
+                active_id: None,
+            },
         }
     }
 
@@ -265,6 +294,7 @@ impl AssistantPanel {
                 self.workspace.clone(),
                 self.thread_store.downgrade(),
                 thread,
+                self.sidecar.clone(),
                 window,
                 cx,
             )
@@ -395,6 +425,8 @@ impl AssistantPanel {
             .thread_store
             .update(cx, |this, cx| this.open_thread(thread_id, cx));
 
+        let sidecar = self.sidecar.clone();
+
         cx.spawn_in(window, |this, mut cx| async move {
             let thread = open_thread_task.await?;
             this.update_in(&mut cx, |this, window, cx| {
@@ -416,6 +448,7 @@ impl AssistantPanel {
                         this.workspace.clone(),
                         this.thread_store.downgrade(),
                         thread,
+                        sidecar,
                         window,
                         cx,
                     )
@@ -477,6 +510,104 @@ impl AssistantPanel {
         self.thread_store
             .update(cx, |this, cx| this.delete_thread(thread_id, cx))
             .detach_and_log_err(cx);
+    }
+
+    fn on_sidecar_event(
+        &mut self,
+        _: &Entity<Sidecar>,
+        SidecarEvent::Patch {
+            thread: _,
+            message,
+            buffer,
+            patch,
+        }: &SidecarEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let patches = self.patch_view.patches.entry(message.clone()).or_default();
+        if let Some((_, patches)) = patches.iter_mut().find(|p| &p.0 == buffer) {
+            patches.push(patch.clone());
+        } else {
+            patches.push((buffer.clone(), vec![patch.clone()]));
+        }
+        Self::show_patch_editor(
+            &self.workspace,
+            &mut self.patch_view.editor,
+            patches,
+            window,
+            cx,
+        )
+        .log_err();
+        self.patch_view.active_id = Some(message.clone());
+    }
+
+    pub fn close_patch_editor(
+        &mut self,
+        editor: Entity<ProposedChangesEditor>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace
+            .update(cx, |workspace, cx| {
+                if let Some(pane) = workspace.pane_for(&editor) {
+                    pane.update(cx, |pane, cx| {
+                        let item_id = editor.entity_id();
+                        if !editor.read(cx).focus_handle(cx).is_focused(window) {
+                            pane.close_item_by_id(item_id, SaveIntent::Skip, window, cx)
+                                .detach_and_log_err(cx);
+                        }
+                    });
+                }
+            })
+            .ok();
+    }
+
+    pub fn show_patch_editor(
+        workspace: &WeakEntity<Workspace>,
+        editor: &mut Option<WeakEntity<ProposedChangesEditor>>,
+        patches: &[(Entity<Buffer>, Vec<SidecarPatch>)],
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<()> {
+        let Some(workspace) = workspace.upgrade() else {
+            bail!("entity died")
+        };
+        let project = workspace.read(cx).project().clone();
+
+        let new_editor = editor.clone().and_then(|v| v.upgrade()).unwrap_or_else(|| {
+            let editor = cx.new(|cx| {
+                ProposedChangesEditor::new::<Anchor>("", vec![], Some(project.clone()), window, cx)
+            });
+            workspace.update(cx, |workspace, cx| {
+                workspace.add_item_to_active_pane(Box::new(editor.clone()), None, false, window, cx)
+            });
+            editor
+        });
+
+        new_editor.update(cx, |editor, cx| {
+            let locations = patches
+                .iter()
+                .map(|(buf, ps)| ProposedChangeLocation {
+                    buffer: buf.clone(),
+                    ranges: ps.iter().map(|p| p.original.clone()).collect(),
+                })
+                .collect();
+            editor.reset_locations(locations, window, cx);
+            for (buffer, ps) in patches {
+                let branch = editor.branch_buffer_for_base(&buffer).unwrap();
+                branch.update(cx, |b, cx| {
+                    b.edit(
+                        ps.iter()
+                            .map(|e| (e.original.clone(), e.replacement.clone())),
+                        None,
+                        cx,
+                    );
+                });
+            }
+        });
+
+        *editor = Some(new_editor.downgrade());
+        Ok(())
     }
 }
 

@@ -136,12 +136,9 @@ impl AssistantContext {
 impl FileContext {
     pub fn snapshot(&self, cx: &App) -> Option<ContextSnapshot> {
         let buffer = self.context_buffer.buffer.read(cx);
-        let path = buffer_path_log_err(buffer)?;
+        let path = buffer_path_log_err(buffer, cx)?;
         let full_path: SharedString = path.to_string_lossy().into_owned().into();
-        let name = match path.file_name() {
-            Some(name) => name.to_string_lossy().into_owned().into(),
-            None => full_path.clone(),
-        };
+        let name = path.to_string_lossy().into_owned().into();
         let parent = path
             .parent()
             .and_then(|p| p.file_name())
