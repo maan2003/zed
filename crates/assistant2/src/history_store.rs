@@ -6,33 +6,23 @@ use crate::thread_store::{SavedThreadMetadata, ThreadStore};
 
 pub enum HistoryEntry {
     Thread(SavedThreadMetadata),
-    Context(SavedContextMetadata),
 }
 
 impl HistoryEntry {
     pub fn updated_at(&self) -> DateTime<Utc> {
         match self {
             HistoryEntry::Thread(thread) => thread.updated_at,
-            HistoryEntry::Context(context) => context.mtime.to_utc(),
         }
     }
 }
 
 pub struct HistoryStore {
     thread_store: Entity<ThreadStore>,
-    context_store: Entity<assistant_context_editor::ContextStore>,
 }
 
 impl HistoryStore {
-    pub fn new(
-        thread_store: Entity<ThreadStore>,
-        context_store: Entity<assistant_context_editor::ContextStore>,
-        _cx: &mut Context<Self>,
-    ) -> Self {
-        Self {
-            thread_store,
-            context_store,
-        }
+    pub fn new(thread_store: Entity<ThreadStore>, _cx: &mut Context<Self>) -> Self {
+        Self { thread_store }
     }
 
     /// Returns the number of history entries.
@@ -45,10 +35,6 @@ impl HistoryStore {
 
         for thread in self.thread_store.update(cx, |this, _cx| this.threads()) {
             history_entries.push(HistoryEntry::Thread(thread));
-        }
-
-        for context in self.context_store.update(cx, |this, _cx| this.contexts()) {
-            history_entries.push(HistoryEntry::Context(context));
         }
 
         history_entries.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.updated_at()));

@@ -347,7 +347,7 @@ impl ContextPicker {
 
         if let Some(active_thread) = workspace
             .panel::<AssistantPanel>(cx)
-            .map(|panel| panel.read(cx).active_thread(cx))
+            .and_then(|panel| panel.read(cx).active_thread(cx))
         {
             current_threads.insert(active_thread.read(cx).id().clone());
         }

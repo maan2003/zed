@@ -483,11 +483,6 @@ fn initialize_panels(
             //
             // Once we ship `assistant2` we can push this back down into `assistant2::assistant_panel::init`.
             if is_assistant2_enabled {
-                <dyn AssistantPanelDelegate>::set_global(
-                    Arc::new(assistant2::ConcreteAssistantPanelDelegate),
-                    cx,
-                );
-
                 workspace
                     .register_action(assistant2::AssistantPanel::toggle_focus)
                     .register_action(assistant2::InlineAssistant::inline_assist);

@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports)]
 mod active_thread;
 mod assistant_configuration;
 mod assistant_model_selector;
@@ -15,6 +16,7 @@ mod terminal_codegen;
 mod terminal_inline_assistant;
 mod thread;
 mod thread_history;
+mod thread_item;
 mod thread_store;
 mod tool_use;
 mod ui;
@@ -30,7 +32,7 @@ use gpui::{actions, App};
 use prompt_store::PromptBuilder;
 use settings::Settings as _;
 
-pub use crate::assistant_panel::{AssistantPanel, ConcreteAssistantPanelDelegate};
+pub use crate::assistant_panel::AssistantPanel;
 pub use crate::inline_assistant::InlineAssistant;
 
 actions!(
