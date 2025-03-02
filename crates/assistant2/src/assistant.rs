@@ -86,8 +86,6 @@ pub fn init(
         client.telemetry().clone(),
         cx,
     );
-
-    feature_gate_assistant2_actions(cx);
 }
 
 fn feature_gate_assistant2_actions(cx: &mut App) {

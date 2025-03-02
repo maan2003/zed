@@ -52,7 +52,6 @@ use settings::{
 use std::any::TypeId;
 use std::path::PathBuf;
 use std::sync::atomic::{self, AtomicBool};
-use std::time::Duration;
 use std::{borrow::Cow, ops::Deref, path::Path, sync::Arc};
 use terminal_view::terminal_panel::{self, TerminalPanel};
 use theme::{ActiveTheme, ThemeSettings};
@@ -388,9 +387,6 @@ fn initialize_panels(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    let assistant2_feature_flag =
-        cx.wait_for_flag_or_timeout::<feature_flags::Assistant2FeatureFlag>(Duration::from_secs(5));
-
     let prompt_builder = prompt_builder.clone();
 
     cx.spawn_in(window, |workspace_handle, mut cx| async move {
@@ -439,7 +435,7 @@ fn initialize_panels(
         let is_assistant2_enabled = if cfg!(test) {
             false
         } else {
-            assistant2_feature_flag.await
+            true
         };
 
         let (assistant_panel, assistant2_panel) = if is_assistant2_enabled {
