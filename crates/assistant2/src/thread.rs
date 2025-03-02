@@ -11,10 +11,8 @@ use futures::StreamExt as _;
 use gpui::{App, AppContext, Context, Entity, EventEmitter, SharedString, Subscription, Task};
 use itertools::Itertools;
 use language_model::{
-    LanguageModel, LanguageModelCompletionEvent, LanguageModelRegistry, LanguageModelRequest,
-    LanguageModelRequestMessage, LanguageModelRequestTool, LanguageModelToolResult,
-    LanguageModelToolUseId, MaxMonthlySpendReachedError, MessageContent, PaymentRequiredError,
-    Role, StopReason,
+    LanguageModel, LanguageModelCompletionEvent, LanguageModelRegistry, LanguageModelRequest, LanguageModelRequestMessage, LanguageModelRequestTool, LanguageModelToolResult, LanguageModelToolUseId, MaxMonthlySpendReachedError,
+    MessageContent, PaymentRequiredError, Role, StopReason,
 };
 use project::Project;
 use serde::{Deserialize, Serialize};
@@ -31,6 +29,7 @@ use crate::tool_use::{PendingToolUse, ToolUse, ToolUseState};
 #[derive(Debug, Clone, Copy)]
 pub enum RequestKind {
     Chat,
+    Architect,
     Edits {
         message_index: usize,
     },
@@ -407,7 +406,9 @@ impl Thread {
         });
 
         let until = match request_kind {
-            RequestKind::Chat | RequestKind::Summarize => self.messages.len(),
+            RequestKind::Chat | RequestKind::Architect | RequestKind::Summarize => {
+                self.messages.len()
+            }
             RequestKind::Edits { message_index } => message_index + 1,
         };
 
@@ -419,7 +420,7 @@ impl Thread {
             };
 
             match request_kind {
-                RequestKind::Chat | RequestKind::Edits { .. } => {
+                RequestKind::Chat | RequestKind::Architect | RequestKind::Edits { .. } => {
                     self.tool_use
                         .attach_tool_results(message.id, &mut request_message);
                 }
@@ -435,7 +436,7 @@ impl Thread {
             }
 
             match request_kind {
-                RequestKind::Chat | RequestKind::Edits { .. } => {
+                RequestKind::Chat | RequestKind::Architect | RequestKind::Edits { .. } => {
                     self.tool_use
                         .attach_tool_uses(message.id, &mut request_message);
 
