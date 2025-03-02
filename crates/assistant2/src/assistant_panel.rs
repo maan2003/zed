@@ -33,6 +33,7 @@ use zed_actions::assistant::{DeployPromptLibrary, ToggleFocus};
 
 use crate::active_thread::ActiveThread;
 use crate::assistant_configuration::{AssistantConfiguration, AssistantConfigurationEvent};
+use crate::context_store::ContextStore;
 use crate::history_store::{HistoryEntry, HistoryStore};
 use crate::message_editor::MessageEditor;
 use crate::thread::{Thread, ThreadError, ThreadId};
@@ -145,12 +146,15 @@ impl AssistantPanel {
         cx: &mut Context<Self>,
     ) -> Self {
         log::info!("[assistant2-debug] AssistantPanel::new");
-        let thread = thread_store.update(cx, |this, cx| this.create_thread(cx));
         let fs = workspace.app_state().fs.clone();
         let project = workspace.project().clone();
         let language_registry = project.read(cx).languages().clone();
         let workspace = workspace.weak_handle();
         let weak_self = cx.entity().downgrade();
+        let thread = thread_store.update(cx, |this, cx| {
+            let context_store = cx.new(|cx| ContextStore::new(workspace));
+            this.create_thread(context_store, cx)
+        });
 
         let message_editor = cx.new(|cx| {
             MessageEditor::new(
@@ -235,9 +239,11 @@ impl AssistantPanel {
     }
 
     fn new_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let context_store = cx.new(|_cx| ContextStore::new(self.workspace.clone()));
+
         let thread = self
             .thread_store
-            .update(cx, |this, cx| this.create_thread(cx));
+            .update(cx, |this, cx| this.create_thread(context_store.clone(), cx));
 
         self.active_view = ActiveView::Thread;
         self.thread = cx.new(|cx| {
@@ -366,9 +372,12 @@ impl AssistantPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
-        let open_thread_task = self
-            .thread_store
-            .update(cx, |this, cx| this.open_thread(thread_id, cx));
+        // TODO: save context on disk
+        let context_store = cx.new(|_cx| ContextStore::new(self.workspace.clone()));
+
+        let open_thread_task = self.thread_store.update(cx, |this, cx| {
+            this.open_thread(thread_id, context_store.clone(), cx)
+        });
 
         cx.spawn_in(window, |this, mut cx| async move {
             let thread = open_thread_task.await?;

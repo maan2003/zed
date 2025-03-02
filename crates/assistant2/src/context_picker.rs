@@ -295,7 +295,10 @@ impl ContextPicker {
             return Task::ready(Err(anyhow!("thread store not available")));
         };
 
-        let open_thread_task = thread_store.update(cx, |this, cx| this.open_thread(&thread.id, cx));
+        let thread_context = cx.new(|_cx| ContextStore::new(self.workspace.clone()));
+        let open_thread_task = thread_store.update(cx, |this, cx| {
+            this.open_thread(&thread.id, thread_context, cx)
+        });
         cx.spawn(|this, mut cx| async move {
             let thread = open_thread_task.await?;
             context_store.update(&mut cx, |context_store, cx| {

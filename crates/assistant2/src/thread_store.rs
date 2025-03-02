@@ -19,6 +19,7 @@ use project::Project;
 use serde::{Deserialize, Serialize};
 use util::ResultExt as _;
 
+use crate::context_store::ContextStore;
 use crate::thread::{MessageId, Thread, ThreadId};
 
 pub fn init(cx: &mut App) {
@@ -76,13 +77,18 @@ impl ThreadStore {
         self.threads().into_iter().take(limit).collect()
     }
 
-    pub fn create_thread(&mut self, cx: &mut Context<Self>) -> Entity<Thread> {
-        cx.new(|cx| Thread::new(self.project.clone(), self.tools.clone(), cx))
+    pub fn create_thread(
+        &mut self,
+        context_store: Entity<ContextStore>,
+        cx: &mut Context<Self>,
+    ) -> Entity<Thread> {
+        cx.new(|cx| Thread::new(self.project.clone(), self.tools.clone(), context_store, cx))
     }
 
     pub fn open_thread(
         &self,
         id: &ThreadId,
+        context_store: Entity<ContextStore>,
         cx: &mut Context<Self>,
     ) -> Task<Result<Entity<Thread>>> {
         let id = id.clone();
@@ -101,6 +107,7 @@ impl ThreadStore {
                         thread,
                         this.project.clone(),
                         this.tools.clone(),
+                        context_store,
                         cx,
                     )
                 })
