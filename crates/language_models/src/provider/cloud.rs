@@ -306,6 +306,8 @@ impl LanguageModelProvider for CloudLanguageModelProvider {
                     max_tokens: model.max_tokens,
                     max_output_tokens: model.max_output_tokens,
                     max_completion_tokens: model.max_completion_tokens,
+                    api_url: None,
+                    api_key_var: None,
                 }),
                 AvailableProvider::Google => CloudModel::Google(google_ai::Model::Custom {
                     name: model.name.clone(),
