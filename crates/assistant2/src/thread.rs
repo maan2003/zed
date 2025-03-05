@@ -27,8 +27,17 @@ use crate::tool_use::{PendingToolUse, ToolUse, ToolUseState};
 #[derive(Debug, Clone, Copy)]
 pub enum RequestKind {
     Chat,
+    Edits {
+        message_index: usize,
+    },
     /// Used when summarizing a thread.
     Summarize,
+}
+
+impl RequestKind {
+    pub fn is_edits(&self) -> bool {
+        matches!(self, RequestKind::Edits { .. })
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Serialize, Deserialize)]
@@ -404,8 +413,12 @@ impl Thread {
         });
 
         let mut referenced_context_ids = HashSet::default();
+        let until = match request_kind {
+            RequestKind::Chat | RequestKind::Summarize => self.messages.len(),
+            RequestKind::Edits { message_index } => message_index + 1,
+        };
 
-        for message in &self.messages {
+        for message in &self.messages[..until] {
             if let Some(context_ids) = self.context_by_message.get(&message.id) {
                 referenced_context_ids.extend(context_ids);
             }
@@ -417,7 +430,7 @@ impl Thread {
             };
 
             match request_kind {
-                RequestKind::Chat => {
+                RequestKind::Chat | RequestKind::Edits { .. } => {
                     self.tool_use
                         .attach_tool_results(message.id, &mut request_message);
                 }
@@ -433,7 +446,7 @@ impl Thread {
             }
 
             match request_kind {
-                RequestKind::Chat => {
+                RequestKind::Chat | RequestKind::Edits { .. } => {
                     self.tool_use
                         .attach_tool_uses(message.id, &mut request_message);
 
@@ -468,6 +481,26 @@ impl Thread {
             attach_context_to_message(&mut context_message, referenced_context);
 
             request.messages.push(context_message);
+        }
+
+        if request_kind.is_edits() {
+            let system_message = LanguageModelRequestMessage {
+                role: Role::System,
+                content: vec![MessageContent::Text(
+                    include_str!("./edits/system_prompt.md").into(),
+                )],
+                cache: true,
+            };
+
+            let suffix_message = LanguageModelRequestMessage {
+                role: Role::User,
+                content: vec![MessageContent::Text(
+                    include_str!("./edits/edit_prompt_suffix.md").into(),
+                )],
+                cache: true,
+            };
+
+            request.messages.extend([system_message, suffix_message]);
         }
 
         request
