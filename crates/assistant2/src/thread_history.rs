@@ -1,10 +1,11 @@
 use assistant_context_editor::SavedContextMetadata;
 use gpui::{
-    uniform_list, App, Entity, FocusHandle, Focusable, ScrollStrategy, UniformListScrollHandle,
-    WeakEntity,
+    uniform_list, App, Entity, EventEmitter, FocusHandle, Focusable, ScrollStrategy, SharedString,
+    UniformListScrollHandle, WeakEntity,
 };
 use time::{OffsetDateTime, UtcOffset};
 use ui::{prelude::*, IconButtonShape, ListItem, ListItemSpacing, Tooltip};
+use workspace::item::{self, Item};
 
 use crate::history_store::{HistoryEntry, HistoryStore};
 use crate::thread_store::SavedThreadMetadata;
@@ -104,13 +105,6 @@ impl ThreadHistory {
                         .update(cx, move |this, cx| this.open_thread(&thread.id, window, cx))
                         .ok();
                 }
-                HistoryEntry::Context(context) => {
-                    self.assistant_panel
-                        .update(cx, move |this, cx| {
-                            this.open_saved_prompt_editor(context.path.clone(), window, cx)
-                        })
-                        .ok();
-                }
             }
 
             cx.notify();
@@ -134,18 +128,27 @@ impl ThreadHistory {
                         })
                         .ok();
                 }
-                HistoryEntry::Context(context) => {
-                    self.assistant_panel
-                        .update(cx, |this, cx| {
-                            this.delete_context(context.path.clone(), cx);
-                        })
-                        .ok();
-                }
             }
 
             cx.notify();
         }
     }
+}
+
+impl EventEmitter<()> for ThreadHistory {}
+
+impl Item for ThreadHistory {
+    type Event = ();
+
+    fn tab_content_text(&self, _window: &Window, _cx: &App) -> Option<SharedString> {
+        Some("History".into())
+    }
+
+    fn tab_tooltip_text(&self, _cx: &App) -> Option<SharedString> {
+        Some("Thread History".into())
+    }
+
+    fn to_item_events(_event: &Self::Event, mut _f: impl FnMut(item::ItemEvent)) {}
 }
 
 impl Focusable for ThreadHistory {
@@ -192,21 +195,17 @@ impl Render for ThreadHistory {
                                 history_entries[range]
                                     .iter()
                                     .enumerate()
-                                    .map(|(index, entry)| {
-                                        h_flex().w_full().pb_1().child(match entry {
-                                            HistoryEntry::Thread(thread) => PastThread::new(
-                                                thread.clone(),
-                                                history.assistant_panel.clone(),
-                                                selected_index == index,
-                                            )
-                                            .into_any_element(),
-                                            HistoryEntry::Context(context) => PastContext::new(
-                                                context.clone(),
-                                                history.assistant_panel.clone(),
-                                                selected_index == index,
-                                            )
-                                            .into_any_element(),
-                                        })
+                                    .filter_map(|(index, entry)| {
+                                        Some(
+                                            h_flex().w_full().pb_1().child(match entry {
+                                                HistoryEntry::Thread(thread) => PastThread::new(
+                                                    thread.clone(),
+                                                    history.assistant_panel.clone(),
+                                                    selected_index == index,
+                                                )
+                                                .into_any_element(),
+                                            }),
+                                        )
                                     })
                                     .collect()
                             },
@@ -310,102 +309,5 @@ impl RenderOnce for PastThread {
                         .ok();
                 }
             })
-    }
-}
-
-#[derive(IntoElement)]
-pub struct PastContext {
-    context: SavedContextMetadata,
-    assistant_panel: WeakEntity<AssistantPanel>,
-    selected: bool,
-}
-
-impl PastContext {
-    pub fn new(
-        context: SavedContextMetadata,
-        assistant_panel: WeakEntity<AssistantPanel>,
-        selected: bool,
-    ) -> Self {
-        Self {
-            context,
-            assistant_panel,
-            selected,
-        }
-    }
-}
-
-impl RenderOnce for PastContext {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let summary = self.context.title;
-
-        let context_timestamp = time_format::format_localized_timestamp(
-            OffsetDateTime::from_unix_timestamp(self.context.mtime.timestamp()).unwrap(),
-            OffsetDateTime::now_utc(),
-            self.assistant_panel
-                .update(cx, |this, _cx| this.local_timezone())
-                .unwrap_or(UtcOffset::UTC),
-            time_format::TimestampFormat::EnhancedAbsolute,
-        );
-
-        ListItem::new(SharedString::from(
-            self.context.path.to_string_lossy().to_string(),
-        ))
-        .rounded()
-        .toggle_state(self.selected)
-        .spacing(ListItemSpacing::Sparse)
-        .start_slot(
-            div()
-                .max_w_4_5()
-                .child(Label::new(summary).size(LabelSize::Small).truncate()),
-        )
-        .end_slot(
-            h_flex()
-                .gap_1p5()
-                .child(
-                    Label::new("Prompt Editor")
-                        .color(Color::Muted)
-                        .size(LabelSize::XSmall),
-                )
-                .child(
-                    div()
-                        .size(px(3.))
-                        .rounded_full()
-                        .bg(cx.theme().colors().text_disabled),
-                )
-                .child(
-                    Label::new(context_timestamp)
-                        .color(Color::Muted)
-                        .size(LabelSize::XSmall),
-                )
-                .child(
-                    IconButton::new("delete", IconName::TrashAlt)
-                        .shape(IconButtonShape::Square)
-                        .icon_size(IconSize::XSmall)
-                        .tooltip(Tooltip::text("Delete Prompt Editor"))
-                        .on_click({
-                            let assistant_panel = self.assistant_panel.clone();
-                            let path = self.context.path.clone();
-                            move |_event, _window, cx| {
-                                assistant_panel
-                                    .update(cx, |this, cx| {
-                                        this.delete_context(path.clone(), cx);
-                                    })
-                                    .ok();
-                            }
-                        }),
-                ),
-        )
-        .on_click({
-            let assistant_panel = self.assistant_panel.clone();
-            let path = self.context.path.clone();
-            move |_event, window, cx| {
-                assistant_panel
-                    .update(cx, |this, cx| {
-                        this.open_saved_prompt_editor(path.clone(), window, cx)
-                            .detach_and_log_err(cx);
-                    })
-                    .ok();
-            }
-        })
     }
 }

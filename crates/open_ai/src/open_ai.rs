@@ -89,6 +89,8 @@ pub enum Model {
         max_tokens: usize,
         max_output_tokens: Option<u32>,
         max_completion_tokens: Option<u32>,
+        api_url: Option<String>,
+        api_key_var: Option<String>,
     },
 }
 

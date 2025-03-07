@@ -42,6 +42,10 @@ impl ContextStore {
         }
     }
 
+    pub fn workspace(&self) -> WeakEntity<Workspace> {
+        self.workspace.clone()
+    }
+
     pub fn snapshot<'a>(&'a self, cx: &'a App) -> impl Iterator<Item = ContextSnapshot> + 'a {
         self.context()
             .iter()

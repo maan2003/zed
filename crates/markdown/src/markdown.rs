@@ -581,10 +581,12 @@ impl Element for MarkdownElement {
                         MarkdownTag::Heading { level, .. } => {
                             let mut heading = div().mb_2();
                             heading = match level {
-                                pulldown_cmark::HeadingLevel::H1 => heading.text_3xl(),
-                                pulldown_cmark::HeadingLevel::H2 => heading.text_2xl(),
-                                pulldown_cmark::HeadingLevel::H3 => heading.text_xl(),
-                                pulldown_cmark::HeadingLevel::H4 => heading.text_lg(),
+                                pulldown_cmark::HeadingLevel::H1 => heading.text_lg(),
+                                pulldown_cmark::HeadingLevel::H2 => heading.text_base(),
+                                pulldown_cmark::HeadingLevel::H3
+                                | pulldown_cmark::HeadingLevel::H4 => {
+                                    heading.font_weight(FontWeight::BOLD)
+                                }
                                 _ => heading,
                             };
                             heading.style().refine(&self.style.heading);

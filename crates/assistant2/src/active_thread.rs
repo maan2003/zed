@@ -518,7 +518,6 @@ impl ActiveThread {
 
         let thread = self.thread.read(cx);
 
-        let context = thread.context_for_message(message_id);
         let tool_uses = thread.tool_uses_for_message(message_id);
 
         // Don't render user messages that are just there for returning tool results.
@@ -540,32 +539,18 @@ impl ActiveThread {
 
         let colors = cx.theme().colors();
 
-        let message_content = v_flex()
-            .child(
-                if let Some(edit_message_editor) = edit_message_editor.clone() {
-                    div()
-                        .key_context("EditMessageEditor")
-                        .on_action(cx.listener(Self::cancel_editing_message))
-                        .on_action(cx.listener(Self::confirm_editing_message))
-                        .p_2p5()
-                        .child(edit_message_editor)
-                } else {
-                    div().p_2p5().text_ui(cx).child(markdown.clone())
-                },
-            )
-            .when_some(context, |parent, context| {
-                if !context.is_empty() {
-                    parent.child(
-                        h_flex().flex_wrap().gap_1().px_1p5().pb_1p5().children(
-                            context
-                                .into_iter()
-                                .map(|context| ContextPill::added(context, false, false, None)),
-                        ),
-                    )
-                } else {
-                    parent
-                }
-            });
+        let message_content = v_flex().child(
+            if let Some(edit_message_editor) = edit_message_editor.clone() {
+                div()
+                    .key_context("EditMessageEditor")
+                    .on_action(cx.listener(Self::cancel_editing_message))
+                    .on_action(cx.listener(Self::confirm_editing_message))
+                    .p_2p5()
+                    .child(edit_message_editor)
+            } else {
+                div().p_2p5().text_ui(cx).child(markdown.clone())
+            },
+        );
 
         let styled_message = match message.role {
             Role::User => v_flex()

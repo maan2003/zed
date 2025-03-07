@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use collections::{BTreeMap, HashMap, HashSet};
 use futures::StreamExt as _;
 use gpui::{App, AppContext, Context, Entity, EventEmitter, SharedString, Subscription, Task};
+use itertools::Itertools;
 use language_model::{
     LanguageModel, LanguageModelCompletionEvent, LanguageModelRegistry, LanguageModelRequest,
     LanguageModelRequestMessage, LanguageModelRequestTool, LanguageModelToolResult,
@@ -22,6 +23,7 @@ use uuid::Uuid;
 use workspace::Workspace;
 
 use crate::context::{attach_context_to_message, ContextId, ContextSnapshot};
+use crate::context_store::ContextStore;
 use crate::edit_action::{EditAction, EditActionParser};
 use crate::thread_store::SavedThread;
 use crate::tool_use::{PendingToolUse, ToolUse, ToolUseState};
@@ -83,8 +85,6 @@ pub struct Thread {
     pending_summary: Task<Option<()>>,
     messages: Vec<Message>,
     next_message_id: MessageId,
-    context: BTreeMap<ContextId, ContextSnapshot>,
-    context_by_message: HashMap<MessageId, Vec<ContextId>>,
     completion_count: usize,
     pending_completions: Vec<PendingCompletion>,
     project: Entity<Project>,
@@ -94,12 +94,14 @@ pub struct Thread {
     script_output_messages: HashSet<MessageId>,
     script_session: Entity<ScriptSession>,
     _script_session_subscription: Subscription,
+    context_store: Entity<ContextStore>,
 }
 
 impl Thread {
     pub fn new(
         project: Entity<Project>,
         tools: Arc<ToolWorkingSet>,
+        context_store: Entity<ContextStore>,
         cx: &mut Context<Self>,
     ) -> Self {
         let script_session = cx.new(|cx| ScriptSession::new(project.clone(), cx));
@@ -112,8 +114,6 @@ impl Thread {
             pending_summary: Task::ready(None),
             messages: Vec::new(),
             next_message_id: MessageId(0),
-            context: BTreeMap::default(),
-            context_by_message: HashMap::default(),
             completion_count: 0,
             pending_completions: Vec::new(),
             project,
@@ -123,6 +123,7 @@ impl Thread {
             script_output_messages: HashSet::default(),
             script_session,
             _script_session_subscription: script_session_subscription,
+            context_store,
         }
     }
 
@@ -131,6 +132,7 @@ impl Thread {
         saved: SavedThread,
         project: Entity<Project>,
         tools: Arc<ToolWorkingSet>,
+        context_store: Entity<ContextStore>,
         cx: &mut Context<Self>,
     ) -> Self {
         let next_message_id = MessageId(
@@ -161,8 +163,6 @@ impl Thread {
                 })
                 .collect(),
             next_message_id,
-            context: BTreeMap::default(),
-            context_by_message: HashMap::default(),
             completion_count: 0,
             pending_completions: Vec::new(),
             project,
@@ -172,6 +172,7 @@ impl Thread {
             script_output_messages: HashSet::default(),
             script_session,
             _script_session_subscription: script_session_subscription,
+            context_store,
         }
     }
 
@@ -213,23 +214,16 @@ impl Thread {
         self.messages.iter()
     }
 
+    pub fn context_store(&self) -> Entity<ContextStore> {
+        self.context_store.clone()
+    }
+
     pub fn is_streaming(&self) -> bool {
         !self.pending_completions.is_empty()
     }
 
     pub fn tools(&self) -> &Arc<ToolWorkingSet> {
         &self.tools
-    }
-
-    pub fn context_for_message(&self, id: MessageId) -> Option<Vec<ContextSnapshot>> {
-        let context = self.context_by_message.get(&id)?;
-        Some(
-            context
-                .into_iter()
-                .filter_map(|context_id| self.context.get(&context_id))
-                .cloned()
-                .collect::<Vec<_>>(),
-        )
     }
 
     pub fn pending_tool_uses(&self) -> Vec<&PendingToolUse> {
@@ -264,15 +258,9 @@ impl Thread {
     pub fn insert_user_message(
         &mut self,
         text: impl Into<String>,
-        context: Vec<ContextSnapshot>,
         cx: &mut Context<Self>,
     ) -> MessageId {
-        let message_id = self.insert_message(Role::User, text, cx);
-        let context_ids = context.iter().map(|context| context.id).collect::<Vec<_>>();
-        self.context
-            .extend(context.into_iter().map(|context| (context.id, context)));
-        self.context_by_message.insert(message_id, context_ids);
-        message_id
+        self.insert_message(Role::User, text, cx)
     }
 
     pub fn insert_message(
@@ -316,7 +304,6 @@ impl Thread {
             return false;
         };
         self.messages.remove(index);
-        self.context_by_message.remove(&id);
         self.touch_updated_at();
         cx.emit(ThreadEvent::MessageDeleted(id));
         true
@@ -368,7 +355,7 @@ impl Thread {
                     .get(*script_id)
                     .output_message_for_llm()
                 {
-                    let message_id = self.insert_user_message(output_message, vec![], cx);
+                    let message_id = self.insert_user_message(output_message, cx);
                     self.script_output_messages.insert(message_id);
                     cx.emit(ThreadEvent::ScriptFinished)
                 }
@@ -419,17 +406,12 @@ impl Thread {
             cache: true,
         });
 
-        let mut referenced_context_ids = HashSet::default();
         let until = match request_kind {
             RequestKind::Chat | RequestKind::Summarize => self.messages.len(),
             RequestKind::Edits { message_index } => message_index + 1,
         };
 
         for message in &self.messages[..until] {
-            if let Some(context_ids) = self.context_by_message.get(&message.id) {
-                referenced_context_ids.extend(context_ids);
-            }
-
             let mut request_message = LanguageModelRequestMessage {
                 role: message.role,
                 content: Vec::new(),
@@ -474,18 +456,14 @@ impl Thread {
             request.messages.push(request_message);
         }
 
-        if !referenced_context_ids.is_empty() {
+        let context_snapshots = self.context_store.read(cx).snapshot(cx).collect_vec();
+        if !context_snapshots.is_empty() {
             let mut context_message = LanguageModelRequestMessage {
                 role: Role::User,
                 content: Vec::new(),
                 cache: false,
             };
-
-            let referenced_context = referenced_context_ids
-                .into_iter()
-                .filter_map(|context_id| self.context.get(context_id))
-                .cloned();
-            attach_context_to_message(&mut context_message, referenced_context);
+            attach_context_to_message(&mut context_message, context_snapshots.into_iter());
 
             request.messages.push(context_message);
         }
@@ -786,7 +764,6 @@ impl Thread {
             // responses that also don't have any content. We currently don't handle this case well,
             // so for now we provide some text to keep the model on track.
             "Here are the tool results.",
-            Vec::new(),
             cx,
         );
         self.send_to_model(model, RequestKind::Chat, true, cx);

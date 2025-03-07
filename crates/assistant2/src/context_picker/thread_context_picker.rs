@@ -169,7 +169,13 @@ impl PickerDelegate for ThreadContextPickerDelegate {
             return;
         };
 
-        let open_thread_task = thread_store.update(cx, |this, cx| this.open_thread(&entry.id, cx));
+        let Some(context) = self.context_store.upgrade() else {
+            return;
+        };
+        let thread_context = cx.new(|cx| ContextStore::new(context.read(cx).workspace()));
+        let open_thread_task = thread_store.update(cx, |this, cx| {
+            this.open_thread(&entry.id, thread_context, cx)
+        });
 
         cx.spawn_in(window, |this, mut cx| async move {
             let thread = open_thread_task.await?;

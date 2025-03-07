@@ -205,12 +205,16 @@ impl OpenAiSettingsContent {
                                     max_tokens,
                                     max_output_tokens,
                                     max_completion_tokens,
+                                    api_url,
+                                    api_key_var,
                                 } => Some(provider::open_ai::AvailableModel {
                                     name,
                                     max_tokens,
                                     max_output_tokens,
                                     display_name,
                                     max_completion_tokens,
+                                    api_url,
+                                    api_key_var,
                                 }),
                                 _ => None,
                             })

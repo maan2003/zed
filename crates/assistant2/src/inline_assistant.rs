@@ -1388,7 +1388,7 @@ impl InlineAssistant {
 
     fn resolve_inline_assist_target(
         workspace: &mut Workspace,
-        assistant_panel: Option<Entity<AssistantPanel>>,
+        _assistant_panel: Option<Entity<AssistantPanel>>,
         window: &mut Window,
         cx: &mut App,
     ) -> Option<InlineAssistTarget> {
@@ -1408,20 +1408,7 @@ impl InlineAssistant {
             }
         }
 
-        let context_editor = assistant_panel
-            .and_then(|panel| panel.read(cx).active_context_editor())
-            .and_then(|editor| {
-                let editor = &editor.read(cx).editor().clone();
-                if editor.read(cx).is_focused(window) {
-                    Some(editor.clone())
-                } else {
-                    None
-                }
-            });
-
-        if let Some(context_editor) = context_editor {
-            Some(InlineAssistTarget::Editor(context_editor))
-        } else if let Some(workspace_editor) = workspace
+        if let Some(workspace_editor) = workspace
             .active_item(cx)
             .and_then(|item| item.act_as::<Editor>(cx))
         {

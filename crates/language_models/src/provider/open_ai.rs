@@ -43,6 +43,8 @@ pub struct AvailableModel {
     pub max_tokens: usize,
     pub max_output_tokens: Option<u32>,
     pub max_completion_tokens: Option<u32>,
+    pub api_url: Option<String>,
+    pub api_key_var: Option<String>,
 }
 
 pub struct OpenAiLanguageModelProvider {
@@ -203,6 +205,8 @@ impl LanguageModelProvider for OpenAiLanguageModelProvider {
                     max_tokens: model.max_tokens,
                     max_output_tokens: model.max_output_tokens,
                     max_completion_tokens: model.max_completion_tokens,
+                    api_url: model.api_url.clone(),
+                    api_key_var: model.api_key_var.clone(),
                 },
             );
         }
@@ -255,12 +259,28 @@ impl OpenAiLanguageModel {
     ) -> BoxFuture<'static, Result<futures::stream::BoxStream<'static, Result<ResponseStreamEvent>>>>
     {
         let http_client = self.http_client.clone();
-        let Ok((api_key, api_url)) = cx.read_entity(&self.state, |state, cx| {
+        let Ok((mut api_key, mut api_url)) = cx.read_entity(&self.state, |state, cx| {
             let settings = &AllLanguageModelSettings::get_global(cx).openai;
             (state.api_key.clone(), settings.api_url.clone())
         }) else {
             return futures::future::ready(Err(anyhow!("App state dropped"))).boxed();
         };
+
+        if let open_ai::Model::Custom {
+            api_url: Some(custom_url),
+            ..
+        } = &self.model
+        {
+            api_url = custom_url.clone();
+        }
+
+        if let open_ai::Model::Custom {
+            api_key_var: Some(env_var),
+            ..
+        } = &self.model
+        {
+            api_key = std::env::var(env_var).ok();
+        }
 
         let future = self.request_limiter.stream(async move {
             let api_key = api_key.ok_or_else(|| anyhow!("Missing OpenAI API Key"))?;

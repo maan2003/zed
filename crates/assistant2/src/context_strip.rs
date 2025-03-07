@@ -130,7 +130,7 @@ impl ContextStrip {
             .read(cx)
             .panel::<AssistantPanel>(cx)?
             .read(cx)
-            .active_thread(cx);
+            .active_thread(cx)?;
         let weak_active_thread = active_thread.downgrade();
 
         let active_thread = active_thread.read(cx);
