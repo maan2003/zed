@@ -21,7 +21,7 @@ pub enum EditParserEvent {
         chunk: String,
         done: bool,
         line_hint: Option<u32>,
-        path: Option<PathBuf>,
+        path: PathBuf,
     },
     NewTextChunk {
         chunk: String,
@@ -111,7 +111,7 @@ enum XmlParserState {
     WithinOldText {
         start: bool,
         line_hint: Option<u32>,
-        path: Option<PathBuf>,
+        path: PathBuf,
     },
     AfterOldText,
     WithinNewText {
@@ -132,7 +132,7 @@ enum DiffParserState {
     WithinSearch {
         start: bool,
         line_hint: Option<u32>,
-        path: Option<PathBuf>,
+        path: PathBuf,
     },
     WithinReplace {
         start: bool,
@@ -205,13 +205,17 @@ impl EditFormatParser for XmlEditParser {
                             let tag_end = start + tag_end + 1;
                             let tag = &self.buffer[start..tag_end];
                             let line_hint = self.parse_line_hint(tag);
-                            let path = self.parse_path(tag);
-                            self.buffer.drain(..tag_end);
-                            self.state = XmlParserState::WithinOldText {
-                                start: true,
-                                line_hint,
-                                path,
-                            };
+                            if let Some(path) = self.parse_path(tag) {
+                                self.buffer.drain(..tag_end);
+                                self.state = XmlParserState::WithinOldText {
+                                    start: true,
+                                    line_hint,
+                                    path,
+                                };
+                            } else {
+                                // Skip this edit if path is missing
+                                self.buffer.drain(..tag_end);
+                            }
                         } else {
                             break;
                         }
@@ -370,13 +374,17 @@ impl EditFormatParser for DiffFencedEditParser {
                         if let Some(newline_pos) = self.buffer[search_end..].find('\n') {
                             let search_line = &self.buffer[diff..search_end + newline_pos];
                             let line_hint = self.parse_line_hint(search_line);
-                            let path = self.parse_path(search_line);
-                            self.buffer.drain(..search_end + newline_pos + 1);
-                            self.state = DiffParserState::WithinSearch {
-                                start: true,
-                                line_hint,
-                                path,
-                            };
+                            if let Some(path) = self.parse_path(search_line) {
+                                self.buffer.drain(..search_end + newline_pos + 1);
+                                self.state = DiffParserState::WithinSearch {
+                                    start: true,
+                                    line_hint,
+                                    path,
+                                };
+                            } else {
+                                // Skip this edit if path is missing
+                                self.buffer.drain(..search_end + newline_pos + 1);
+                            }
                         } else {
                             break;
                         }
@@ -502,7 +510,7 @@ mod tests {
         let mut parser = EditParser::new(EditFormat::XmlTags);
         assert_eq!(
             parse_random_chunks(
-                "<old_text>original</old_text><new_text>updated</new_text>",
+                r#"<old_text path="src/main.rs">original</old_text><new_text>updated</new_text>"#,
                 &mut parser,
                 &mut rng
             ),
@@ -510,6 +518,7 @@ mod tests {
                 old_text: "original".to_string(),
                 new_text: "updated".to_string(),
                 line_hint: None,
+                path: PathBuf::from("src/main.rs"),
             }]
         );
         assert_eq!(
@@ -527,10 +536,16 @@ mod tests {
         assert_eq!(
             parse_random_chunks(
                 indoc! {"
-                    <old_text>
+                    <old_text path=\"src/lib.rs\">
                     first old
-                    </old_text><new_text>first new</new_text>
-                    <old_text>second old</old_text><new_text>
+                    </old_text>
+                    <new_text>
+                    first new
+                    </new_text>
+                    <old_text path=\"src/main.rs\">
+                    second old
+                    </old_text>
+                    <new_text>
                     second new
                     </new_text>
                 "},
@@ -542,11 +557,13 @@ mod tests {
                     old_text: "first old".to_string(),
                     new_text: "first new".to_string(),
                     line_hint: None,
+                    path: PathBuf::from("src/lib.rs"),
                 },
                 Edit {
                     old_text: "second old".to_string(),
                     new_text: "second new".to_string(),
                     line_hint: None,
+                    path: PathBuf::from("src/main.rs"),
                 },
             ]
         );
@@ -565,11 +582,18 @@ mod tests {
         assert_eq!(
             parse_random_chunks(
                 indoc! {"
-                    ignore this <old_text>
-                    content</old_text>extra stuff<new_text>updated content</new_text>trailing data
-                    more text <old_text>second item
-                    </old_text>middle text<new_text>modified second item</new_text>end
-                    <old_text>third case</old_text><new_text>improved third case</new_text> with trailing text
+                    Here's the first change:
+                    <old_text path=\"file1.rs\">content</old_text>
+                    <new_text>updated content</new_text>
+
+                    And here's the second:
+                    <old_text path=\"file2.rs\">second item</old_text>
+                    <new_text>modified second item</new_text>
+
+                    Finally:
+                    <old_text path=\"file3.rs\">third case</old_text>
+                    <new_text>improved third case</new_text>
+                    Done!
                 "},
                 &mut parser,
                 &mut rng
@@ -579,16 +603,19 @@ mod tests {
                     old_text: "content".to_string(),
                     new_text: "updated content".to_string(),
                     line_hint: None,
+                    path: PathBuf::from("file1.rs"),
                 },
                 Edit {
                     old_text: "second item".to_string(),
                     new_text: "modified second item".to_string(),
                     line_hint: None,
+                    path: PathBuf::from("file2.rs"),
                 },
                 Edit {
                     old_text: "third case".to_string(),
                     new_text: "improved third case".to_string(),
                     line_hint: None,
+                    path: PathBuf::from("file3.rs"),
                 },
             ]
         );
@@ -606,7 +633,7 @@ mod tests {
         let mut parser = EditParser::new(EditFormat::XmlTags);
         assert_eq!(
             parse_random_chunks(
-                "<old_text>code with <tag>nested</tag> elements</old_text><new_text>new <code>content</code></new_text>",
+                r#"<old_text path="template.html">code with <tag>nested</tag> elements</old_text><new_text>new <code>content</code></new_text>"#,
                 &mut parser,
                 &mut rng
             ),
@@ -614,6 +641,7 @@ mod tests {
                 old_text: "code with <tag>nested</tag> elements".to_string(),
                 new_text: "new <code>content</code>".to_string(),
                 line_hint: None,
+                path: PathBuf::from("template.html"),
             }]
         );
         assert_eq!(
@@ -630,7 +658,7 @@ mod tests {
         let mut parser = EditParser::new(EditFormat::XmlTags);
         assert_eq!(
             parse_random_chunks(
-                "<old_text></old_text><new_text></new_text>",
+                r#"<old_text path="empty.txt"></old_text><new_text></new_text>"#,
                 &mut parser,
                 &mut rng
             ),
@@ -638,6 +666,7 @@ mod tests {
                 old_text: "".to_string(),
                 new_text: "".to_string(),
                 line_hint: None,
+                path: PathBuf::from("empty.txt"),
             }]
         );
         assert_eq!(
@@ -654,7 +683,7 @@ mod tests {
         let mut parser = EditParser::new(EditFormat::XmlTags);
         assert_eq!(
             parse_random_chunks(
-                "<old_text>line1\nline2\nline3</old_text><new_text>line1\nmodified line2\nline3</new_text>",
+                "<old_text path=\"multi.txt\">line1\nline2\nline3</old_text><new_text>line1\nmodified line2\nline3</new_text>",
                 &mut parser,
                 &mut rng
             ),
@@ -662,6 +691,7 @@ mod tests {
                 old_text: "line1\nline2\nline3".to_string(),
                 new_text: "line1\nmodified line2\nline3".to_string(),
                 line_hint: None,
+                path: PathBuf::from("multi.txt"),
             }]
         );
         assert_eq!(
@@ -680,7 +710,7 @@ mod tests {
             parse_random_chunks(
                 // Reduced from an actual Sonnet 3.7 output
                 indoc! {"
-                    <old_text>
+                    <old_text path=\"a.txt\">
                     a
                     b
                     c
@@ -690,7 +720,7 @@ mod tests {
                     B
                     c
                     </old_text>
-                    <old_text>
+                    <old_text path=\"b.txt\">
                     d
                     e
                     f
@@ -709,11 +739,13 @@ mod tests {
                     old_text: "a\nb\nc".to_string(),
                     new_text: "a\nB\nc".to_string(),
                     line_hint: None,
+                    path: PathBuf::from("a.txt"),
                 },
                 Edit {
                     old_text: "d\ne\nf".to_string(),
                     new_text: "D\ne\nF".to_string(),
                     line_hint: None,
+                    path: PathBuf::from("b.txt"),
                 }
             ]
         );
@@ -731,7 +763,7 @@ mod tests {
                 // Reduced from an actual Opus 4 output
                 indoc! {"
                     <edits>
-                    <old_text>
+                    <old_text path=\"lorem.txt\">
                     Lorem
                     </old_text>
                     <new_text>
@@ -745,6 +777,7 @@ mod tests {
                 old_text: "Lorem".to_string(),
                 new_text: "LOREM".to_string(),
                 line_hint: None,
+                path: PathBuf::from("lorem.txt"),
             },]
         );
         assert_eq!(
@@ -762,7 +795,7 @@ mod tests {
         assert_eq!(
             parse_random_chunks(
                 indoc! {"
-                    <<<<<<< SEARCH
+                    <<<<<<< SEARCH path=\"src/main.rs\"
                     original text
                     =======
                     updated text
@@ -775,6 +808,7 @@ mod tests {
                 old_text: "original text".to_string(),
                 new_text: "updated text".to_string(),
                 line_hint: None,
+                path: PathBuf::from("src/main.rs"),
             }]
         );
         assert_eq!(
@@ -793,7 +827,7 @@ mod tests {
             parse_random_chunks(
                 indoc! {"
                     ```diff
-                    <<<<<<< SEARCH
+                    <<<<<<< SEARCH path=\"app.py\"
                     from flask import Flask
                     =======
                     import math
@@ -808,6 +842,7 @@ mod tests {
                 old_text: "from flask import Flask".to_string(),
                 new_text: "import math\nfrom flask import Flask".to_string(),
                 line_hint: None,
+                path: PathBuf::from("app.py"),
             }]
         );
         assert_eq!(
@@ -825,13 +860,13 @@ mod tests {
         assert_eq!(
             parse_random_chunks(
                 indoc! {"
-                    <<<<<<< SEARCH
+                    <<<<<<< SEARCH path=\"first.py\"
                     first old
                     =======
                     first new
                     >>>>>>> REPLACE
 
-                    <<<<<<< SEARCH
+                    <<<<<<< SEARCH path=\"second.py\"
                     second old
                     =======
                     second new
@@ -845,11 +880,13 @@ mod tests {
                     old_text: "first old".to_string(),
                     new_text: "first new".to_string(),
                     line_hint: None,
+                    path: PathBuf::from("first.py"),
                 },
                 Edit {
                     old_text: "second old".to_string(),
                     new_text: "second new".to_string(),
                     line_hint: None,
+                    path: PathBuf::from("second.py"),
                 },
             ]
         );
@@ -869,9 +906,9 @@ mod tests {
         assert_eq!(
             parse_random_chunks(
                 indoc! {"
-                    <old_text>xml style old</old_text><new_text>xml style new</new_text>
+                    <old_text path=\"style.xml\">xml style old</old_text><new_text>xml style new</new_text>
 
-                    <<<<<<< SEARCH
+                    <<<<<<< SEARCH path=\"style.xml\"
                     diff style old
                     =======
                     diff style new
@@ -884,6 +921,7 @@ mod tests {
                 old_text: "xml style old".to_string(),
                 new_text: "xml style new".to_string(),
                 line_hint: None,
+                path: PathBuf::from("style.xml"),
             },]
         );
         assert_eq!(
@@ -901,7 +939,7 @@ mod tests {
                 indoc! {"
                     <old_text>xml style old</old_text><new_text>xml style new</new_text>
 
-                    <<<<<<< SEARCH
+                    <<<<<<< SEARCH path=\"style.diff\"
                     diff style old
                     =======
                     diff style new
@@ -914,6 +952,7 @@ mod tests {
                 old_text: "diff style old".to_string(),
                 new_text: "diff style new".to_string(),
                 line_hint: None,
+                path: PathBuf::from("style.diff"),
             },]
         );
         assert_eq!(
@@ -931,10 +970,10 @@ mod tests {
         assert_eq!(
             parse_random_chunks(
                 indoc! {"
-                <<<<<<< SEARCH
-                =======
-                >>>>>>> REPLACE
-            "},
+                    <<<<<<< SEARCH path=\"empty.txt\"
+                    =======
+                    >>>>>>> REPLACE
+                "},
                 &mut parser,
                 &mut rng
             ),
@@ -942,6 +981,7 @@ mod tests {
                 old_text: "".to_string(),
                 new_text: "".to_string(),
                 line_hint: None,
+                path: PathBuf::from("empty.txt"),
             }]
         );
         assert_eq!(
@@ -958,7 +998,7 @@ mod tests {
         let mut parser = EditParser::new(EditFormat::DiffFenced);
         let edits = parse_random_chunks(
             indoc! {"
-                <<<<<<< SEARCH line=42
+                <<<<<<< SEARCH path=\"hint.rs\" line=42
                 original text
                 =======
                 updated text
@@ -973,6 +1013,7 @@ mod tests {
                 old_text: "original text".to_string(),
                 line_hint: Some(42),
                 new_text: "updated text".to_string(),
+                path: PathBuf::from("hint.rs"),
             }]
         );
     }
@@ -983,7 +1024,7 @@ mod tests {
 
         let edits = parse_random_chunks(
             r#"
-                    <old_text line="23">original code</old_text>
+                    <old_text path="code.rs" line="23">original code</old_text>
                     <new_text>updated code</new_text>"#,
             &mut parser,
             &mut rng,
@@ -993,13 +1034,14 @@ mod tests {
         assert_eq!(edits[0].old_text, "original code");
         assert_eq!(edits[0].line_hint, Some(23));
         assert_eq!(edits[0].new_text, "updated code");
+        assert_eq!(edits[0].path, PathBuf::from("code.rs"));
 
         // Line hint is a single unquoted line number
         let mut parser = EditParser::new(EditFormat::XmlTags);
 
         let edits = parse_random_chunks(
             r#"
-                    <old_text line=45>original code</old_text>
+                    <old_text line=45 path="simple.rs">original code</old_text>
                     <new_text>updated code</new_text>"#,
             &mut parser,
             &mut rng,
@@ -1009,6 +1051,7 @@ mod tests {
         assert_eq!(edits[0].old_text, "original code");
         assert_eq!(edits[0].line_hint, Some(45));
         assert_eq!(edits[0].new_text, "updated code");
+        assert_eq!(edits[0].path, PathBuf::from("simple.rs"));
 
         // Line hint is a range
         let mut parser = EditParser::new(EditFormat::XmlTags);
@@ -1042,11 +1085,131 @@ mod tests {
         assert_eq!(edits[0].new_text, "new");
     }
 
+    #[test]
+    fn test_xml_with_paths() {
+        let mut rng = StdRng::seed_from_u64(0);
+
+        // Single edit with path
+        let mut parser = EditParser::new(EditFormat::XmlTags);
+        let edits = parse_random_chunks(
+            r#"<old_text path="src/main.rs">fn main() {}</old_text><new_text>fn main() {
+    println!("Hello, world!");
+}</new_text>"#,
+            &mut parser,
+            &mut rng,
+        );
+
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].old_text, "fn main() {}");
+        assert_eq!(
+            edits[0].new_text,
+            "fn main() {\n    println!(\"Hello, world!\");\n}"
+        );
+        assert_eq!(edits[0].path, PathBuf::from("src/main.rs"));
+        assert_eq!(edits[0].line_hint, None);
+
+        // Multiple edits with different paths
+        let mut parser = EditParser::new(EditFormat::XmlTags);
+        let edits = parse_random_chunks(
+            r#"<old_text path="src/lib.rs" line="10">pub fn add(a: i32, b: i32) -> i32 {
+    a + b
+}</old_text><new_text>pub fn add(a: i32, b: i32) -> i32 {
+    a.saturating_add(b)
+}</new_text>
+<old_text path="src/main.rs">use crate::add;</old_text><new_text>use crate::{add, subtract};</new_text>"#,
+            &mut parser,
+            &mut rng,
+        );
+
+        assert_eq!(edits.len(), 2);
+        assert_eq!(
+            edits[0].old_text,
+            "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}"
+        );
+        assert_eq!(
+            edits[0].new_text,
+            "pub fn add(a: i32, b: i32) -> i32 {\n    a.saturating_add(b)\n}"
+        );
+        assert_eq!(edits[0].path, PathBuf::from("src/lib.rs"));
+        assert_eq!(edits[0].line_hint, Some(10));
+
+        assert_eq!(edits[1].old_text, "use crate::add;");
+        assert_eq!(edits[1].new_text, "use crate::{add, subtract};");
+        assert_eq!(edits[1].path, PathBuf::from("src/main.rs"));
+        assert_eq!(edits[1].line_hint, None);
+    }
+
+    #[test]
+    fn test_diff_fenced_with_paths() {
+        let mut rng = StdRng::seed_from_u64(0);
+
+        // Single edit with path
+        let mut parser = EditParser::new(EditFormat::DiffFenced);
+        let edits = parse_random_chunks(
+            r#"<<<<<<< SEARCH path="src/utils.rs"
+fn helper() {
+    todo!()
+}
+=======
+fn helper() {
+    // Implementation here
+    println!("Helper function");
+}
+>>>>>>> REPLACE"#,
+            &mut parser,
+            &mut rng,
+        );
+
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].old_text, "fn helper() {\n    todo!()\n}");
+        assert_eq!(
+            edits[0].new_text,
+            "fn helper() {\n    // Implementation here\n    println!(\"Helper function\");\n}"
+        );
+        assert_eq!(edits[0].path, PathBuf::from("src/utils.rs"));
+        assert_eq!(edits[0].line_hint, None);
+
+        // Multiple edits with paths and line hints
+        let mut parser = EditParser::new(EditFormat::DiffFenced);
+        let edits = parse_random_chunks(
+            r#"<<<<<<< SEARCH path="config/settings.toml" line="5"
+debug = false
+=======
+debug = true
+>>>>>>> REPLACE
+
+<<<<<<< SEARCH path="config/database.toml"
+host = "localhost"
+port = 5432
+=======
+host = "db.production.com"
+port = 5432
+>>>>>>> REPLACE"#,
+            &mut parser,
+            &mut rng,
+        );
+
+        assert_eq!(edits.len(), 2);
+        assert_eq!(edits[0].old_text, "debug = false");
+        assert_eq!(edits[0].new_text, "debug = true");
+        assert_eq!(edits[0].path, PathBuf::from("config/settings.toml"));
+        assert_eq!(edits[0].line_hint, Some(5));
+
+        assert_eq!(edits[1].old_text, "host = \"localhost\"\nport = 5432");
+        assert_eq!(
+            edits[1].new_text,
+            "host = \"db.production.com\"\nport = 5432"
+        );
+        assert_eq!(edits[1].path, PathBuf::from("config/database.toml"));
+        assert_eq!(edits[1].line_hint, None);
+    }
+
     #[derive(Default, Debug, PartialEq, Eq)]
     struct Edit {
         old_text: String,
         new_text: String,
         line_hint: Option<u32>,
+        path: PathBuf,
     }
 
     fn parse_random_chunks(input: &str, parser: &mut EditParser, rng: &mut StdRng) -> Vec<Edit> {
@@ -1057,7 +1220,8 @@ mod tests {
 
         let mut old_text = Some(String::new());
         let mut new_text = None;
-        let mut pending_edit = Edit::default();
+        let mut pending_path = PathBuf::new();
+        let mut pending_line_hint = None;
         let mut edits = Vec::new();
         let mut last_ix = 0;
         for chunk_ix in chunk_indices {
@@ -1071,17 +1235,21 @@ mod tests {
                     } => {
                         old_text.as_mut().unwrap().push_str(&chunk);
                         if done {
-                            pending_edit.old_text = old_text.take().unwrap();
-                            pending_edit.line_hint = line_hint;
+                            pending_path = path;
+                            pending_line_hint = line_hint;
                             new_text = Some(String::new());
                         }
                     }
                     EditParserEvent::NewTextChunk { chunk, done } => {
                         new_text.as_mut().unwrap().push_str(&chunk);
                         if done {
-                            pending_edit.new_text = new_text.take().unwrap();
-                            edits.push(pending_edit);
-                            pending_edit = Edit::default();
+                            let edit = Edit {
+                                old_text: old_text.take().unwrap(),
+                                new_text: new_text.take().unwrap(),
+                                line_hint: pending_line_hint.take(),
+                                path: pending_path.clone(),
+                            };
+                            edits.push(edit);
                             old_text = Some(String::new());
                         }
                     }
