@@ -3,7 +3,9 @@ mod create_directory_tool;
 mod delete_path_tool;
 mod diagnostics_tool;
 mod edit_agent;
+pub mod edit_agent2;
 mod edit_file_tool;
+mod fast_edit_tool;
 mod fetch_tool;
 mod find_path_tool;
 mod grep_tool;
@@ -43,7 +45,11 @@ use crate::list_directory_tool::ListDirectoryTool;
 use crate::now_tool::NowTool;
 use crate::thinking_tool::ThinkingTool;
 
+pub use edit_agent2::{
+    EditAgent2, EditAgentOutput, EditAgentOutputEvent, EditFormat, MultiFileEditOutput,
+};
 pub use edit_file_tool::{EditFileMode, EditFileToolInput};
+pub use fast_edit_tool::{FastEditResult, FastEditView, create_fast_edit_task, perform_fast_edit};
 pub use find_path_tool::FindPathToolInput;
 pub use grep_tool::{GrepTool, GrepToolInput};
 pub use open_tool::OpenTool;

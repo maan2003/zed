@@ -13,6 +13,11 @@ use agent::{
 use agent_settings::{AgentSettings, NotifyWhenAgentWaiting};
 use anyhow::Context as _;
 use assistant_tool::ToolUseStatus;
+use assistant_tools::{FastEditView, create_fast_edit_task};
+use language_model::{LanguageModelRequest, LanguageModelRequestMessage, StopReason};
+use ui::ElevationIndex;
+use zed_llm_client::CompletionIntent;
+
 use audio::{Audio, Sound};
 use collections::{HashMap, HashSet};
 use editor::actions::{MoveUp, Paste};
@@ -27,9 +32,7 @@ use gpui::{
     pulsating_between,
 };
 use language::{Buffer, Language, LanguageRegistry};
-use language_model::{
-    LanguageModelRequestMessage, LanguageModelToolUseId, MessageContent, Role, StopReason,
-};
+use language_model::{LanguageModelToolUseId, MessageContent, Role};
 use markdown::parser::{CodeBlockKind, CodeBlockMetadata};
 use markdown::{
     HeadingLevelStyles, Markdown, MarkdownElement, MarkdownStyle, ParsedMarkdown, PathWithRange,
@@ -52,7 +55,6 @@ use util::ResultExt as _;
 use util::markdown::MarkdownCodeBlock;
 use workspace::{CollaboratorId, Workspace};
 use zed_actions::assistant::OpenRulesLibrary;
-use zed_llm_client::CompletionIntent;
 
 const CODEBLOCK_CONTAINER_GROUP: &str = "codeblock_container";
 const EDIT_PREVIOUS_MESSAGE_MIN_LINES: usize = 1;
@@ -77,6 +79,7 @@ pub struct ActiveThread {
     expanded_tool_uses: HashMap<LanguageModelToolUseId, bool>,
     expanded_thinking_segments: HashMap<(MessageId, usize), bool>,
     expanded_code_blocks: HashMap<(MessageId, usize), bool>,
+    fast_edit_views: HashMap<MessageId, Entity<FastEditView>>,
     last_error: Option<ThreadError>,
     notifications: Vec<WindowHandle<AgentNotification>>,
     copied_code_block_ids: HashSet<(MessageId, usize)>,
@@ -810,6 +813,7 @@ impl ActiveThread {
             expanded_tool_uses: HashMap::default(),
             expanded_thinking_segments: HashMap::default(),
             expanded_code_blocks: HashMap::default(),
+            fast_edit_views: HashMap::default(),
             list_state: list_state.clone(),
             scrollbar_state: ScrollbarState::new(list_state),
             show_scrollbar: false,
@@ -1723,6 +1727,110 @@ impl ActiveThread {
         cx.notify();
     }
 
+    fn trigger_fast_edit_for_message(
+        &mut self,
+        message_id: MessageId,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self
+            .workspace
+            .upgrade()
+            .map(|ws| ws.read(cx).project().clone())
+        else {
+            return;
+        };
+
+        let thread = self.thread.read(cx);
+        let Some(model) = thread.configured_model() else {
+            return;
+        };
+
+        // Create a language model request with conversation context up to this message
+        let mut request_messages = Vec::new();
+        let mut include_message = true;
+        for message in thread.messages() {
+            if include_message {
+                let mut request_message = LanguageModelRequestMessage {
+                    role: message.role,
+                    content: Vec::new(),
+                    cache: false,
+                };
+
+                for segment in &message.segments {
+                    match segment {
+                        agent::MessageSegment::Text(text) => {
+                            request_message
+                                .content
+                                .push(language_model::MessageContent::Text(text.clone()));
+                        }
+                        _ => {}
+                    }
+                }
+
+                if !request_message.content.is_empty() {
+                    request_messages.push(request_message);
+                }
+            }
+            if message.id == message_id {
+                include_message = false;
+            }
+        }
+
+        // Add a request for fast edits
+        request_messages.push(LanguageModelRequestMessage {
+            role: language_model::Role::User,
+            content: vec![language_model::MessageContent::Text(
+                "Please review the code you just edited and make any necessary improvements or fixes. Focus on code quality, best practices, and fixing any issues.".to_string()
+            )],
+            cache: false,
+        });
+
+        // Create the language model request
+        let request = Arc::new(LanguageModelRequest {
+            thread_id: Some(thread.id().to_string()),
+            prompt_id: None,
+            intent: Some(CompletionIntent::EditFile),
+            mode: None,
+            messages: request_messages,
+            tools: Vec::new(),
+            tool_choice: None,
+            stop: Vec::new(),
+            temperature: None,
+            thinking_allowed: false,
+        });
+
+        // Get the action log from the thread
+        let action_log = thread.action_log().clone();
+
+        // Create the fast edit view
+        let fast_edit_view = cx.new(|_| FastEditView::new(project.clone()));
+        self.fast_edit_views
+            .insert(message_id, fast_edit_view.clone());
+
+        // Create and run the fast edit task
+        let task = create_fast_edit_task(
+            "Reviewing and improving code".to_string(),
+            request,
+            project,
+            action_log,
+            model.model.clone(),
+            Some(fast_edit_view.downgrade()),
+            cx,
+        );
+
+        cx.background_executor()
+            .spawn(async move {
+                let result = task.await;
+                if let Err(e) = result {
+                    log::error!("Fast edit failed: {}", e);
+                }
+            })
+            .detach();
+
+        cx.notify();
+    }
+
     fn submit_feedback_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
         let Some(editor) = self.open_feedback_editors.get(&message_id) else {
             return;
@@ -2190,11 +2298,54 @@ impl ActiveThread {
                     .px(RESPONSE_PADDING_X)
                     .gap_2()
                     .children(message_content)
+                    .when(
+                        has_tool_uses
+                            && thread
+                                .tool_uses_for_message(message_id, cx)
+                                .iter()
+                                .any(|tool| tool.name == "edit_file")
+                            && !is_generating
+                            && self.fast_edit_views.get(&message_id).is_none(),
+                        |parent| {
+                            parent.child(
+                                h_flex().gap_2().mt_2().child(
+                                    Button::new(
+                                        SharedString::from(format!("fast-edit-{:?}", message_id)),
+                                        "Fast Edit",
+                                    )
+                                    .icon(IconName::Pencil)
+                                    .icon_position(IconPosition::Start)
+                                    .icon_size(IconSize::Small)
+                                    .size(ButtonSize::Compact)
+                                    .layer(ElevationIndex::ElevatedSurface)
+                                    .tooltip(Tooltip::text(
+                                        "Make quick edits to fix issues in all edited files",
+                                    ))
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            this.trigger_fast_edit_for_message(
+                                                message_id, window, cx,
+                                            );
+                                        },
+                                    )),
+                                ),
+                            )
+                        },
+                    )
                     .when(has_tool_uses, |parent| {
                         parent.children(tool_uses.into_iter().map(|tool_use| {
                             self.render_tool_use(tool_use, window, workspace.clone(), cx)
                         }))
-                    }),
+                    })
+                    .children(self.fast_edit_views.get(&message_id).map(|view| {
+                        div()
+                            .border_t_1()
+                            .border_color(cx.theme().colors().border)
+                            .mt_2()
+                            .pt_2()
+                            .px(RESPONSE_PADDING_X)
+                            .child(view.clone())
+                    })),
                 Role::System => {
                     let colors = cx.theme().colors();
                     div().id(("message-container", ix)).py_1().px_2().child(
@@ -2870,10 +3021,12 @@ impl ActiveThread {
                         .border_t_1()
                         .border_color(self.tool_card_border_color(cx))
                         .child(
-                            Label::new("Result")
-                                .size(LabelSize::XSmall)
-                                .color(Color::Muted)
-                                .buffer_font(cx),
+                            h_flex().justify_between().w_full().child(
+                                Label::new("Result")
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted)
+                                    .buffer_font(cx),
+                            ),
                         )
                         .child(div().w_full().text_ui_sm(cx).children(
                             rendered_tool_use.as_ref().map(|rendered| {
