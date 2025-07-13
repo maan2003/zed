@@ -2,8 +2,8 @@ mod create_file_parser;
 mod edit_parser;
 #[cfg(test)]
 mod evals;
-mod streaming_fuzzy_matcher;
 
+use crate::streaming_fuzzy_matcher::StreamingFuzzyMatcher;
 use crate::{Template, Templates};
 use anyhow::Result;
 use assistant_tool::ActionLog;
@@ -27,7 +27,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{cmp, iter, mem, ops::Range, path::PathBuf, pin::Pin, sync::Arc, task::Poll};
 use streaming_diff::{CharOperation, StreamingDiff};
-use streaming_fuzzy_matcher::StreamingFuzzyMatcher;
 use util::debug_panic;
 use zed_llm_client::CompletionIntent;
 

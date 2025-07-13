@@ -14,6 +14,7 @@ mod open_tool;
 mod project_notifications_tool;
 mod read_file_tool;
 mod schema;
+mod streaming_fuzzy_matcher;
 mod templates;
 mod terminal_tool;
 mod thinking_tool;
