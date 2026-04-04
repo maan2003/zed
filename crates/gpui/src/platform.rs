@@ -9,7 +9,10 @@ pub mod layer_shell;
 #[cfg(any(test, feature = "test-support"))]
 mod test;
 
-#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+#[cfg(all(
+    any(target_os = "macos", target_os = "linux", target_os = "freebsd"),
+    any(test, feature = "test-support")
+))]
 mod visual_test;
 
 #[cfg(all(
@@ -77,7 +80,10 @@ pub(crate) use test::*;
 #[cfg(any(test, feature = "test-support"))]
 pub use test::{TestDispatcher, TestScreenCaptureSource, TestScreenCaptureStream};
 
-#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+#[cfg(all(
+    any(target_os = "macos", target_os = "linux", target_os = "freebsd"),
+    any(test, feature = "test-support")
+))]
 pub use visual_test::VisualTestPlatform;
 
 // TODO(jk): return an enum instead of a string
@@ -234,6 +240,11 @@ pub trait Platform: 'static {
     fn keyboard_layout(&self) -> Box<dyn PlatformKeyboardLayout>;
     fn keyboard_mapper(&self) -> Rc<dyn PlatformKeyboardMapper>;
     fn on_keyboard_layout_change(&self, callback: Box<dyn FnMut()>);
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn headless_renderer(&self) -> Option<Box<dyn PlatformHeadlessRenderer>> {
+        None
+    }
 }
 
 /// A handle to a platform's display, e.g. a monitor or laptop screen.

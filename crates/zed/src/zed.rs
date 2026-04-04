@@ -8,7 +8,10 @@ mod open_url_modal;
 mod quick_action_bar;
 pub mod remote_debug;
 pub mod telemetry_log;
-#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+#[cfg(all(
+    any(target_os = "macos", target_os = "linux"),
+    any(feature = "visual-tests")
+))]
 pub mod visual_tests;
 #[cfg(target_os = "windows")]
 pub(crate) mod windows_only_instance;
@@ -554,15 +557,15 @@ fn initialize_file_watcher(window: &mut Window, cx: &mut Context<Workspace>) {
     if let Err(e) = fs::fs_watcher::global(|_| {}) {
         let message = format!(
             db::indoc! {r#"
-            inotify_init returned {}
+            ReadDirectoryChangesW initialization failed: {}
 
-            This may be due to system-wide limits on inotify instances. For troubleshooting see: https://zed.dev/docs/linux
+            This may occur on network filesystems and WSL paths. For troubleshooting see: https://zed.dev/docs/windows
             "#},
             e
         );
         let prompt = window.prompt(
             PromptLevel::Critical,
-            "Could not start inotify",
+            "Could not start ReadDirectoryChangesW",
             Some(&message),
             &["Troubleshoot and Quit"],
             cx,
@@ -570,8 +573,8 @@ fn initialize_file_watcher(window: &mut Window, cx: &mut Context<Workspace>) {
         cx.spawn(async move |_, cx| {
             if prompt.await == Ok(0) {
                 cx.update(|cx| {
-                    cx.open_url("https://zed.dev/docs/linux#could-not-start-inotify");
-                    cx.quit();
+                    cx.open_url("https://zed.dev/docs/windows");
+                    cx.quit()
                 });
             }
         })

@@ -6,7 +6,7 @@
 //! It allows capturing screenshots of the real Zed application window and comparing
 //! them against baseline images.
 //!
-//! ## Important: Main Thread Requirement
+//! ## Important: Platform Requirements
 //!
 //! On macOS, the `VisualTestAppContext` must be created on the main thread.
 //! Standard Rust tests run on worker threads, so visual tests that use
@@ -15,13 +15,13 @@
 //! ## Running Visual Tests
 //!
 //! Visual tests are marked with `#[ignore]` by default because:
-//! 1. They require macOS with Screen Recording permission
-//! 2. They need to run on the main thread
+//! 1. They require a real desktop session (for example, macOS AppKit or Linux X11/Wayland)
+//! 2. On macOS they need to run on the main thread
 //! 3. They may produce different results on different displays/resolutions
 //!
 //! To run visual tests:
 //! ```bash
-//! # Run all visual tests (requires macOS, may need Screen Recording permission)
+//! # Run all visual tests on a supported desktop session
 //! cargo test -p zed visual_tests -- --ignored --test-threads=1
 //!
 //! # Update baselines when UI intentionally changes
@@ -428,11 +428,17 @@ mod tests {
     fn test_visual_test_smoke() {
         let mut cx = VisualTestAppContext::new(gpui_platform::current_platform(false));
 
-        let _window = cx
+        let window = cx
             .open_offscreen_window_default(|_, cx| cx.new(|_| Empty))
             .expect("Failed to open offscreen window");
 
         cx.run_until_parked();
+
+        let screenshot = cx
+            .capture_screenshot(window.into())
+            .expect("Failed to capture screenshot");
+        assert!(screenshot.width() > 0);
+        assert!(screenshot.height() > 0);
     }
 
     #[test]

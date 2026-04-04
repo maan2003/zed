@@ -2,21 +2,22 @@ use crate::{
     Action, AnyView, AnyWindowHandle, App, AppCell, AppContext, AssetSource, BackgroundExecutor,
     Bounds, ClipboardItem, Context, Entity, ForegroundExecutor, Global, InputEvent, Keystroke,
     Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Platform, Point,
-    Render, Result, Size, Task, TestDispatcher, TextSystem, VisualTestPlatform, Window,
-    WindowBounds, WindowHandle, WindowOptions, app::GpuiMode,
+    Render, Result, Size, Task, TestDispatcher, TestPlatform, TextSystem, VisualTestPlatform,
+    Window, WindowBounds, WindowHandle, WindowOptions, app::GpuiMode,
 };
 use anyhow::anyhow;
 use image::RgbaImage;
 use std::{future::Future, rc::Rc, sync::Arc, time::Duration};
 
-/// A test context that uses real macOS rendering instead of mocked rendering.
+/// A test context that uses real platform rendering instead of mocked rendering.
 /// This is used for visual tests that need to capture actual screenshots.
 ///
 /// Unlike `TestAppContext` which uses `TestPlatform` with mocked rendering,
-/// `VisualTestAppContext` uses the real `MacPlatform` to produce actual rendered output.
+/// `VisualTestAppContext` uses the current platform implementation to produce actual rendered
+/// output.
 ///
-/// Windows created through this context are positioned off-screen (at coordinates like -10000, -10000)
-/// so they are invisible to the user but still fully rendered by the compositor.
+/// Windows created through this context are hidden by default and also positioned far off-screen
+/// as a best-effort fallback for platforms that still honor window coordinates while hidden.
 #[derive(Clone)]
 pub struct VisualTestAppContext {
     /// The underlying app cell
@@ -32,7 +33,7 @@ pub struct VisualTestAppContext {
 }
 
 impl VisualTestAppContext {
-    /// Creates a new `VisualTestAppContext` with real macOS platform rendering
+    /// Creates a new `VisualTestAppContext` with real platform rendering
     /// but deterministic task scheduling via TestDispatcher.
     ///
     /// This provides:
@@ -60,14 +61,24 @@ impl VisualTestAppContext {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
 
-        // Create a visual test platform that combines real Mac rendering
-        // with controllable TestDispatcher for deterministic task scheduling
-        let platform = Rc::new(VisualTestPlatform::new(platform, seed));
+        let dispatcher = TestDispatcher::new(seed);
+        let arc_dispatcher = Arc::new(dispatcher.clone());
+        let background_executor = BackgroundExecutor::new(arc_dispatcher.clone());
+        let foreground_executor = ForegroundExecutor::new(arc_dispatcher);
 
-        // Get the dispatcher and executors from the platform
-        let dispatcher = platform.dispatcher().clone();
-        let background_executor = platform.background_executor();
-        let foreground_executor = platform.foreground_executor();
+        let platform: Rc<dyn Platform> = if platform.compositor_name() == "headless" {
+            let renderer_platform = platform.clone();
+            let renderer_factory = Box::new(move || renderer_platform.headless_renderer());
+
+            TestPlatform::with_platform(
+                background_executor.clone(),
+                foreground_executor.clone(),
+                platform.text_system(),
+                Some(renderer_factory),
+            )
+        } else {
+            Rc::new(VisualTestPlatform::new(platform, seed))
+        };
 
         let text_system = Arc::new(TextSystem::new(platform.text_system()));
 
@@ -86,10 +97,10 @@ impl VisualTestAppContext {
         }
     }
 
-    /// Opens a window positioned off-screen for invisible rendering.
+    /// Opens a hidden window for invisible rendering.
     ///
-    /// The window is positioned at (-10000, -10000) so it's not visible on any display,
-    /// but it's still fully rendered by the compositor and can be captured via ScreenCaptureKit.
+    /// The window is also positioned at (-10000, -10000) as a best-effort fallback on
+    /// platforms that still observe the requested origin while hidden.
     ///
     /// # Arguments
     /// * `size` - The size of the window to create
@@ -111,7 +122,7 @@ impl VisualTestAppContext {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 focus: false,
-                show: true,
+                show: false,
                 ..Default::default()
             },
             build_root,

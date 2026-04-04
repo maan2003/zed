@@ -136,6 +136,7 @@ Other entities can then register a callback to handle these events by doing `cx.
 ## Build guidelines
 
 - Use `./script/clippy` instead of `cargo clippy`
+- For Linux headless visual screenshot verification in this repo, use `./script/visual-test-smoke-linux` instead of reconstructing the `nixGL` invocation by hand.
 
 # Pull request hygiene
 

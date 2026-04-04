@@ -1,4 +1,4 @@
-//! Visual test platform that combines real rendering (macOs-only for now) with controllable TestDispatcher.
+//! Visual test platform that combines real rendering with controllable TestDispatcher.
 //!
 //! This platform is used for visual tests that need:
 //! - Real rendering (e.g. Metal/compositor) for accurate screenshots
@@ -22,10 +22,10 @@ use std::{
     sync::Arc,
 };
 
-/// A platform that combines real Mac rendering with controllable TestDispatcher.
+/// A platform that combines real platform rendering with controllable TestDispatcher.
 ///
 /// This allows visual tests to:
-/// - Render real UI via Metal for accurate screenshots
+/// - Render real UI via the active platform renderer for accurate screenshots
 /// - Control task scheduling deterministically via TestDispatcher
 /// - Advance simulated time for testing time-based behaviors (tooltips, animations, etc.)
 pub struct VisualTestPlatform {
@@ -34,6 +34,9 @@ pub struct VisualTestPlatform {
     foreground_executor: ForegroundExecutor,
     platform: Rc<dyn Platform>,
     clipboard: Mutex<Option<ClipboardItem>>,
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    primary: Mutex<Option<ClipboardItem>>,
+    #[cfg(target_os = "macos")]
     find_pasteboard: Mutex<Option<ClipboardItem>>,
 }
 
@@ -54,6 +57,9 @@ impl VisualTestPlatform {
             foreground_executor,
             platform,
             clipboard: Mutex::new(None),
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            primary: Mutex::new(None),
+            #[cfg(target_os = "macos")]
             find_pasteboard: Mutex::new(None),
         }
     }
@@ -212,6 +218,16 @@ impl Platform for VisualTestPlatform {
 
     fn write_to_clipboard(&self, item: ClipboardItem) {
         *self.clipboard.lock() = Some(item);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn read_from_primary(&self) -> Option<ClipboardItem> {
+        self.primary.lock().clone()
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn write_to_primary(&self, item: ClipboardItem) {
+        *self.primary.lock() = Some(item);
     }
 
     #[cfg(target_os = "macos")]

@@ -1687,6 +1687,12 @@ impl PlatformWindow for X11Window {
         inner.renderer.sprite_atlas().clone()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    fn render_to_image(&self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
+        let mut inner = self.0.state.borrow_mut();
+        inner.renderer.render_to_image(scene)
+    }
+
     fn show_window_menu(&self, position: Point<Pixels>) {
         let state = self.0.state.borrow();
 

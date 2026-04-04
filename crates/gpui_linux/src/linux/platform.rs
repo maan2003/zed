@@ -22,6 +22,8 @@ use util::command::{new_command, new_std_command};
 use xkbcommon::xkb::{self, Keycode, Keysym, State};
 
 use crate::linux::{LinuxDispatcher, PriorityQueueCalloopReceiver};
+#[cfg(any(test, feature = "test-support"))]
+use gpui::PlatformHeadlessRenderer;
 use gpui::{
     Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, DisplayId,
     ForegroundExecutor, Keymap, Menu, MenuItem, OwnedMenu, PathPromptOptions, Platform,
@@ -314,6 +316,25 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
 
     fn open_url(&self, url: &str) {
         self.inner.open_uri(url);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn headless_renderer(&self) -> Option<Box<dyn PlatformHeadlessRenderer>> {
+        #[cfg(any(feature = "wayland", feature = "x11"))]
+        {
+            match gpui_wgpu::WgpuHeadlessRenderer::new() {
+                Ok(renderer) => Some(Box::new(renderer)),
+                Err(error) => {
+                    log::error!("Failed to create Linux headless renderer: {error:#}");
+                    None
+                }
+            }
+        }
+
+        #[cfg(not(any(feature = "wayland", feature = "x11")))]
+        {
+            None
+        }
     }
 
     fn on_open_urls(&self, callback: Box<dyn FnMut(Vec<String>)>) {

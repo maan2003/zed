@@ -334,6 +334,13 @@ impl Platform for TestPlatform {
         Ok(Box::new(window))
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    fn headless_renderer(&self) -> Option<Box<dyn PlatformHeadlessRenderer>> {
+        self.headless_renderer_factory
+            .as_ref()
+            .and_then(|factory| factory())
+    }
+
     fn window_appearance(&self) -> WindowAppearance {
         WindowAppearance::Light
     }
