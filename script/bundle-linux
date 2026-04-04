@@ -25,6 +25,7 @@ while [[ $# -gt 0 ]]; do
         --flatpak)
             export ZED_BUNDLE_TYPE=flatpak
             shift
+            shift
             ;;
         --)
             shift

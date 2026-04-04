@@ -1,10 +1,23 @@
 { inputs, ... }:
 pkgs:
 let
-  rustBin = inputs.rust-overlay.lib.mkRustBin { } pkgs;
+  rustToolchain = builtins.fromTOML (builtins.readFile ../rust-toolchain.toml);
+  toolchainChannel =
+    if builtins.match "[0-9].*" rustToolchain.toolchain.channel != null then
+      "stable"
+    else
+      rustToolchain.toolchain.channel;
+  flakeboxLib = inputs.flakebox.lib.mkLib pkgs {
+    config = {
+      toolchain.channel = toolchainChannel;
+      toolchain.components = [
+        "cargo"
+        "rustc"
+      ] ++ rustToolchain.toolchain.components;
+    };
+  };
 in
 pkgs.callPackage ./build.nix {
-  crane = inputs.crane.mkLib pkgs;
-  rustToolchain = rustBin.fromRustupToolchainFile ../rust-toolchain.toml;
+  inherit flakeboxLib;
   commitSha = inputs.self.rev or null;
 }

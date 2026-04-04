@@ -5,5 +5,6 @@ components = [ "rustfmt", "clippy", "rust-analyzer", "rust-src" ]
 targets = [
     "wasm32-wasip2", # extensions
     "wasm32-unknown-unknown", # gpui on the web
+    "aarch64-unknown-linux-gnu", # linux cross builds
     "x86_64-unknown-linux-musl", # remote server
 ]

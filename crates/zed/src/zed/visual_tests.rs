@@ -61,7 +61,6 @@ pub fn init_visual_test(cx: &mut VisualTestAppContext) -> Arc<AppState> {
         theme_settings::ThemeSettings::override_global(theme_settings, cx);
         theme_settings::reload_theme(cx);
         theme_settings::reload_icon_theme(cx);
-        audio::init(cx);
         workspace::init(app_state.clone(), cx);
         release_channel::init(semver::Version::new(0, 0, 0), cx);
         command_palette::init(cx);
