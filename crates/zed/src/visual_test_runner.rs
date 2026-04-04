@@ -108,7 +108,7 @@ use {
     image::RgbaImage,
     project::{AgentId, Project},
     project_panel::ProjectPanel,
-    settings::{NotifyWhenAgentWaiting, PlaySoundWhenAgentDone, Settings as _},
+    settings::{NotifyWhenAgentWaiting, PlaySoundWhenAgentDone, Settings as _, ThemeName},
     settings_ui::SettingsWindow,
     std::{
         any::Any,
@@ -117,6 +117,7 @@ use {
         sync::Arc,
         time::Duration,
     },
+    theme::{Appearance, SystemAppearance},
     util::ResultExt as _,
     workspace::{AppState, MultiWorkspace, Workspace},
     zed_actions::OpenSettingsAt,
@@ -142,6 +143,16 @@ mod constants {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use constants::*;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn apply_dark_visual_theme(cx: &mut App) {
+    *SystemAppearance::global_mut(cx) = SystemAppearance(Appearance::Dark);
+    let mut theme_settings = theme_settings::ThemeSettings::get_global(cx).clone();
+    theme_settings.theme = theme_settings::ThemeSelection::Static(ThemeName("One Dark".into()));
+    theme_settings::ThemeSettings::override_global(theme_settings, cx);
+    theme_settings::reload_theme(cx);
+    theme_settings::reload_icon_theme(cx);
+}
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn run_visual_tests(project_path: PathBuf, update_baseline: bool) -> Result<()> {
@@ -173,7 +184,8 @@ fn run_visual_tests(project_path: PathBuf, update_baseline: bool) -> Result<()> 
     // Initialize all Zed subsystems
     cx.update(|cx| {
         gpui_tokio::init(cx);
-        theme_settings::init(theme::LoadThemes::JustBase, cx);
+        theme_settings::init(theme::LoadThemes::All(Box::new(Assets)), cx);
+        apply_dark_visual_theme(cx);
         client::init(&app_state.client, cx);
         audio::init(cx);
         workspace::init(app_state.clone(), cx);
@@ -1373,6 +1385,7 @@ fn run_settings_ui_subpage_visual_tests(
         .context("Settings window not found")?;
 
     // Refresh and capture screenshot
+    cx.update(apply_dark_visual_theme);
     cx.update_window(settings_window_1.into(), |_, window, _cx| {
         window.refresh();
     })?;
@@ -1418,6 +1431,7 @@ fn run_settings_ui_subpage_visual_tests(
         .context("Settings window not found for sub-page test")?;
 
     // Refresh and capture screenshot
+    cx.update(apply_dark_visual_theme);
     cx.update_window(settings_window_2.into(), |_, window, _cx| {
         window.refresh();
     })?;
@@ -2451,6 +2465,7 @@ fn run_tool_permissions_visual_tests(
     }
 
     // Refresh and redraw so the "Test Your Rules" input is present
+    cx.update(apply_dark_visual_theme);
     cx.update_window(settings_window, |_, window, cx| {
         window.draw(cx).clear();
     })

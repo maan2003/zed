@@ -34,13 +34,16 @@
 //! environment variable, or `target/visual_tests` by default.
 
 use anyhow::{Result, anyhow};
+use assets::Assets;
 use gpui::{
     AnyWindowHandle, AppContext as _, Empty, Size, VisualTestAppContext, WindowHandle, px, size,
 };
 use image::{ImageBuffer, Rgba, RgbaImage};
+use settings::{Settings as _, ThemeName};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+use theme::{Appearance, SystemAppearance};
 use workspace::AppState;
 
 /// Initialize a visual test context with all necessary Zed subsystems.
@@ -51,7 +54,13 @@ pub fn init_visual_test(cx: &mut VisualTestAppContext) -> Arc<AppState> {
         let app_state = AppState::test(cx);
 
         gpui_tokio::init(cx);
-        theme_settings::init(theme::LoadThemes::JustBase, cx);
+        *SystemAppearance::global_mut(cx) = SystemAppearance(Appearance::Dark);
+        theme_settings::init(theme::LoadThemes::All(Box::new(Assets)), cx);
+        let mut theme_settings = theme_settings::ThemeSettings::get_global(cx).clone();
+        theme_settings.theme = theme_settings::ThemeSelection::Static(ThemeName("One Dark".into()));
+        theme_settings::ThemeSettings::override_global(theme_settings, cx);
+        theme_settings::reload_theme(cx);
+        theme_settings::reload_icon_theme(cx);
         audio::init(cx);
         workspace::init(app_state.clone(), cx);
         release_channel::init(semver::Version::new(0, 0, 0), cx);
