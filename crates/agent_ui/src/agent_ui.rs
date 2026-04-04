@@ -62,6 +62,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::{DockPosition, DockSide, LanguageModelSelection, Settings as _, SettingsStore};
 use std::any::TypeId;
+use terminal_view::terminal_panel::TerminalPanel;
 use workspace::Workspace;
 
 use crate::agent_configuration::{ConfigureContextServerModal, ManageProfilesModal};
@@ -202,8 +203,89 @@ actions!(
         ScrollOutputToNextMessage,
         /// Import agent threads from other Zed release channels (e.g. Preview, Nightly).
         ImportThreadsFromOtherChannels,
+        /// Switches to the normal workspace mode.
+        SetNormalMode,
+        /// Switches to the terminal-only workspace mode.
+        SetTerminalOnlyMode,
+        /// Switches to the agent-only workspace mode.
+        SetAgentOnlyMode,
+        /// Switches to the agent-and-editor workspace mode.
+        SetAgentEditorMode,
     ]
 );
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkspaceMode {
+    Normal,
+    TerminalOnly,
+    AgentOnly,
+    AgentEditor,
+}
+
+fn set_center_zoom(
+    workspace: &mut Workspace,
+    zoomed: bool,
+    _window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    workspace.set_active_pane_zoomed(zoomed, _window, cx);
+}
+
+fn set_agent_zoom(
+    workspace: &mut Workspace,
+    zoomed: bool,
+    _window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    workspace.set_panel_zoomed::<AgentPanel>(zoomed, _window, cx);
+}
+
+fn set_terminal_zoom(
+    workspace: &mut Workspace,
+    zoomed: bool,
+    _window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    workspace.set_panel_zoomed::<TerminalPanel>(zoomed, _window, cx);
+}
+
+fn apply_workspace_mode(
+    workspace: &mut Workspace,
+    mode: WorkspaceMode,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    // Workspace modes only change the active workspace layout. The threads sidebar is
+    // window-level MultiWorkspace state, and mutating it here can re-enter Workspace updates.
+    set_center_zoom(workspace, false, window, cx);
+    set_agent_zoom(workspace, false, window, cx);
+    set_terminal_zoom(workspace, false, window, cx);
+
+    match mode {
+        WorkspaceMode::Normal => {
+            workspace.close_panel::<AgentPanel>(window, cx);
+            workspace.close_panel::<TerminalPanel>(window, cx);
+            workspace.focus_center_pane(window, cx);
+        }
+        WorkspaceMode::TerminalOnly => {
+            workspace.close_panel::<AgentPanel>(window, cx);
+            workspace.reveal_panel::<TerminalPanel>(window, cx);
+            set_terminal_zoom(workspace, true, window, cx);
+            workspace.focus_panel::<TerminalPanel>(window, cx);
+        }
+        WorkspaceMode::AgentOnly => {
+            workspace.close_panel::<TerminalPanel>(window, cx);
+            workspace.reveal_panel::<AgentPanel>(window, cx);
+            set_agent_zoom(workspace, true, window, cx);
+            workspace.focus_panel::<AgentPanel>(window, cx);
+        }
+        WorkspaceMode::AgentEditor => {
+            workspace.close_panel::<TerminalPanel>(window, cx);
+            workspace.reveal_panel::<AgentPanel>(window, cx);
+            workspace.focus_panel::<AgentPanel>(window, cx);
+        }
+    }
+}
 
 /// Action to authorize a tool call with a specific permission option.
 /// This is used by the permission granularity dropdown to authorize tool calls.
@@ -486,6 +568,22 @@ pub fn init(
     })
     .detach();
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
+        workspace
+            .register_action(|workspace, _: &SetNormalMode, window, cx| {
+                apply_workspace_mode(workspace, WorkspaceMode::Normal, window, cx);
+            })
+            .register_action(|workspace, _: &SetTerminalOnlyMode, window, cx| {
+                apply_workspace_mode(workspace, WorkspaceMode::TerminalOnly, window, cx);
+            })
+            .register_action(|workspace, _: &SetAgentOnlyMode, window, cx| {
+                apply_workspace_mode(workspace, WorkspaceMode::AgentOnly, window, cx);
+            })
+            .register_action(|workspace, _: &SetAgentEditorMode, window, cx| {
+                apply_workspace_mode(workspace, WorkspaceMode::AgentEditor, window, cx);
+            });
+    })
+    .detach();
+    cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
         workspace.register_action(
             move |workspace: &mut Workspace,
                   _: &zed_actions::AcpRegistry,
@@ -744,10 +842,11 @@ mod tests {
     use db::kvp::KeyValueStore;
     use editor::actions::AcceptEditPrediction;
     use gpui::{BorrowAppContext, TestAppContext, px};
-    use project::DisableAiSettings;
+    use project::{DisableAiSettings, Project};
     use settings::{
         DockPosition, NotifyWhenAgentWaiting, PlaySoundWhenAgentDone, Settings, SettingsStore,
     };
+    use workspace::MultiWorkspace;
 
     #[gpui::test]
     fn test_agent_command_palette_visibility(cx: &mut TestAppContext) {
@@ -898,6 +997,55 @@ mod tests {
         });
 
         fs
+    }
+
+    fn init_workspace_mode_test(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            DisableAiSettings::register(cx);
+            cx.update_flags(false, vec!["agent-v2".into()]);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_workspace_modes_preserve_sidebar_open_state(cx: &mut TestAppContext) {
+        init_workspace_mode_test(cx);
+        let fs = fs::FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+
+        multi_workspace.update_in(cx, |multi_workspace, _window, cx| {
+            multi_workspace.open_sidebar(cx);
+            assert!(multi_workspace.sidebar_open());
+        });
+
+        let workspace = multi_workspace.read_with(cx, |multi_workspace, _cx| {
+            multi_workspace.workspace().clone()
+        });
+
+        for mode in [
+            WorkspaceMode::Normal,
+            WorkspaceMode::TerminalOnly,
+            WorkspaceMode::AgentOnly,
+            WorkspaceMode::AgentEditor,
+        ] {
+            workspace.update_in(cx, |workspace, window, cx| {
+                apply_workspace_mode(workspace, mode, window, cx);
+            });
+
+            cx.run_until_parked();
+
+            multi_workspace.read_with(cx, |multi_workspace, _cx| {
+                assert!(
+                    multi_workspace.sidebar_open(),
+                    "workspace mode {mode:?} should not close the threads sidebar"
+                );
+            });
+        }
     }
 
     #[gpui::test]

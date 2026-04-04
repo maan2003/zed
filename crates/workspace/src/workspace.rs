@@ -4243,6 +4243,61 @@ impl Workspace {
         self.open_panel::<T>(window, cx);
     }
 
+    pub fn set_active_pane_zoomed(
+        &mut self,
+        zoomed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let active_pane = self.active_pane.clone();
+        if active_pane.read(cx).is_zoomed() == zoomed {
+            return;
+        }
+
+        active_pane.update(cx, |pane, cx| pane.set_zoomed(zoomed, cx));
+
+        if zoomed {
+            self.zoomed = Some(active_pane.downgrade().into());
+        } else {
+            self.zoomed = None;
+        }
+        self.zoomed_position = None;
+        self.update_active_view_for_followers(window, cx);
+        self.serialize_workspace(window, cx);
+        cx.emit(Event::ZoomChanged);
+        cx.notify();
+    }
+
+    pub fn set_panel_zoomed<T: Panel>(
+        &mut self,
+        zoomed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(panel) = self.panel::<T>(cx) else {
+            return;
+        };
+
+        if panel.read(cx).is_zoomed(window, cx) == zoomed {
+            return;
+        }
+
+        panel.update(cx, |panel, cx| panel.set_zoomed(zoomed, window, cx));
+
+        let panel_position = panel.read(cx).position(window, cx);
+        if zoomed {
+            self.zoomed = Some(panel.downgrade().into());
+            self.zoomed_position = Some(panel_position);
+        } else if self.zoomed_position == Some(panel_position) {
+            self.zoomed = None;
+            self.zoomed_position = None;
+        }
+
+        self.serialize_workspace(window, cx);
+        cx.emit(Event::ZoomChanged);
+        cx.notify();
+    }
+
     pub fn close_panel<T: Panel>(&self, window: &mut Window, cx: &mut Context<Self>) {
         for dock in self.all_docks().iter() {
             dock.update(cx, |dock, cx| {
@@ -15086,6 +15141,44 @@ mod tests {
                 "Dock should stay open when its zoomed panel (without pane()) still has focus"
             );
             assert!(panel.is_zoomed(window, cx));
+        });
+    }
+
+    #[gpui::test]
+    async fn test_workspace_mode_zoom_helpers_do_not_reenter_workspace(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| TestPanel::new(DockPosition::Right, 100, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace
+                .right_dock()
+                .update(cx, |dock, cx| dock.set_open(true, window, cx));
+            panel
+        });
+
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        pane.update_in(cx, |pane, window, cx| {
+            pane.add_item(Box::new(cx.new(TestItem::new)), true, true, None, window, cx);
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.set_active_pane_zoomed(true, window, cx);
+            workspace.set_active_pane_zoomed(false, window, cx);
+            workspace.reveal_panel::<TestPanel>(window, cx);
+            workspace.set_panel_zoomed::<TestPanel>(true, window, cx);
+            workspace.focus_panel::<TestPanel>(window, cx);
+
+            assert!(workspace.right_dock().read(cx).is_open());
+            assert!(!workspace.active_pane().read(cx).is_zoomed());
+            assert!(panel.is_zoomed(window, cx));
+            assert!(panel.read(cx).focus_handle(cx).contains_focused(window, cx));
+            assert_eq!(workspace.zoomed_position, Some(DockPosition::Right));
         });
     }
 

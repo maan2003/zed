@@ -29,6 +29,8 @@ members = [
     "crates/cloud_api_client",
     "crates/cloud_api_types",
     "crates/cloud_llm_client",
+    "crates/codex_app_client",
+    "crates/codex_app_protocol",
     "crates/codestral",
     "crates/collab",
     "crates/collab_ui",
@@ -289,6 +291,8 @@ clock = { path = "crates/clock" }
 cloud_api_client = { path = "crates/cloud_api_client" }
 cloud_api_types = { path = "crates/cloud_api_types" }
 cloud_llm_client = { path = "crates/cloud_llm_client" }
+codex_app_client = { path = "crates/codex_app_client" }
+codex_app_protocol = { path = "crates/codex_app_protocol" }
 collab = { path = "crates/collab" }
 collab_ui = { path = "crates/collab_ui" }
 collections = { path = "crates/collections", version = "0.1.0" }

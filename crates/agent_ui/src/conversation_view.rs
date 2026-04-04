@@ -969,18 +969,13 @@ impl ConversationView {
             )
         });
 
-        let count = thread.read(cx).entries().len();
         let list_state = ListState::new(0, gpui::ListAlignment::Top, px(2048.0));
         list_state.set_follow_mode(gpui::FollowMode::Tail);
 
         entry_view_state.update(cx, |view_state, cx| {
-            for ix in 0..count {
+            for ix in 0..thread.read(cx).entries().len() {
                 view_state.sync_entry(ix, &thread, window, cx);
             }
-            list_state.splice_focusable(
-                0..0,
-                (0..count).map(|ix| view_state.entry(ix)?.focus_handle(cx)),
-            );
         });
 
         if let Some(scroll_position) = thread.read(cx).ui_scroll_position() {
@@ -1369,30 +1364,23 @@ impl ConversationView {
                 let index = len - 1;
                 if let Some(active) = self.thread_view(&session_id) {
                     let entry_view_state = active.read(cx).entry_view_state.clone();
-                    let list_state = active.read(cx).list_state.clone();
                     entry_view_state.update(cx, |view_state, cx| {
                         view_state.sync_entry(index, thread, window, cx);
-                        list_state.splice_focusable(
-                            index..index,
-                            [view_state
-                                .entry(index)
-                                .and_then(|entry| entry.focus_handle(cx))],
-                        );
                     });
                     active.update(cx, |active, cx| {
                         active.sync_editor_mode_for_empty_state(cx);
+                        active.sync_thread_items_after_new_entry(cx);
                     });
                 }
             }
             AcpThreadEvent::EntryUpdated(index) => {
                 if let Some(active) = self.thread_view(&session_id) {
                     let entry_view_state = active.read(cx).entry_view_state.clone();
-                    let list_state = active.read(cx).list_state.clone();
                     entry_view_state.update(cx, |view_state, cx| {
                         view_state.sync_entry(*index, thread, window, cx);
                     });
-                    list_state.remeasure_items(*index..*index + 1);
                     active.update(cx, |active, cx| {
+                        active.sync_thread_items_after_entry_update(*index, cx);
                         active.auto_expand_streaming_thought(cx);
                     });
                 }
@@ -1400,11 +1388,10 @@ impl ConversationView {
             AcpThreadEvent::EntriesRemoved(range) => {
                 if let Some(active) = self.thread_view(&session_id) {
                     let entry_view_state = active.read(cx).entry_view_state.clone();
-                    let list_state = active.read(cx).list_state.clone();
                     entry_view_state.update(cx, |view_state, _cx| view_state.remove(range.clone()));
-                    list_state.splice(range.clone(), 0);
                     active.update(cx, |active, cx| {
                         active.sync_editor_mode_for_empty_state(cx);
+                        active.sync_thread_items_after_entries_removed(range.start, cx);
                     });
                 }
             }
@@ -4988,8 +4975,48 @@ pub(crate) mod tests {
         active_thread(&conversation_view, cx).update(cx, |view, cx| {
             view.scroll_to_most_recent_user_prompt(cx);
             let scroll_top = view.list_state.logical_scroll_top();
-            // Entries layout is: [User1, Assistant1, User2, Assistant2]
-            assert_eq!(scroll_top.item_ix, 2);
+            // Turn layout is: [Turn1, Turn2]
+            assert_eq!(scroll_top.item_ix, 1);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_thread_list_uses_turn_items(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let connection = StubAgentConnection::new();
+        connection.set_next_prompt_updates(vec![acp::SessionUpdate::AgentMessageChunk(
+            acp::ContentChunk::new("Response 1".into()),
+        )]);
+
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::new(connection.clone()), cx).await;
+
+        let thread = conversation_view
+            .read_with(cx, |view, cx| {
+                view.active_thread()
+                    .map(|thread_view| thread_view.read(cx).thread.clone())
+            })
+            .unwrap();
+
+        thread
+            .update(cx, |thread, cx| thread.send_raw("Prompt 1", cx))
+            .await
+            .unwrap();
+        cx.run_until_parked();
+
+        connection.set_next_prompt_updates(vec![acp::SessionUpdate::AgentMessageChunk(
+            acp::ContentChunk::new("Response 2".into()),
+        )]);
+
+        thread
+            .update(cx, |thread, cx| thread.send_raw("Prompt 2", cx))
+            .await
+            .unwrap();
+        cx.run_until_parked();
+
+        active_thread(&conversation_view, cx).read_with(cx, |view, _cx| {
+            assert_eq!(view.list_state.item_count(), 2);
         });
     }
 
