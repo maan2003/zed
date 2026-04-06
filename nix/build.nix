@@ -46,6 +46,7 @@
 assert stdenv.hostPlatform.isLinux;
 assert withGLES -> stdenv.hostPlatform.isLinux;
 let
+  fixedCommitSha = "1234567890123456789012345678901234567890";
   targetPkgs = if toolchainName == "aarch64-linux" then pkgs.pkgsCross.aarch64-multiplatform else pkgs;
   zedCargo = builtins.fromTOML (builtins.readFile ../crates/zed/Cargo.toml);
   gpuLib = if withGLES then targetPkgs.libglvnd else targetPkgs.vulkan-loader;
@@ -68,7 +69,7 @@ let
     };
     ZED_UPDATE_EXPLANATION = "Zed has been installed using Nix. Auto-updates have thus been disabled.";
     RELEASE_VERSION = version;
-    ZED_COMMIT_SHA = lib.optionalString (commitSha != null) commitSha;
+    ZED_COMMIT_SHA = fixedCommitSha;
     PROTOC = "${protobuf}/bin/protoc";
     TARGET_DIR =
       "target/"
@@ -81,7 +82,7 @@ let
   version =
     zedCargo.package.version
     + "-nightly"
-    + lib.optionalString (commitSha != null) "+${builtins.substring 0 7 commitSha}";
+    + "+${builtins.substring 0 7 fixedCommitSha}";
   src = flakeboxLib.filterSubPaths {
     root = builtins.path {
       name = "zed-source";
@@ -188,11 +189,13 @@ let
     };
   }
   // lib.optionalAttrs (toolchainName == "aarch64-linux") {
+    # flakebox's cross clang target helper hardcodes the prefixed ld path, so
+    # override the target rustflags here to force mold instead.
     CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS =
-      "${toolchain.commonArgs.CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS or ""} -L native=${targetPkgs.libxcb}/lib -L native=${targetPkgs.libx11}/lib -L native=${targetPkgs.libxkbcommon}/lib";
+      "-C link-arg=-fuse-ld=${pkgs.mold-wrapped}/bin/mold -C link-arg=-Wl,--compress-debug-sections=zlib -L native=${targetPkgs.libxcb}/lib -L native=${targetPkgs.libx11}/lib -L native=${targetPkgs.libxkbcommon}/lib";
   };
   toolchains = flakeboxLib.mkStdToolchains {
-    stdenv = pkgs': pkgs'.llvmPackages.stdenv;
+    stdenv = pkgs': pkgs'.stdenvAdapters.useMoldLinker pkgs'.llvmPackages.stdenv;
   };
   toolchain = toolchains.${toolchainName};
   builds = (flakeboxLib.craneMultiBuild {
