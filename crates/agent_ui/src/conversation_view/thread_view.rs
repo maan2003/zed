@@ -3,6 +3,7 @@ use crate::{
     agent_configuration::configure_context_server_modal::default_markdown_style,
 };
 use std::cell::RefCell;
+use std::ops::Range;
 
 use acp_thread::{ContentBlock, PlanEntry};
 use cloud_api_types::{SubmitAgentThreadFeedbackBody, SubmitAgentThreadFeedbackCommentsBody};
@@ -292,9 +293,12 @@ pub struct ThreadView {
     pub expanded_tool_calls: HashSet<agent_client_protocol::ToolCallId>,
     pub expanded_tool_call_raw_inputs: HashSet<agent_client_protocol::ToolCallId>,
     pub expanded_thinking_blocks: HashSet<(usize, usize)>,
+    pub expanded_turns: HashSet<usize>,
+    thread_items: Vec<ThreadItem>,
     auto_expanded_thinking_block: Option<(usize, usize)>,
     user_toggled_thinking_blocks: HashSet<(usize, usize)>,
     pub subagent_scroll_handles: RefCell<HashMap<acp::SessionId, ScrollHandle>>,
+    turn_work_scroll_handles: RefCell<HashMap<usize, ScrollHandle>>,
     pub edits_expanded: bool,
     pub plan_expanded: bool,
     pub queue_expanded: bool,
@@ -353,6 +357,68 @@ pub struct TurnFields {
     pub turn_generation: usize,
     pub turn_started_at: Option<Instant>,
     pub turn_tokens: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TurnPresentation {
+    start_entry_ix: usize,
+    end_entry_ix: usize,
+    final_assistant_ix: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThreadItem {
+    Entry { entry_ix: usize },
+    Turn(TurnPresentation),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TurnWorkSummaryAction {
+    ExpandCollapsed,
+    ExpandPreview,
+    Collapse,
+}
+
+impl TurnWorkSummaryAction {
+    fn icon_name(self) -> IconName {
+        match self {
+            Self::ExpandCollapsed => IconName::ChevronDown,
+            Self::ExpandPreview => IconName::Maximize,
+            Self::Collapse => IconName::ChevronUp,
+        }
+    }
+
+    fn tooltip(self) -> &'static str {
+        match self {
+            Self::ExpandCollapsed => "Show work",
+            Self::ExpandPreview => "Expand work",
+            Self::Collapse => "Collapse work",
+        }
+    }
+}
+
+impl ThreadItem {
+    fn start_entry_ix(self) -> usize {
+        match self {
+            Self::Entry { entry_ix } => entry_ix,
+            Self::Turn(turn) => turn.start_entry_ix,
+        }
+    }
+
+    fn end_entry_ix(self) -> usize {
+        match self {
+            Self::Entry { entry_ix } => entry_ix + 1,
+            Self::Turn(turn) => turn.end_entry_ix,
+        }
+    }
+
+    fn contains_entry_ix(self, entry_ix: usize) -> bool {
+        (self.start_entry_ix()..self.end_entry_ix()).contains(&entry_ix)
+    }
+
+    fn is_turn(self) -> bool {
+        matches!(self, Self::Turn(_))
+    }
 }
 
 impl ThreadView {
@@ -537,8 +603,11 @@ impl ThreadView {
             expanded_tool_calls: HashSet::default(),
             expanded_tool_call_raw_inputs: HashSet::default(),
             expanded_thinking_blocks: HashSet::default(),
+            expanded_turns: HashSet::default(),
+            thread_items: Vec::new(),
             auto_expanded_thinking_block: None,
             user_toggled_thinking_blocks: HashSet::default(),
+            turn_work_scroll_handles: RefCell::new(HashMap::default()),
             subagent_scroll_handles: RefCell::new(HashMap::default()),
             edits_expanded: false,
             plan_expanded: false,
@@ -578,6 +647,8 @@ impl ThreadView {
             generating_indicator_in_list: false,
         };
 
+        this.rebuild_thread_items(cx);
+        this.splice_thread_items(0..0, 0..this.thread_items.len(), cx);
         this.sync_generating_indicator(cx);
         this.sync_editor_mode_for_empty_state(cx);
         let list_state_for_scroll = this.list_state.clone();
@@ -2686,11 +2757,13 @@ impl ThreadView {
                                     ),
                                 )
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.list_state.scroll_to(ListOffset {
-                                        item_ix: entry_ix,
-                                        offset_in_item: px(0.0),
-                                    });
-                                    cx.notify();
+                                    if let Some(item_ix) = this.thread_item_ix_for_entry(entry_ix) {
+                                        this.list_state.scroll_to(ListOffset {
+                                            item_ix,
+                                            offset_in_item: px(0.0),
+                                        });
+                                        cx.notify();
+                                    }
                                 }))
                         },
                     )),
@@ -4478,6 +4551,402 @@ impl Render for TokenUsageTooltip {
 }
 
 impl ThreadView {
+    fn is_turn_expanded(&self, start_entry_ix: usize) -> bool {
+        self.expanded_turns.contains(&start_entry_ix)
+    }
+
+    fn assistant_message_has_visible_message(message: &AssistantMessage, cx: &App) -> bool {
+        message.chunks.iter().any(|chunk| match chunk {
+            AssistantMessageChunk::Message { block } => block
+                .markdown()
+                .is_some_and(|markdown| !markdown.read(cx).source().trim().is_empty()),
+            AssistantMessageChunk::Thought { .. } => false,
+        })
+    }
+
+    fn turn_presentation_starting_at(
+        entries: &[AgentThreadEntry],
+        start_entry_ix: usize,
+        cx: &App,
+    ) -> Option<TurnPresentation> {
+        if !matches!(
+            entries.get(start_entry_ix),
+            Some(AgentThreadEntry::UserMessage(_))
+        ) {
+            return None;
+        }
+
+        let end_entry_ix = (start_entry_ix + 1..entries.len())
+            .find(|ix| matches!(entries.get(*ix), Some(AgentThreadEntry::UserMessage(_))))
+            .unwrap_or(entries.len());
+        let final_assistant_ix = (start_entry_ix + 1..end_entry_ix).rev().find(|ix| {
+            matches!(
+                entries.get(*ix),
+                Some(AgentThreadEntry::AssistantMessage(message))
+                    if Self::assistant_message_has_visible_message(message, cx)
+            )
+        });
+
+        Some(TurnPresentation {
+            start_entry_ix,
+            end_entry_ix,
+            final_assistant_ix,
+        })
+    }
+
+    fn build_thread_items(entries: &[AgentThreadEntry], cx: &App) -> Vec<ThreadItem> {
+        let mut thread_items = Vec::new();
+        let mut entry_ix = 0;
+
+        while entry_ix < entries.len() {
+            if let Some(turn) = Self::turn_presentation_starting_at(entries, entry_ix, cx) {
+                thread_items.push(ThreadItem::Turn(turn));
+                entry_ix = turn.end_entry_ix;
+            } else {
+                thread_items.push(ThreadItem::Entry { entry_ix });
+                entry_ix += 1;
+            }
+        }
+
+        thread_items
+    }
+
+    fn rebuild_thread_items(&mut self, cx: &App) {
+        let thread = self.thread.read(cx);
+        self.thread_items = Self::build_thread_items(thread.entries(), cx);
+    }
+
+    fn focus_handle_for_thread_item(
+        &self,
+        thread_item: ThreadItem,
+        cx: &App,
+    ) -> Option<FocusHandle> {
+        let entry_view_state = self.entry_view_state.read(cx);
+
+        match thread_item {
+            ThreadItem::Entry { entry_ix } => entry_view_state
+                .entry(entry_ix)
+                .and_then(|entry| entry.focus_handle(cx)),
+            ThreadItem::Turn(turn) => {
+                let mut turn_entry_range = turn.start_entry_ix..turn.end_entry_ix;
+                turn_entry_range.find_map(|entry_ix| {
+                    entry_view_state
+                        .entry(entry_ix)
+                        .and_then(|entry| entry.focus_handle(cx))
+                })
+            }
+        }
+    }
+
+    fn splice_thread_items(&self, old_range: Range<usize>, new_range: Range<usize>, cx: &App) {
+        let focus_handles = self.thread_items[new_range]
+            .iter()
+            .map(|thread_item| self.focus_handle_for_thread_item(*thread_item, cx))
+            .collect::<Vec<_>>();
+        self.list_state.splice_focusable(old_range, focus_handles);
+    }
+
+    fn thread_item_ix_for_entry(&self, entry_ix: usize) -> Option<usize> {
+        self.thread_items
+            .iter()
+            .position(|thread_item| thread_item.contains_entry_ix(entry_ix))
+    }
+
+    fn most_recent_turn_item_ix(&self) -> Option<usize> {
+        self.thread_items
+            .iter()
+            .rposition(|thread_item| thread_item.is_turn())
+    }
+
+    pub(crate) fn sync_thread_items_after_new_entry(&mut self, cx: &App) {
+        let old_item_count = self.thread_items.len();
+        self.rebuild_thread_items(cx);
+
+        if self.thread_items.len() > old_item_count {
+            self.splice_thread_items(
+                old_item_count..old_item_count,
+                old_item_count..self.thread_items.len(),
+                cx,
+            );
+        }
+
+        if let Some(changed_item_ix) = self.thread_items.len().checked_sub(1) {
+            self.list_state
+                .remeasure_items(changed_item_ix..changed_item_ix + 1);
+        }
+    }
+
+    pub(crate) fn sync_thread_items_after_entry_update(&mut self, entry_ix: usize, cx: &App) {
+        let item_ix = self.thread_item_ix_for_entry(entry_ix);
+        self.rebuild_thread_items(cx);
+
+        if let Some(item_ix) = item_ix.or_else(|| self.thread_item_ix_for_entry(entry_ix)) {
+            self.list_state.remeasure_items(item_ix..item_ix + 1);
+        }
+    }
+
+    pub(crate) fn sync_thread_items_after_entries_removed(
+        &mut self,
+        removed_start_entry_ix: usize,
+        cx: &App,
+    ) {
+        let old_item_count = self.thread_items.len();
+        let start_item_ix = self
+            .thread_item_ix_for_entry(removed_start_entry_ix)
+            .unwrap_or(old_item_count);
+
+        self.rebuild_thread_items(cx);
+        self.splice_thread_items(
+            start_item_ix..old_item_count,
+            start_item_ix..self.thread_items.len(),
+            cx,
+        );
+
+        let remeasure_item_ix = if start_item_ix < self.thread_items.len() {
+            Some(start_item_ix)
+        } else {
+            start_item_ix
+                .checked_sub(1)
+                .filter(|item_ix| *item_ix < self.thread_items.len())
+        };
+
+        if let Some(item_ix) = remeasure_item_ix {
+            self.list_state.remeasure_items(item_ix..item_ix + 1);
+        }
+    }
+
+    fn toggle_turn_expansion(&mut self, start_entry_ix: usize, cx: &mut Context<Self>) {
+        if self.expanded_turns.contains(&start_entry_ix) {
+            self.expanded_turns.remove(&start_entry_ix);
+        } else {
+            self.expanded_turns.insert(start_entry_ix);
+        }
+        cx.notify();
+    }
+
+    fn turn_work_summary_label(entries: &[AgentThreadEntry], turn: TurnPresentation) -> String {
+        let mut tool_count = 0;
+        let mut hidden_entry_count = 0;
+
+        for entry_ix in turn.start_entry_ix + 1..turn.end_entry_ix {
+            if Some(entry_ix) == turn.final_assistant_ix {
+                continue;
+            }
+
+            hidden_entry_count += 1;
+            if matches!(entries.get(entry_ix), Some(AgentThreadEntry::ToolCall(_))) {
+                tool_count += 1;
+            }
+        }
+
+        if tool_count > 0 {
+            format!(
+                "{tool_count} tool call{}",
+                if tool_count == 1 { "" } else { "s" }
+            )
+        } else if hidden_entry_count == 1 {
+            "1 hidden update".to_string()
+        } else {
+            format!("{hidden_entry_count} hidden updates")
+        }
+    }
+
+    fn render_turn_work_summary(
+        &self,
+        turn: TurnPresentation,
+        entries: &[AgentThreadEntry],
+        action: TurnWorkSummaryAction,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let summary_label = Self::turn_work_summary_label(entries, turn);
+        if matches!(action, TurnWorkSummaryAction::ExpandPreview) {
+            h_flex()
+                .id(("turn-work-summary", turn.start_entry_ix))
+                .w_full()
+                .items_center()
+                .gap_2()
+                .mb_2()
+                .px_5()
+                .cursor_pointer()
+                .tooltip(Tooltip::text(action.tooltip()))
+                .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                    this.toggle_turn_expansion(turn.start_entry_ix, cx);
+                }))
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            Icon::new(action.icon_name())
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                        .child(
+                            Label::new(summary_label)
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        ),
+                )
+                .child(Divider::horizontal().color(DividerColor::Border))
+                .into_any_element()
+        } else {
+            h_flex()
+                .id(("turn-work-summary", turn.start_entry_ix))
+                .w_full()
+                .justify_start()
+                .mb_2()
+                .px_5()
+                .child(
+                    Button::new(("turn-work-button", turn.start_entry_ix), summary_label)
+                        .style(ButtonStyle::Subtle)
+                        .size(ButtonSize::Compact)
+                        .label_size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .start_icon(
+                            Icon::new(action.icon_name())
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                        .tooltip(Tooltip::text(action.tooltip()))
+                        .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                            this.toggle_turn_expansion(turn.start_entry_ix, cx);
+                        })),
+                )
+                .into_any_element()
+        }
+    }
+
+    fn render_turn_work_collapse_footer(
+        &self,
+        turn: TurnPresentation,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        IconButton::new(
+            ("turn-work-collapse", turn.start_entry_ix),
+            IconName::ChevronUp,
+        )
+        .full_width()
+        .style(ButtonStyle::Outlined)
+        .icon_color(Color::Muted)
+        .on_click(
+            cx.listener(move |this: &mut Self, _, _, cx: &mut Context<Self>| {
+                this.expanded_turns.remove(&turn.start_entry_ix);
+                cx.notify();
+            }),
+        )
+        .into_any_element()
+    }
+
+    fn render_turn_work_entries(
+        &self,
+        turn: TurnPresentation,
+        total_entries: usize,
+        work_entry_indices: &[usize],
+        is_preview: bool,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let entries = self.thread.read(cx);
+        let panel_bg = cx.theme().colors().panel_background;
+        let scroll_handle = is_preview.then(|| {
+            self.turn_work_scroll_handles
+                .borrow_mut()
+                .entry(turn.start_entry_ix)
+                .or_default()
+                .clone()
+        });
+
+        if let Some(scroll_handle) = scroll_handle.as_ref() {
+            scroll_handle.scroll_to_bottom();
+        }
+
+        let mut work_container = div().id(("turn-work-body", turn.start_entry_ix)).w_full();
+        if is_preview {
+            work_container = work_container.max_h(rems(10.)).overflow_hidden();
+        }
+        if let Some(scroll_handle) = scroll_handle.as_ref() {
+            work_container = work_container.track_scroll(scroll_handle);
+        }
+        let work_container =
+            work_container.children(work_entry_indices.iter().filter_map(|work_entry_ix| {
+                let entry = entries.entries().get(*work_entry_ix)?;
+                Some(self.render_entry_primary(*work_entry_ix, total_entries, entry, window, cx))
+            }));
+
+        div()
+            .id(("turn-work", turn.start_entry_ix))
+            .w_full()
+            .when(is_preview, |this| this.relative())
+            .child(work_container)
+            .when(is_preview, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .size_full()
+                        .bg(linear_gradient(
+                            180.,
+                            linear_color_stop(panel_bg.opacity(0.75), 0.),
+                            linear_color_stop(panel_bg.opacity(0.), 0.12),
+                        ))
+                        .block_mouse_except_scroll(),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn wrap_presented_content(
+        &self,
+        anchor_entry_ix: usize,
+        last_entry_ix: usize,
+        last_entry: &AgentThreadEntry,
+        content: AnyElement,
+        total_entries: usize,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let needs_confirmation = Self::is_waiting_for_confirmation(last_entry);
+        let comments_editor = self.thread_feedback.comments_editor.clone();
+
+        let content = if last_entry_ix + 1 == total_entries {
+            let thread = self.thread.clone();
+            v_flex()
+                .w_full()
+                .child(content)
+                .when(!needs_confirmation, |this| {
+                    this.child(self.render_thread_controls(&thread, cx))
+                })
+                .when_some(comments_editor, |this, editor| {
+                    this.child(Self::render_feedback_feedback_editor(editor, cx))
+                })
+                .into_any_element()
+        } else {
+            content
+        };
+
+        if let Some(editing_index) = self.editing_message
+            && editing_index < anchor_entry_ix
+        {
+            let is_subagent = self.is_subagent();
+            let backdrop = div()
+                .id(("backdrop", anchor_entry_ix))
+                .size_full()
+                .absolute()
+                .inset_0()
+                .bg(cx.theme().colors().panel_background)
+                .opacity(0.8)
+                .block_mouse_except_scroll()
+                .on_click(cx.listener(Self::cancel_editing));
+
+            div()
+                .relative()
+                .child(content)
+                .when(!is_subagent, |this| this.child(backdrop))
+                .into_any_element()
+        } else {
+            content
+        }
+    }
+
     fn render_entries(&mut self, cx: &mut Context<Self>) -> List {
         let max_content_width = AgentSettings::get_global(cx).max_content_width;
         let centered_container = move |content: AnyElement| {
@@ -4490,12 +4959,15 @@ impl ThreadView {
         list(
             self.list_state.clone(),
             cx.processor(move |this, index: usize, window, cx| {
-                let entries = this.thread.read(cx).entries();
-                if let Some(entry) = entries.get(index) {
-                    let rendered = this.render_entry(index, entries.len(), entry, window, cx);
+                let total_entries = this.thread.read(cx).entries().len();
+                if let Some(thread_item) = this.thread_items.get(index).copied() {
+                    let rendered = this.render_thread_item(thread_item, total_entries, window, cx);
                     centered_container(rendered.into_any_element()).into_any_element()
                 } else if this.generating_indicator_in_list {
-                    let confirmation = entries
+                    let confirmation = this
+                        .thread
+                        .read(cx)
+                        .entries()
                         .last()
                         .is_some_and(|entry| Self::is_waiting_for_confirmation(entry));
                     let rendered = this.render_generating(confirmation, cx);
@@ -4509,7 +4981,7 @@ impl ThreadView {
         .flex_grow()
     }
 
-    fn render_entry(
+    fn render_entry_primary(
         &self,
         entry_ix: usize,
         total_entries: usize,
@@ -4837,9 +5309,7 @@ impl ThreadView {
             primary
         };
 
-        let thread = self.thread.clone();
-
-        let primary = if is_indented {
+        if is_indented {
             let line_top = if is_first_indented {
                 rems_from_px(-12.0)
             } else {
@@ -4864,50 +5334,121 @@ impl ThreadView {
                 .into_any_element()
         } else {
             primary
-        };
-
-        let needs_confirmation = Self::is_waiting_for_confirmation(entry);
-
-        let comments_editor = self.thread_feedback.comments_editor.clone();
-
-        let primary = if entry_ix + 1 == total_entries {
-            v_flex()
-                .w_full()
-                .child(primary)
-                .when(!needs_confirmation, |this| {
-                    this.child(self.render_thread_controls(&thread, cx))
-                })
-                .when_some(comments_editor, |this, editor| {
-                    this.child(Self::render_feedback_feedback_editor(editor, cx))
-                })
-                .into_any_element()
-        } else {
-            primary
-        };
-
-        if let Some(editing_index) = self.editing_message
-            && editing_index < entry_ix
-        {
-            let is_subagent = self.is_subagent();
-
-            let backdrop = div()
-                .id(("backdrop", entry_ix))
-                .size_full()
-                .absolute()
-                .inset_0()
-                .bg(cx.theme().colors().panel_background)
-                .opacity(0.8)
-                .block_mouse_except_scroll()
-                .on_click(cx.listener(Self::cancel_editing));
-
-            div()
-                .relative()
-                .child(primary)
-                .when(!is_subagent, |this| this.child(backdrop))
-                .into_any_element()
-        } else {
-            primary
         }
+    }
+
+    fn render_thread_item(
+        &self,
+        thread_item: ThreadItem,
+        total_entries: usize,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        match thread_item {
+            ThreadItem::Entry { entry_ix } => {
+                let thread = self.thread.read(cx);
+                let Some(entry) = thread.entries().get(entry_ix) else {
+                    return Empty.into_any_element();
+                };
+
+                let primary = self.render_entry_primary(entry_ix, total_entries, entry, window, cx);
+                self.wrap_presented_content(entry_ix, entry_ix, entry, primary, total_entries, cx)
+            }
+            ThreadItem::Turn(turn) => self.render_turn_item(turn, total_entries, window, cx),
+        }
+    }
+
+    fn render_turn_item(
+        &self,
+        turn: TurnPresentation,
+        total_entries: usize,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let thread = self.thread.read(cx);
+        let entries = thread.entries();
+        let Some(user_entry) = entries.get(turn.start_entry_ix) else {
+            return Empty.into_any_element();
+        };
+
+        let work_entry_indices: Vec<usize> = (turn.start_entry_ix + 1..turn.end_entry_ix)
+            .filter(|entry_ix| Some(*entry_ix) != turn.final_assistant_ix)
+            .collect();
+        let is_latest_turn = turn.end_entry_ix == total_entries;
+        let is_expanded = self.is_turn_expanded(turn.start_entry_ix);
+        let is_active_turn = is_latest_turn
+            && (matches!(thread.status(), ThreadStatus::Generating)
+                || thread.is_waiting_for_confirmation());
+
+        let work_region = if work_entry_indices.is_empty() {
+            None
+        } else {
+            let preview_mode = is_active_turn && !is_expanded;
+            let show_entries = is_expanded || is_active_turn;
+            let summary_action = if preview_mode {
+                TurnWorkSummaryAction::ExpandPreview
+            } else if is_expanded {
+                TurnWorkSummaryAction::Collapse
+            } else {
+                TurnWorkSummaryAction::ExpandCollapsed
+            };
+
+            Some(
+                v_flex()
+                    .w_full()
+                    .child(self.render_turn_work_summary(turn, entries, summary_action, cx))
+                    .when(show_entries, |this| {
+                        this.child(self.render_turn_work_entries(
+                            turn,
+                            total_entries,
+                            &work_entry_indices,
+                            preview_mode,
+                            window,
+                            cx,
+                        ))
+                    })
+                    .when(is_expanded, |this| {
+                        this.child(self.render_turn_work_collapse_footer(turn, cx))
+                    })
+                    .into_any_element(),
+            )
+        };
+
+        let content = v_flex()
+            .w_full()
+            .child(self.render_entry_primary(
+                turn.start_entry_ix,
+                total_entries,
+                user_entry,
+                window,
+                cx,
+            ))
+            .when_some(work_region, |this, work_region| this.child(work_region))
+            .children(turn.final_assistant_ix.and_then(|final_assistant_ix| {
+                let entry = entries.get(final_assistant_ix)?;
+                Some(self.render_entry_primary(
+                    final_assistant_ix,
+                    total_entries,
+                    entry,
+                    window,
+                    cx,
+                ))
+            }))
+            .into_any_element();
+
+        let last_entry_ix = turn.end_entry_ix.saturating_sub(1);
+        let Some(last_entry) = entries.get(last_entry_ix) else {
+            return content;
+        };
+
+        self.wrap_presented_content(
+            turn.start_entry_ix,
+            last_entry_ix,
+            last_entry,
+            content,
+            total_entries,
+            cx,
+        )
     }
 
     fn render_feedback_feedback_editor(editor: Entity<Editor>, cx: &Context<Self>) -> Div {
@@ -5150,19 +5691,13 @@ impl ThreadView {
     }
 
     pub(crate) fn scroll_to_most_recent_user_prompt(&mut self, cx: &mut Context<Self>) {
-        let entries = self.thread.read(cx).entries();
-        if entries.is_empty() {
+        if self.thread.read(cx).entries().is_empty() {
             return;
         }
 
-        // Find the most recent user message and scroll it to the top of the viewport.
-        // (Fallback: if no user message exists, scroll to the bottom.)
-        if let Some(ix) = entries
-            .iter()
-            .rposition(|entry| matches!(entry, AgentThreadEntry::UserMessage(_)))
-        {
+        if let Some(item_ix) = self.most_recent_turn_item_ix() {
             self.list_state.scroll_to(ListOffset {
-                item_ix: ix,
+                item_ix,
                 offset_in_item: px(0.0),
             });
             cx.notify();
@@ -5264,11 +5799,10 @@ impl ThreadView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let entries = self.thread.read(cx).entries();
         let current_ix = self.list_state.logical_scroll_top().item_ix;
-        if let Some(target_ix) = (0..current_ix)
-            .rev()
-            .find(|&i| matches!(entries.get(i), Some(AgentThreadEntry::UserMessage(_))))
+        if let Some(target_ix) = self.thread_items[..current_ix.min(self.thread_items.len())]
+            .iter()
+            .rposition(|thread_item| thread_item.is_turn())
         {
             self.list_state.scroll_to(ListOffset {
                 item_ix: target_ix,
@@ -5284,13 +5818,17 @@ impl ThreadView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let entries = self.thread.read(cx).entries();
         let current_ix = self.list_state.logical_scroll_top().item_ix;
-        if let Some(target_ix) = (current_ix + 1..entries.len())
-            .find(|&i| matches!(entries.get(i), Some(AgentThreadEntry::UserMessage(_))))
+        let next_start_ix = current_ix.saturating_add(1);
+        if let Some(next_offset) = self
+            .thread_items
+            .get(next_start_ix..)
+            .unwrap_or_default()
+            .iter()
+            .position(|thread_item| thread_item.is_turn())
         {
             self.list_state.scroll_to(ListOffset {
-                item_ix: target_ix,
+                item_ix: next_start_ix + next_offset,
                 offset_in_item: px(0.),
             });
             cx.notify();
@@ -5377,14 +5915,13 @@ impl ThreadView {
     /// Ensures the list item count includes (or excludes) an extra item for the generating indicator
     pub(crate) fn sync_generating_indicator(&mut self, cx: &App) {
         let is_generating = matches!(self.thread.read(cx).status(), ThreadStatus::Generating);
+        let item_count = self.thread_items.len();
 
         if is_generating && !self.generating_indicator_in_list {
-            let entries_count = self.thread.read(cx).entries().len();
-            self.list_state.splice(entries_count..entries_count, 1);
+            self.list_state.splice(item_count..item_count, 1);
             self.generating_indicator_in_list = true;
         } else if !is_generating && self.generating_indicator_in_list {
-            let entries_count = self.thread.read(cx).entries().len();
-            self.list_state.splice(entries_count..entries_count + 1, 0);
+            self.list_state.splice(item_count..item_count + 1, 0);
             self.generating_indicator_in_list = false;
         }
     }
@@ -8123,7 +8660,7 @@ impl ThreadView {
         window: &Window,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        const MAX_PREVIEW_ENTRIES: usize = 8;
+        const MAX_PREVIEW_ITEMS: usize = 8;
 
         let subagent_view = thread_view.read(cx);
         let session_id = subagent_view.thread.read(cx).session_id().clone();
@@ -8149,7 +8686,7 @@ impl ThreadView {
 
         let entries = subagent_view.thread.read(cx).entries();
         let total_entries = entries.len();
-        let mut entry_range = if let Some(info) = tool_call.subagent_session_info.as_ref() {
+        let entry_range = if let Some(info) = tool_call.subagent_session_info.as_ref() {
             info.message_start_index
                 ..info
                     .message_end_index
@@ -8158,12 +8695,6 @@ impl ThreadView {
         } else {
             0..total_entries
         };
-        entry_range.start = entry_range
-            .end
-            .saturating_sub(MAX_PREVIEW_ENTRIES)
-            .max(entry_range.start);
-        let start_ix = entry_range.start;
-
         let scroll_handle = self
             .subagent_scroll_handles
             .borrow_mut()
@@ -8173,14 +8704,21 @@ impl ThreadView {
 
         scroll_handle.scroll_to_bottom();
 
-        let rendered_entries: Vec<AnyElement> = entries
-            .get(entry_range)
-            .unwrap_or_default()
+        let preview_items = subagent_view
+            .thread_items
             .iter()
-            .enumerate()
-            .map(|(i, entry)| {
-                let actual_ix = start_ix + i;
-                subagent_view.render_entry(actual_ix, total_entries, entry, window, cx)
+            .copied()
+            .filter(|thread_item| {
+                thread_item.start_entry_ix() < entry_range.end
+                    && thread_item.end_entry_ix() > entry_range.start
+            })
+            .collect::<Vec<_>>();
+
+        let preview_start_ix = preview_items.len().saturating_sub(MAX_PREVIEW_ITEMS);
+        let rendered_entries: Vec<AnyElement> = preview_items[preview_start_ix..]
+            .iter()
+            .map(|thread_item| {
+                subagent_view.render_thread_item(*thread_item, total_entries, window, cx)
             })
             .collect();
 
