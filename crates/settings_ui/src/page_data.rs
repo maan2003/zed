@@ -1,8 +1,7 @@
 use gpui::{Action as _, App};
 use itertools::Itertools as _;
 use release_channel::ReleaseChannel;
-use settings::{
-};
+use settings::{LanguageSettingsContent, SemanticTokens, SettingsContent};
 use std::sync::{Arc, OnceLock};
 use strum::{EnumMessage, IntoDiscriminant as _, VariantArray};
 use ui::IntoElement;
@@ -11,8 +10,15 @@ use crate::{
     ActionLink, DynamicItem, PROJECT, SettingField, SettingItem, SettingsFieldMetadata,
     SettingsPage, SettingsPageItem, SubPageLink, USER, active_language, all_language_names,
     pages::{render_edit_prediction_setup_page, render_tool_permissions_setup_page},
-    },
 };
+
+macro_rules! concat_sections {
+    ($($section:expr),* $(,)?) => {{
+        let mut items = Vec::new();
+        $(items.extend($section);)*
+        items.into_boxed_slice()
+    }};
+}
 
 const DEFAULT_STRING: String = String::new();
 /// A default empty string reference. Useful in `pick` functions for cases either in dynamic item fields, or when dealing with `settings::Maybe`
@@ -353,7 +359,6 @@ fn general_page(cx: &App) -> SettingsPage {
     SettingsPage {
         title: "General",
         items: concat_sections!(
-            @vec,
             general_settings_section(cx),
             security_section(),
             workspace_restoration_section(),
@@ -5647,75 +5652,7 @@ fn panels_page() -> SettingsPage {
         ]
     }
 
-    fn collaboration_panel_section() -> [SettingsPageItem; 4] {
-        [
-            SettingsPageItem::SectionHeader("Collaboration Panel"),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Collaboration Panel Button",
-                description: "Show the collaboration panel button in the status bar.",
-                field: Box::new(SettingField {
-                    json_path: Some("collaboration_panel.button"),
-                    pick: |settings_content| {
-                        settings_content
-                            .collaboration_panel
-                            .as_ref()?
-                            .button
-                            .as_ref()
-                    },
-                    write: |settings_content, value| {
-                        settings_content
-                            .collaboration_panel
-                            .get_or_insert_default()
-                            .button = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Collaboration Panel Dock",
-                description: "Where to dock the collaboration panel.",
-                field: Box::new(SettingField {
-                    json_path: Some("collaboration_panel.dock"),
-                    pick: |settings_content| {
-                        settings_content.collaboration_panel.as_ref()?.dock.as_ref()
-                    },
-                    write: |settings_content, value| {
-                        settings_content
-                            .collaboration_panel
-                            .get_or_insert_default()
-                            .dock = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Collaboration Panel Default Width",
-                description: "Default width of the collaboration panel in pixels.",
-                field: Box::new(SettingField {
-                    json_path: Some("collaboration_panel.dock"),
-                    pick: |settings_content| {
-                        settings_content
-                            .collaboration_panel
-                            .as_ref()?
-                            .default_width
-                            .as_ref()
-                    },
-                    write: |settings_content, value| {
-                        settings_content
-                            .collaboration_panel
-                            .get_or_insert_default()
-                            .default_width = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-        ]
-    }
-
-    fn agent_panel_section() -> [SettingsPageItem; 6] {
+    fn agent_panel_section() -> [SettingsPageItem; 7] {
         [
             SettingsPageItem::SectionHeader("Agent Panel"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -5819,7 +5756,6 @@ fn panels_page() -> SettingsPage {
             outline_panel_section(),
             git_panel_section(),
             debugger_panel_section(),
-            collaboration_panel_section(),
             agent_panel_section(),
         ],
     }
