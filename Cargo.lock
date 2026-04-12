@@ -3156,6 +3156,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex_app_client"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "codex_app_protocol",
+ "futures 0.3.32",
+ "log",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "codex_app_protocol"
 version = "0.1.0"
 dependencies = [
