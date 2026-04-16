@@ -188,3 +188,10 @@ Rules emerge from validated patterns, not one-off observations. The workflow is:
 1. Agent notes a pattern during a session.
 2. Team validates the pattern in code review.
 3. A dedicated commit adds the rule with context on *why* it exists.
+
+## Fork specific tasks
+
+You are running on a remote machine, and when user asks for builds prefer debug unless specified.
+- debug build for user's machine: nix build .#cross-aarch64-linux-debug
+- release build for user's machine: nix build .#cross-aarch64-linux
+- x86 Linux remote server binary: run `nix develop -c bash -lc 'cargo clean && export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+crt-static -C link-arg=-L$ZED_ZSTD_MUSL_LIB"; cargo build --release --target x86_64-unknown-linux-musl -p remote_server'`, then link requested `~/.zed_server/zed-remote-server-nightly-<version>+nightly.1234567890123456789012345678901234567890` entries to `target/x86_64-unknown-linux-musl/release/remote_server`. If `~/.zed_server` is a read-only Home Manager symlink into `/nix/store`, replace the top-level symlink with a real writable directory first.
