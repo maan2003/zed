@@ -609,6 +609,7 @@ impl Vim {
 
     fn helix_insert(&mut self, _: &HelixInsert, window: &mut Window, cx: &mut Context<Self>) {
         self.start_recording(cx);
+        self.prepare_for_insert(window, cx);
         self.update_editor(cx, |_, editor, cx| {
             editor.change_selections(Default::default(), window, cx, |s| {
                 s.move_with(&mut |_map, selection| {
@@ -684,6 +685,7 @@ impl Vim {
 
     fn helix_append(&mut self, _: &HelixAppend, window: &mut Window, cx: &mut Context<Self>) {
         self.start_recording(cx);
+        self.prepare_for_insert(window, cx);
         self.switch_mode(Mode::Insert, false, window, cx);
         self.update_editor(cx, |_, editor, cx| {
             editor.change_selections(Default::default(), window, cx, |s| {
@@ -711,6 +713,7 @@ impl Vim {
         cx: &mut Context<Self>,
     ) {
         self.start_recording(cx);
+        self.prepare_for_insert(window, cx);
         self.switch_mode(Mode::Insert, false, window, cx);
         self.update_editor(cx, |_, editor, cx| {
             editor.change_selections(Default::default(), window, cx, |s| {

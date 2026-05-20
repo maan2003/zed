@@ -638,6 +638,7 @@ impl Vim {
 
     fn insert_after(&mut self, _: &InsertAfter, window: &mut Window, cx: &mut Context<Self>) {
         self.start_recording(cx);
+        self.prepare_for_insert(window, cx);
         self.switch_mode(Mode::Insert, false, window, cx);
         self.update_editor(cx, |_, editor, cx| {
             editor.change_selections(Default::default(), window, cx, |s| {
@@ -650,6 +651,7 @@ impl Vim {
 
     fn insert_before(&mut self, _: &InsertBefore, window: &mut Window, cx: &mut Context<Self>) {
         self.start_recording(cx);
+        self.prepare_for_insert(window, cx);
         if self.mode.is_visual() {
             let current_mode = self.mode;
             self.update_editor(cx, |_, editor, cx| {
@@ -675,6 +677,7 @@ impl Vim {
         cx: &mut Context<Self>,
     ) {
         self.start_recording(cx);
+        self.prepare_for_insert(window, cx);
         self.switch_mode(Mode::Insert, false, window, cx);
         self.update_editor(cx, |_, editor, cx| {
             editor.change_selections(Default::default(), window, cx, |s| {
@@ -695,6 +698,7 @@ impl Vim {
         cx: &mut Context<Self>,
     ) {
         self.start_recording(cx);
+        self.prepare_for_insert(window, cx);
         self.switch_mode(Mode::Insert, false, window, cx);
         self.update_editor(cx, |_, editor, cx| {
             editor.change_selections(Default::default(), window, cx, |s| {

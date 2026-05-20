@@ -678,6 +678,7 @@ impl Vim {
             });
 
             Vim::action(editor, cx, |vim, _: &SwitchToInsertMode, window, cx| {
+                vim.prepare_for_insert(window, cx);
                 vim.switch_mode(Mode::Insert, false, window, cx)
             });
 
@@ -1581,6 +1582,12 @@ impl Vim {
         });
     }
 
+    pub(crate) fn prepare_for_insert(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(editor) = self.editor.upgrade() {
+            editor.update(cx, |editor, cx| editor.prepare_for_insert(window, cx));
+        }
+    }
+
     fn update_editor<S>(
         &mut self,
         cx: &mut Context<Self>,
@@ -1962,7 +1969,18 @@ impl Vim {
 
         let newest = editor.read(cx).selections.newest_anchor().clone();
         let is_multicursor = editor.read(cx).selections.count() > 1;
-        if self.mode == Mode::Insert && self.current_tx.is_some() {
+        if matches!(self.mode, Mode::Insert | Mode::Replace) && newest.start != newest.end {
+            self.update_editor(cx, |_, editor, cx| {
+                editor.dismiss_menus_and_popups(false, window, cx);
+            });
+            if HelixModeSetting::get_global(cx).0 {
+                self.switch_mode(Mode::HelixNormal, false, window, cx);
+            } else if matches!(newest.goal, SelectionGoal::HorizontalRange { .. }) {
+                self.switch_mode(Mode::VisualBlock, false, window, cx);
+            } else {
+                self.switch_mode(Mode::Visual, false, window, cx);
+            }
+        } else if self.mode == Mode::Insert && self.current_tx.is_some() {
             if let Some(current_anchor) = &self.current_anchor {
                 if current_anchor != &newest
                     && let Some(tx_id) = self.current_tx.take()
