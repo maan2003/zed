@@ -7947,7 +7947,11 @@ impl Element for EditorElement {
 
                     let right_margin = minimap_width + vertical_scrollbar_width;
 
-                    let extended_right = 2 * em_width + right_margin;
+                    let extended_right = if snapshot.offset_content {
+                        2 * em_width + right_margin
+                    } else {
+                        right_margin
+                    };
                     let editor_width = text_width - gutter_dimensions.margin - extended_right;
                     let editor_margins = EditorMargins {
                         gutter: gutter_dimensions,

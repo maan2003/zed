@@ -611,6 +611,8 @@ impl EditorActionId {
     }
 }
 
+type PrepareForInsert = Rc<dyn Fn(&mut Editor, &mut Window, &mut Context<Editor>)>;
+
 // type GetFieldEditorTheme = dyn Fn(&theme::Theme) -> theme::FieldEditor;
 // type OverrideTextStyle = dyn Fn(&EditorStyle) -> Option<HighlightStyle>;
 
@@ -967,6 +969,8 @@ pub struct Editor {
     show_cursor_names: bool,
     hovered_cursors: HashMap<HoveredCursor, Task<()>>,
     pub show_local_selections: bool,
+    prepare_for_insert: Option<PrepareForInsert>,
+    mouse_click_selection_enabled: bool,
     mode: EditorMode,
     breadcrumbs_visibility: BreadcrumbsVisibility,
     show_gutter: bool,
@@ -2167,6 +2171,8 @@ impl Editor {
             project,
             blink_manager: blink_manager.clone(),
             show_local_selections: true,
+            prepare_for_insert: None,
+            mouse_click_selection_enabled: true,
             show_scrollbars: ScrollbarAxes {
                 horizontal: full_mode,
                 vertical: full_mode,
@@ -9209,7 +9215,9 @@ impl Editor {
     }
 
     pub fn show_local_cursors(&self, window: &mut Window, cx: &mut App) -> bool {
-        (self.read_only(cx) || self.blink_manager.read(cx).visible())
+        (self.read_only(cx)
+            || self.cursor_shape == CursorShape::Block
+            || self.blink_manager.read(cx).visible())
             && self.focus_handle.is_focused(window)
     }
 
