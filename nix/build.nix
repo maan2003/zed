@@ -83,13 +83,13 @@ let
   gpu-lib = if withGLES then libglvnd else vulkan-loader;
   commonArgs =
     let
-      zedCargoLock = builtins.fromTOML (builtins.readFile ../crates/zed/Cargo.toml);
+      editorCargoToml = builtins.fromTOML (builtins.readFile ../crates/editor/Cargo.toml);
       stdenv' = stdenv;
     in
     rec {
       pname = "zed-editor";
       version =
-        zedCargoLock.package.version
+        editorCargoToml.package.version
         + "-nightly"
         + lib.optionalString (commitSha != null) "+${builtins.substring 0 7 commitSha}";
       src = builtins.path {
