@@ -90,7 +90,22 @@ impl LinuxClient for HeadlessClient {
         _handle: AnyWindowHandle,
         _params: WindowParams,
     ) -> anyhow::Result<Box<dyn PlatformWindow>> {
-        anyhow::bail!("neither DISPLAY nor WAYLAND_DISPLAY is set. You can run in headless mode");
+        let wayland_display = std::env::var_os("WAYLAND_DISPLAY");
+        let display = std::env::var_os("DISPLAY");
+        let xdg_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR");
+        let wayland_socket_exists = xdg_runtime_dir
+            .as_ref()
+            .zip(wayland_display.as_ref())
+            .map(|(runtime_dir, display)| std::path::Path::new(runtime_dir).join(display).exists());
+
+        anyhow::bail!(
+            "neither DISPLAY nor WAYLAND_DISPLAY is set. You can run in headless mode \
+             (WAYLAND_DISPLAY={:?}, DISPLAY={:?}, XDG_RUNTIME_DIR={:?}, wayland_socket_exists={:?})",
+            wayland_display,
+            display,
+            xdg_runtime_dir,
+            wayland_socket_exists,
+        );
     }
 
     fn compositor_name(&self) -> &'static str {
