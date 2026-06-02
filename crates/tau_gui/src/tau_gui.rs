@@ -283,6 +283,10 @@ struct TauGui {
     main_tools_total: u64,
     main_tools_visible: bool,
     follow_tail: bool,
+    current_agent_id: Option<String>,
+    known_agents: HashSet<String>,
+    live_agents: HashSet<String>,
+    suspended_agents: HashSet<String>,
 }
 
 impl TauGui {
@@ -452,6 +456,10 @@ impl TauGui {
             main_tools_total: 0,
             main_tools_visible: false,
             follow_tail: true,
+            current_agent_id: None,
+            known_agents: HashSet::default(),
+            live_agents: HashSet::default(),
+            suspended_agents: HashSet::default(),
         };
         this.update_prompt_inlay(cx);
         this.update_status_line(cx);
@@ -505,15 +513,24 @@ impl TauGui {
     }
 
     fn handle_event(&mut self, event: Event, cx: &mut Context<Self>) {
+        let previous_agent_id = self.current_agent_id.clone();
+        self.learn_agent_metadata(&event);
+        if self.current_agent_id != previous_agent_id {
+            self.update_status_line(cx);
+            self.update_prompt_inlay(cx);
+        }
         match event {
-            Event::UiPromptSubmitted(prompt) if prompt.originator.is_user() => {
+            Event::UiPromptSubmitted(_) => {}
+            Event::AgentPromptSubmitted(prompt)
+                if prompt.originator.is_user() && !prompt.message_class.is_internal() =>
+            {
                 self.insert_before_draft_styled(
                     &format!("> {}\n", prompt.text),
                     TranscriptStyle::UserPrompt,
                     cx,
                 );
             }
-            Event::SessionPromptQueued(queued) => {
+            Event::AgentPromptQueued(queued) if !queued.message_class.is_internal() => {
                 self.insert_before_draft_styled(
                     &format!("> {} (queued)\n", queued.text),
                     TranscriptStyle::UserPromptQueued,
@@ -521,13 +538,13 @@ impl TauGui {
                 );
             }
             Event::ProviderResponseUpdated(update) if update.originator.is_user() => {
-                let key = update.session_prompt_id.to_string();
-                self.streamed_responses
-                    .insert(key.clone(), update.text.clone());
-                self.upsert_live_response(key, update.text.as_str(), cx);
+                let key = update.agent_prompt_id.to_string();
+                let text = assistant_text_from_update(&update.items).unwrap_or_default();
+                self.streamed_responses.insert(key.clone(), text.clone());
+                self.upsert_live_response(key, text.as_str(), cx);
             }
             Event::ProviderResponseFinished(finished) if finished.originator.is_user() => {
-                let key = finished.session_prompt_id.to_string();
+                let key = finished.agent_prompt_id.to_string();
                 if let Some(text) = assistant_text(&finished.output_items) {
                     match self.streamed_responses.remove(&key) {
                         Some(_) | None => {
@@ -562,13 +579,13 @@ impl TauGui {
                     cx,
                 );
             }
-            Event::ToolResult(result) => {
+            Event::ToolResult(result) if result.originator.is_user() => {
                 let block = render_tool_result_block(&self.cli_theme, &result);
                 self.finish_tool_call(result.call_id.as_str(), block, cx);
                 self.record_main_tool_completed();
                 self.update_status_line(cx);
             }
-            Event::ToolError(error) => {
+            Event::ToolError(error) if error.originator.is_user() => {
                 let block = render_tool_error_block(&self.cli_theme, &error);
                 self.finish_tool_call(error.call_id.as_str(), block, cx);
                 self.record_main_tool_completed();
@@ -605,6 +622,59 @@ impl TauGui {
         }
     }
 
+    fn learn_agent_metadata(&mut self, event: &Event) {
+        match event {
+            Event::AgentStarted(started) => self.remember_agent(started.agent_id.to_string()),
+            Event::SessionAgentLoaded(loaded) => self.remember_agent(loaded.agent_id.to_string()),
+            Event::SessionAgentUnloaded(unloaded) => {
+                let agent_id = unloaded.agent_id.to_string();
+                self.live_agents.remove(&agent_id);
+                self.suspended_agents.remove(&agent_id);
+                if self.current_agent_id.as_deref() == Some(agent_id.as_str()) {
+                    self.current_agent_id = None;
+                }
+            }
+            Event::UiPromptSubmitted(prompt) if prompt.originator.is_user() => {
+                self.select_agent(prompt.agent_id.to_string());
+            }
+            Event::AgentPromptSubmitted(prompt)
+                if prompt.originator.is_user() && !prompt.message_class.is_internal() =>
+            {
+                self.select_agent(prompt.agent_id.to_string());
+            }
+            Event::AgentPromptQueued(queued) if !queued.message_class.is_internal() => {
+                self.select_agent(queued.agent_id.to_string());
+            }
+            Event::AgentPromptCreated(created) if created.originator.is_user() => {
+                self.select_agent(created.agent_id.to_string());
+            }
+            Event::ProviderResponseFinished(finished) if finished.originator.is_user() => {
+                self.select_agent(finished.agent_id.to_string());
+            }
+            _ => {}
+        }
+    }
+
+    fn remember_agent(&mut self, agent_id: String) {
+        self.known_agents.insert(agent_id);
+    }
+
+    fn select_agent(&mut self, agent_id: String) {
+        self.known_agents.insert(agent_id.clone());
+        self.live_agents.insert(agent_id.clone());
+        self.suspended_agents.remove(&agent_id);
+        if self.current_agent_id.as_deref() != Some(agent_id.as_str()) {
+            self.current_agent_id = Some(agent_id);
+        }
+    }
+
+    fn selected_agent_is_active(&self) -> bool {
+        let Some(agent_id) = self.current_agent_id.as_deref() else {
+            return true;
+        };
+        self.live_agents.contains(agent_id) && !self.suspended_agents.contains(agent_id)
+    }
+
     fn submit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         eprintln!("tau-gui: submit_prompt called");
         let buffer = self.prompt_buffer.read(cx);
@@ -620,15 +690,40 @@ impl TauGui {
         }
         eprintln!("tau-gui: submitting prompt with {} bytes", text.len());
 
+        if !self.selected_agent_is_active() {
+            self.insert_before_draft_styled(
+                "selected agent is suspended; choose a different agent or start a new one\n",
+                TranscriptStyle::SystemImportant,
+                cx,
+            );
+            return;
+        }
+
         if let Some(writer) = &self.writer {
-            let frame = Frame::Event(Event::UiPromptSubmitted(UiPromptSubmitted {
-                session_id: self.session_id.clone(),
-                text: text.clone(),
-                target_agent_id: None,
-                message_class: PromptMessageClass::User,
-                originator: PromptOriginator::User,
-                ctx_id: None,
-            }));
+            let event = if let Some(agent_id) = self.current_agent_id.clone() {
+                Event::UiPromptSubmitted(UiPromptSubmitted {
+                    session_id: self.session_id.clone(),
+                    text: text.clone(),
+                    agent_id: agent_id.into(),
+                    message_class: PromptMessageClass::User,
+                    originator: PromptOriginator::User,
+                    ctx_id: None,
+                })
+            } else {
+                Event::UiCreateAgent(tau_proto::UiCreateAgent {
+                    session_id: self.session_id.clone(),
+                    role: self
+                        .current_role
+                        .clone()
+                        .unwrap_or_else(|| "engineer".to_owned()),
+                    cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                    initial_prompt: Some(text.clone()),
+                    message_class: PromptMessageClass::User,
+                    originator: PromptOriginator::User,
+                    ctx_id: None,
+                })
+            };
+            let frame = Frame::Event(event);
             if let Err(error) = send_frame(writer, &frame) {
                 eprintln!("tau-gui: send failed: {error:#}");
                 self.insert_before_draft_styled(
@@ -717,8 +812,12 @@ impl TauGui {
     }
 
     fn prompt_placeholder_text(&self) -> String {
+        if let Some(agent_id) = &self.current_agent_id {
+            return format!("Write a message to {agent_id}…");
+        }
+
         format!(
-            "Talk with {}…",
+            "Start new {} agent…",
             self.current_role.as_deref().unwrap_or("Tau")
         )
     }
@@ -1091,6 +1190,9 @@ impl TauGui {
         use tau_themes::names;
 
         let mut chips = Vec::new();
+        if let Some(agent_id) = &self.current_agent_id {
+            chips.push(StatusChip::new(format!("@{agent_id}"), names::STATUS_ROLE));
+        }
         match (self.current_role.as_deref(), self.current_model.as_ref()) {
             (Some(role), _) => chips.push(StatusChip::new(format!("+{role}"), names::STATUS_ROLE)),
             (None, Some(model)) => {
@@ -1229,7 +1331,8 @@ impl Render for TauGui {
                 div()
                     .id("tau-gui-editor")
                     .w_full()
-                    .flex_grow(1.0)                    .overflow_hidden()
+                    .flex_grow(1.0)
+                    .overflow_hidden()
                     .child(self.editor.clone()),
             )
             .child(
@@ -1311,6 +1414,7 @@ fn spawn_socket_client(socket_path: PathBuf, tx: mpsc::Sender<SocketEvent>) -> R
                 EventSelector::Prefix("provider.".to_owned()),
                 EventSelector::Prefix("tool.".to_owned()),
                 EventSelector::Prefix("extension.".to_owned()),
+                EventSelector::Prefix("agent.".to_owned()),
                 EventSelector::Prefix("harness.".to_owned()),
                 EventSelector::Prefix("shell.".to_owned()),
                 EventSelector::Prefix("term.".to_owned()),
@@ -1365,7 +1469,7 @@ fn render_tool_call_block(
     call: &ToolCallItem,
 ) -> tau_cli_term::StyledBlock {
     let display_payload = tool_display_from_call(call);
-    let display = tool_render::format_tool_call(call.name.as_str(), Some(&display_payload));
+    let display = tool_render::render_tool_use_state(call.name.as_str(), &display_payload);
     tool_render::render_tool_block(theme, &display)
 }
 
@@ -1376,9 +1480,9 @@ fn render_tool_result_block(
     let display = result
         .display
         .as_ref()
-        .map(|display| tool_render::render_tool_display(&result.tool_name, display))
+        .map(|display| tool_render::render_tool_use_state(&result.tool_name, display))
         .unwrap_or_else(|| {
-            tool_render::render_tool_display(
+            tool_render::render_tool_use_state(
                 &result.tool_name,
                 &tool_render::synthesize_fallback_display(&result.tool_name, None),
             )
@@ -1387,7 +1491,7 @@ fn render_tool_result_block(
         .display
         .as_ref()
         .and_then(|display| match &display.payload {
-            Some(tau_proto::ToolDisplayPayload::Diff(summary)) => Some(summary.clone()),
+            Some(tau_proto::ToolUsePayload::Diff(summary)) => Some(summary.clone()),
             _ => None,
         })
         .or_else(|| tool_render::extract_diff(&result.result));
@@ -1404,9 +1508,9 @@ fn render_tool_error_block(
     let display = error
         .display
         .as_ref()
-        .map(|display| tool_render::render_tool_display(&error.tool_name, display))
+        .map(|display| tool_render::render_tool_use_state(&error.tool_name, display))
         .unwrap_or_else(|| {
-            tool_render::render_tool_display(
+            tool_render::render_tool_use_state(
                 &error.tool_name,
                 &tool_render::synthesize_fallback_display(&error.tool_name, Some(&error.message)),
             )
@@ -1414,7 +1518,7 @@ fn render_tool_error_block(
     tool_render::render_tool_block(theme, &display)
 }
 
-fn tool_display_from_call(call: &ToolCallItem) -> tau_proto::ToolDisplay {
+fn tool_display_from_call(call: &ToolCallItem) -> tau_proto::ToolUseState {
     let args = match call.name.as_str() {
         "read" | "write" | "edit" | "ls" => cbor_text_field(&call.arguments, "path"),
         "grep" | "glob" => cbor_text_field(&call.arguments, "pattern"),
@@ -1425,9 +1529,9 @@ fn tool_display_from_call(call: &ToolCallItem) -> tau_proto::ToolDisplay {
             .or_else(|| cbor_text_field(&call.arguments, "query")),
     }
     .unwrap_or_default();
-    tau_proto::ToolDisplay {
+    tau_proto::ToolUseState {
         args,
-        status: tau_proto::ToolDisplayStatus::InProgress,
+        status: tau_proto::ToolUseStatus::InProgress,
         status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
         ..Default::default()
     }
@@ -1445,6 +1549,25 @@ fn cbor_text_field(arguments: &CborValue, key: &str) -> Option<String> {
             }
             _ => None,
         })
+}
+
+fn assistant_text_from_update(items: &[tau_proto::ProviderResponseItem]) -> Option<String> {
+    let text = items
+        .iter()
+        .filter_map(|item| match item {
+            tau_proto::ProviderResponseItem::Completed(ContextItem::Message(message))
+                if message.role == ContextRole::Assistant =>
+            {
+                Some(message.content.iter().map(content_text).collect::<String>())
+            }
+            tau_proto::ProviderResponseItem::InProgress(
+                tau_proto::InProgressOutputItem::Message { text, .. },
+            ) => Some(text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.is_empty()).then_some(text)
 }
 
 fn assistant_text(items: &[ContextItem]) -> Option<String> {

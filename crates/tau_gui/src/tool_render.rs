@@ -8,22 +8,22 @@ use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
-use tau_proto::{CborValue, ToolDisplay, ToolDisplayPayload, ToolDisplayStatus, cbor_field};
+use tau_proto::{CborValue, ToolUsePayload, ToolUseState, ToolUseStatus, cbor_field};
 
 #[cfg(test)]
-pub(crate) fn format_token_stats_line(
+pub(crate) fn format_turn_stats_line(
     usage: &tau_proto::ProviderTokenUsage,
     previous_usage: Option<&tau_proto::ProviderTokenUsage>,
     turn_latency: Option<Duration>,
     total_latency: Option<Duration>,
 ) -> String {
-    token_stats_parts(usage, previous_usage, turn_latency, total_latency)
+    turn_stats_parts(usage, previous_usage, turn_latency, total_latency)
         .into_iter()
         .map(|part| part.text)
         .collect()
 }
 
-pub(crate) fn render_token_stats_block(
+pub(crate) fn render_turn_stats_block(
     theme: &tau_themes::Theme,
     usage: &tau_proto::ProviderTokenUsage,
     previous_usage: Option<&tau_proto::ProviderTokenUsage>,
@@ -36,7 +36,7 @@ pub(crate) fn render_token_stats_block(
     let mut themed = ThemedText::new();
     let root = themed.add_style(names::TOKEN_STATS);
     let mut children = Vec::new();
-    for part in token_stats_parts(usage, previous_usage, turn_latency, total_latency) {
+    for part in turn_stats_parts(usage, previous_usage, turn_latency, total_latency) {
         let style = themed.add_style(part.style_name);
         children.push(SpanTree::span(style, vec![SpanTree::text(part.text)]));
     }
@@ -49,12 +49,12 @@ const CACHE_HIT_WARNING_PERCENT: u8 = 90;
 // the last partial block to miss without flagging the turn.
 const CACHE_GRANULARITY_TOKENS: u64 = 512;
 
-struct TokenStatsPart {
+struct TurnStatsPart {
     text: String,
     style_name: &'static str,
 }
 
-impl TokenStatsPart {
+impl TurnStatsPart {
     fn new(text: impl Into<String>, style_name: &'static str) -> Self {
         Self {
             text: text.into(),
@@ -63,12 +63,12 @@ impl TokenStatsPart {
     }
 }
 
-fn token_stats_parts(
+fn turn_stats_parts(
     usage: &tau_proto::ProviderTokenUsage,
     previous_usage: Option<&tau_proto::ProviderTokenUsage>,
     turn_latency: Option<Duration>,
     total_latency: Option<Duration>,
-) -> Vec<TokenStatsPart> {
+) -> Vec<TurnStatsPart> {
     use tau_themes::names;
 
     let previous_sent_tokens = previous_usage.map_or(0, |usage| usage.prompt_sent_tokens);
@@ -77,10 +77,10 @@ fn token_stats_parts(
     let new_prompt_tokens = usage.prompt_sent_tokens.saturating_sub(turn_cache_possible);
     let mut parts = Vec::new();
 
-    parts.push(TokenStatsPart::new("Δ", names::TOKEN_STATS_DELTA));
+    parts.push(TurnStatsPart::new("Δ", names::TOKEN_STATS_DELTA));
     let turn_cache_hit_percent =
         cache_hit_percent(Some(turn_cache_possible), Some(usage.prompt_cached_tokens)).unwrap_or(0);
-    parts.push(TokenStatsPart::new(
+    parts.push(TurnStatsPart::new(
         format!(
             "{turn_cache_hit_percent}% {}/{}",
             format_token_count(usage.prompt_cached_tokens),
@@ -88,26 +88,26 @@ fn token_stats_parts(
         ),
         cache_hit_style_name(turn_cache_possible, usage.prompt_cached_tokens),
     ));
-    parts.push(TokenStatsPart::new(" ↑", names::TOKEN_STATS_UP));
-    parts.push(TokenStatsPart::new(
+    parts.push(TurnStatsPart::new(" ↑", names::TOKEN_STATS_UP));
+    parts.push(TurnStatsPart::new(
         format_token_count(new_prompt_tokens),
         names::TOKEN_STATS_INPUT,
     ));
-    parts.push(TokenStatsPart::new(" ↓", names::TOKEN_STATS_DOWN));
-    parts.push(TokenStatsPart::new(
+    parts.push(TurnStatsPart::new(" ↓", names::TOKEN_STATS_DOWN));
+    parts.push(TurnStatsPart::new(
         format_token_count(usage.response_received_tokens),
         names::TOKEN_STATS_OUTPUT,
     ));
     if let Some(latency) = turn_latency {
-        parts.push(TokenStatsPart::new(
+        parts.push(TurnStatsPart::new(
             format!(" {}", StatusBarDuration(latency)),
             names::TOKEN_STATS_LATENCY,
         ));
     }
 
-    parts.push(TokenStatsPart::new(" Σ", names::TOKEN_STATS_SIGMA));
-    parts.push(TokenStatsPart::new(" ↑", names::TOKEN_STATS_UP));
-    parts.push(TokenStatsPart::new(
+    parts.push(TurnStatsPart::new(" Σ", names::TOKEN_STATS_SIGMA));
+    parts.push(TurnStatsPart::new(" ↑", names::TOKEN_STATS_UP));
+    parts.push(TurnStatsPart::new(
         format!(
             "{}/{}",
             format_token_count(usage.stats.total.cached_tokens),
@@ -115,13 +115,13 @@ fn token_stats_parts(
         ),
         names::TOKEN_STATS_INPUT,
     ));
-    parts.push(TokenStatsPart::new(" ↓", names::TOKEN_STATS_DOWN));
-    parts.push(TokenStatsPart::new(
+    parts.push(TurnStatsPart::new(" ↓", names::TOKEN_STATS_DOWN));
+    parts.push(TurnStatsPart::new(
         format_token_count(usage.stats.total.received_tokens),
         names::TOKEN_STATS_OUTPUT,
     ));
     if let Some(latency) = total_latency {
-        parts.push(TokenStatsPart::new(
+        parts.push(TurnStatsPart::new(
             format!(" {}", StatusBarDuration(latency)),
             names::TOKEN_STATS_LATENCY,
         ));
@@ -240,24 +240,24 @@ pub(crate) enum ToolStatus {
     Success,
     Warning,
     Error,
+    Pending,
     Info,
     Progress,
     DiffAdded,
     DiffRemoved,
-    /// Agent role suffix, painted like the status-bar role chip.
+    /// Agent id or legacy role suffix, painted like the status-bar role chip.
     Role,
     Context,
     Tools,
     Time,
 }
 
-/// Status variants for session compaction lifecycle lines. Kept
-/// separate from tool-call display state because compaction is not a
-/// model-visible tool invocation.
+/// Status variant for completed compaction lines. Kept separate from
+/// tool-call display state because compaction is not a model-visible tool
+/// invocation.
 #[derive(Clone, Copy)]
 pub(crate) enum CompactionStatus {
     Success,
-    Error,
     Progress,
 }
 
@@ -273,13 +273,14 @@ pub(crate) struct ToolSuffixSegment {
 }
 
 /// Decomposed tool-call label, painted as themed spans:
-/// `<tool_name> <args> <suffix...>`.
+/// `<tool_name> <mode> <args> <suffix...>`.
 #[derive(Clone)]
 pub(crate) struct ToolCallDisplay {
     pub(crate) tool_name: String,
+    pub(crate) mode: String,
     pub(crate) args: String,
     pub(crate) suffixes: Vec<ToolSuffixSegment>,
-    pub(crate) payload: Option<ToolDisplayPayload>,
+    pub(crate) payload: Option<ToolUsePayload>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -295,45 +296,36 @@ pub(crate) struct ToolSummaryDisplay {
     pub(crate) removed: u64,
 }
 
-/// Build the live-header [`ToolCallDisplay`] for a still-running
-/// tool call from the harness-stamped descriptor. Falls back to a
-/// name-only block when the descriptor is absent (older logs, or
-/// extensions whose tools the harness doesn't know how to label).
-pub(crate) fn format_tool_call(tool_name: &str, display: Option<&ToolDisplay>) -> ToolCallDisplay {
-    let args = display.map(|d| d.args.clone()).unwrap_or_default();
-    let suffix = running_suffix_after(&args);
-    ToolCallDisplay {
-        tool_name: tool_name.to_owned(),
-        args,
-        suffixes: vec![suffix],
-        payload: display.and_then(|d| d.payload.clone()),
-    }
-}
-
 /// Build the completion descriptor for a finished `delegate` call by
 /// carrying the cached progress (args + counters from the latest
 /// [`tau_proto::DelegateProgress`]) and replacing the trailing
 /// in-progress chip with output stats + the final `ok`/`err: message`
-/// status. The chip order matches the running line so the only
-/// visible change at completion is the trailing segments.
+/// status. The input stats stay as a marked chip so delegate rendering
+/// can show input first, then output, then progress counters.
 pub(crate) fn build_delegate_completion_display(
-    cached: Option<&ToolDisplay>,
+    cached: Option<&ToolUseState>,
     details: &CborValue,
     error: Option<&str>,
-) -> ToolDisplay {
+) -> ToolUseState {
     let response_text = delegate_response_text(details);
-    let mut display = cached.cloned().unwrap_or_else(|| ToolDisplay {
+    let mut display = cached.cloned().unwrap_or_else(|| ToolUseState {
         args: String::new(),
         ..Default::default()
     });
-    display.stats = tau_proto::ToolDisplayStats::for_text(response_text);
+    let input_stats = display.stats;
+    display.stats = tau_proto::ToolUseStats::for_text(response_text);
+    if !input_stats.is_empty() {
+        display
+            .info_chips
+            .push(format!("↘︎{}", format_tool_use_state_stats(&input_stats)));
+    }
     match error {
         Some(msg) if !msg.is_empty() => {
-            display.status = ToolDisplayStatus::Error;
+            display.status = ToolUseStatus::Error;
             display.status_text = first_error_line(msg);
         }
         _ => {
-            display.status = ToolDisplayStatus::Success;
+            display.status = ToolUseStatus::Success;
             display.status_text = "ok".to_owned();
         }
     }
@@ -364,22 +356,17 @@ fn tool_suffix(text: String, status: ToolStatus) -> ToolSuffixSegment {
     }
 }
 
+pub(crate) fn pending_tool_call_display(tool_name: &str) -> ToolCallDisplay {
+    ToolCallDisplay {
+        tool_name: tool_name.to_owned(),
+        mode: String::new(),
+        args: String::new(),
+        suffixes: vec![tool_suffix("pending".to_owned(), ToolStatus::Pending)],
+        payload: None,
+    }
+}
 fn info_suffix(text: String) -> ToolSuffixSegment {
     tool_suffix(text, ToolStatus::Info)
-}
-
-/// Build the running-call ellipsis with the same leading-space rule
-/// `append_streaming_indicator` applies: skip the implicit space the
-/// renderer would otherwise insert when the preceding text (`args`)
-/// already ends in whitespace. Empty `args` keeps the space, since the
-/// label preceding the suffix is then the tool name (never whitespace).
-fn running_suffix_after(args: &str) -> ToolSuffixSegment {
-    let no_leading_space = args.chars().next_back().is_some_and(char::is_whitespace);
-    ToolSuffixSegment {
-        text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
-        status: ToolStatus::Progress,
-        no_leading_space,
-    }
 }
 
 /// Build a streaming block whose body uses `body_name` styling and
@@ -466,59 +453,130 @@ fn abbreviate_inline_text(text: &str) -> String {
     format!("{head}┄{tail}")
 }
 
-/// Render a `delegate` display with the agent role as a dedicated
-/// status-bar-colored suffix, ahead of progress counters and final
-/// status chips. Current descriptors keep the role on
-/// [`tau_proto::DelegateProgress`], but legacy cached descriptors may
-/// still have ` +role` embedded in `args`; strip that copy so the line
-/// does not render the role twice.
+/// Render a `delegate` display with a dedicated suffix for the delegated agent.
+/// Completed delegates show input stats (`↘︎`) before output stats (`↖︎`), then
+/// progress counters and the final status. Cached descriptors may still have
+/// ` +role` embedded in `args`; strip that legacy copy so the line does not
+/// render both the old role chip and the new agent chip.
 pub(crate) fn render_delegate_display(
-    display: &ToolDisplay,
-    role: Option<&str>,
+    display: &ToolUseState,
+    agent_id: Option<&str>,
+    legacy_role: Option<&str>,
 ) -> ToolCallDisplay {
-    let mut rendered = render_tool_display("delegate", display);
-    let stats_chip = format_tool_display_stats(&display.stats);
+    let mut rendered = render_tool_use_state("delegate", display);
+    let stats_chip = format_tool_use_state_stats(&display.stats);
     if !stats_chip.is_empty() {
         let marker = match display.status {
-            ToolDisplayStatus::InProgress => "↘︎",
-            ToolDisplayStatus::Success | ToolDisplayStatus::Warning | ToolDisplayStatus::Error => {
-                "↖︎"
-            }
+            ToolUseStatus::InProgress => "↘︎",
+            ToolUseStatus::Success | ToolUseStatus::Warning | ToolUseStatus::Error => "↖︎",
         };
         if let Some(suffix) = rendered
             .suffixes
             .iter_mut()
             .find(|suffix| suffix.text == stats_chip)
         {
-            suffix.text = format!("{marker} {}", suffix.text);
+            suffix.text = format!("{marker}{}", suffix.text);
+        }
+    }
+    for suffix in &mut rendered.suffixes {
+        normalize_delegate_input_stats_suffix(suffix);
+    }
+    if !matches!(display.status, ToolUseStatus::InProgress) {
+        move_delegate_completion_stats_first(&mut rendered.suffixes, &stats_chip);
+    }
+
+    if let Some(role) = legacy_role.filter(|role| !role.is_empty()) {
+        let legacy_suffix = format!(" +{role}");
+        if let Some(args) = rendered.args.strip_suffix(&legacy_suffix) {
+            rendered.args = args.to_owned();
         }
     }
 
-    let Some(role) = role.filter(|role| !role.is_empty()) else {
-        return rendered;
-    };
-
-    let legacy_suffix = format!(" +{role}");
-    if let Some(args) = rendered.args.strip_suffix(&legacy_suffix) {
-        rendered.args = args.to_owned();
+    if let Some(agent_id) = agent_id.filter(|agent_id| !agent_id.is_empty()) {
+        rendered
+            .suffixes
+            .insert(0, tool_suffix(format!("@{agent_id}"), ToolStatus::Role));
+    } else if let Some(role) = legacy_role.filter(|role| !role.is_empty()) {
+        rendered
+            .suffixes
+            .insert(0, tool_suffix(format!("+{role}"), ToolStatus::Role));
     }
-    rendered
-        .suffixes
-        .insert(0, tool_suffix(format!("+{role}"), ToolStatus::Role));
     rendered
 }
 
-/// Render a [`ToolDisplay`] descriptor directly to a
+fn normalize_delegate_input_stats_suffix(suffix: &mut ToolSuffixSegment) {
+    if !matches!(suffix.status, ToolStatus::Info) {
+        return;
+    }
+    let normalized = suffix
+        .text
+        .strip_prefix("↘︎ ")
+        .or_else(|| suffix.text.strip_prefix("↘︎"))
+        .filter(|stats| !stats.is_empty())
+        .map(|stats| format!("↘︎{stats}"));
+    if let Some(normalized) = normalized {
+        suffix.text = normalized;
+    }
+}
+
+fn is_delegate_input_stats_suffix(suffix: &ToolSuffixSegment) -> bool {
+    matches!(suffix.status, ToolStatus::Info)
+        && suffix.text.starts_with("↘︎")
+        && suffix.text.len() > "↘︎".len()
+}
+
+fn move_delegate_completion_stats_first(
+    suffixes: &mut Vec<ToolSuffixSegment>,
+    output_stats_chip: &str,
+) {
+    let mut input_stats = Vec::new();
+    let mut rest = Vec::with_capacity(suffixes.len());
+    for suffix in suffixes.drain(..) {
+        if is_delegate_input_stats_suffix(&suffix) {
+            input_stats.push(suffix);
+        } else {
+            rest.push(suffix);
+        }
+    }
+    if input_stats.is_empty() {
+        *suffixes = rest;
+        return;
+    }
+
+    let output_stats_text =
+        (!output_stats_chip.is_empty()).then(|| format!("↖︎{output_stats_chip}"));
+    let insert_at = rest
+        .iter()
+        .position(|suffix| {
+            output_stats_text
+                .as_deref()
+                .is_some_and(|text| suffix.text == text)
+                || matches!(
+                    suffix.status,
+                    ToolStatus::Tools
+                        | ToolStatus::Context
+                        | ToolStatus::Success
+                        | ToolStatus::Warning
+                        | ToolStatus::Error
+                        | ToolStatus::Progress
+                )
+        })
+        .unwrap_or(rest.len());
+    rest.splice(insert_at..insert_at, input_stats);
+    *suffixes = rest;
+}
+
+/// Render a [`ToolUseState`] descriptor directly to a
 /// [`ToolCallDisplay`]. The generic path the renderer takes when the
 /// tool side attached a display descriptor to its result/error event —
 /// no `match tool_name` arms needed. Falls back to
 /// [`format_tool_completion`] for older events that didn't carry a
 /// descriptor.
-pub(crate) fn render_tool_display(tool_name: &str, display: &ToolDisplay) -> ToolCallDisplay {
+pub(crate) fn render_tool_use_state(tool_name: &str, display: &ToolUseState) -> ToolCallDisplay {
     let mut suffixes: Vec<ToolSuffixSegment> = Vec::new();
     // Diff `+N -M` chips (themed green/red) are derived from the
-    // payload so write/edit don't have to push them as info chips.
-    if let Some(ToolDisplayPayload::Diff(summary)) = &display.payload
+    // payload so file-editing tools don't have to push them as info chips.
+    if let Some(ToolUsePayload::Diff(summary)) = &display.payload
         && (summary.added > 0 || summary.removed > 0)
     {
         if summary.added > 0 {
@@ -535,7 +593,7 @@ pub(crate) fn render_tool_display(tool_name: &str, display: &ToolDisplay) -> Too
             });
         }
     }
-    let stats_chip = format_tool_display_stats(&display.stats);
+    let stats_chip = format_tool_use_state_stats(&display.stats);
     if !stats_chip.is_empty() {
         suffixes.push(info_suffix(stats_chip));
     }
@@ -546,24 +604,24 @@ pub(crate) fn render_tool_display(tool_name: &str, display: &ToolDisplay) -> Too
         suffixes.push(info_suffix(chip.clone()));
     }
     let status_kind = match display.status {
-        ToolDisplayStatus::Success => ToolStatus::Success,
-        ToolDisplayStatus::Warning => ToolStatus::Warning,
-        ToolDisplayStatus::Error => ToolStatus::Error,
-        ToolDisplayStatus::InProgress => ToolStatus::Progress,
+        ToolUseStatus::Success => ToolStatus::Success,
+        ToolUseStatus::Warning => ToolStatus::Warning,
+        ToolUseStatus::Error => ToolStatus::Error,
+        ToolUseStatus::InProgress => ToolStatus::Progress,
     };
-    let mut status_text = if display.status_text.is_empty()
-        && matches!(display.status, ToolDisplayStatus::InProgress)
-    {
-        tau_proto::PROGRESS_INDICATOR_TEXT.to_owned()
-    } else {
-        display.status_text.clone()
-    };
-    if matches!(display.status, ToolDisplayStatus::Error) {
+    let mut status_text =
+        if display.status_text.is_empty() && matches!(display.status, ToolUseStatus::InProgress) {
+            tau_proto::PROGRESS_INDICATOR_TEXT.to_owned()
+        } else {
+            display.status_text.clone()
+        };
+    if matches!(display.status, ToolUseStatus::Error) {
         status_text = error_status_text(&status_text);
     }
     suffixes.push(tool_suffix(status_text, status_kind));
     ToolCallDisplay {
         tool_name: tool_name.to_owned(),
+        mode: display.mode.clone(),
         args: display.args.clone(),
         suffixes,
         payload: display.payload.clone(),
@@ -575,20 +633,20 @@ fn format_progress_counter(counter: &tau_proto::ProgressCounter) -> ToolSuffixSe
         tau_proto::ProgressUnit::Count => match (counter.complete, counter.total) {
             (Some(c), Some(t)) => format!("{c}/{t}"),
             (Some(c), None) => c.to_string(),
-            (None, Some(t)) => format!("?/{t}"),
-            (None, None) => "?".to_owned(),
+            (None, Some(t)) => format!("-/{t}"),
+            (None, None) => "-".to_owned(),
         },
         tau_proto::ProgressUnit::Percent => match (counter.complete, counter.total) {
             (Some(p), Some(t)) => format!("{p}%/{}", format_token_count(t)),
             (Some(p), None) => format!("{p}%"),
-            (None, Some(t)) => format!("?%/{}", format_token_count(t)),
-            (None, None) => "?%".to_owned(),
+            (None, Some(t)) => format!("-%/{}", format_token_count(t)),
+            (None, None) => "-%".to_owned(),
         },
         tau_proto::ProgressUnit::Tokens => match (counter.complete, counter.total) {
             (Some(c), Some(t)) => format!("{}/{}", format_token_count(c), format_token_count(t)),
             (Some(c), None) => format_token_count(c),
-            (None, Some(t)) => format!("?/{}", format_token_count(t)),
-            (None, None) => "?".to_owned(),
+            (None, Some(t)) => format!("-/{}", format_token_count(t)),
+            (None, None) => "-".to_owned(),
         },
     };
     match counter.label.as_deref() {
@@ -599,7 +657,7 @@ fn format_progress_counter(counter: &tau_proto::ProgressCounter) -> ToolSuffixSe
     }
 }
 
-fn format_tool_display_stats(stats: &tau_proto::ToolDisplayStats) -> String {
+fn format_tool_use_state_stats(stats: &tau_proto::ToolUseStats) -> String {
     format_stats(stats.matches, stats.lines, stats.bytes)
 }
 
@@ -612,12 +670,12 @@ fn format_stats(matches: Option<u64>, lines: Option<u64>, bytes: Option<u64>) ->
         parts.push(format!("{l}L"));
     }
     if let Some(b) = bytes {
-        parts.push(format_tool_display_bytes(b));
+        parts.push(format_tool_use_state_bytes(b));
     }
     parts.join(", ")
 }
 
-fn format_tool_display_bytes(bytes: u64) -> String {
+fn format_tool_use_state_bytes(bytes: u64) -> String {
     if bytes >= 1024 {
         let k = bytes as f64 / 1024.0;
         if k >= 100.0 {
@@ -630,18 +688,18 @@ fn format_tool_display_bytes(bytes: u64) -> String {
     }
 }
 
-/// Minimal display for events that didn't ship a [`ToolDisplay`]
+/// Minimal display for events that didn't ship a [`ToolUseState`]
 /// (old logs and any extension that hasn't migrated). Renders just
 /// `<tool_name> ok` or `<tool_name> err: <short message>` — the chip
 /// shape is intentionally generic so future tool names render without
 /// touching this code.
-pub(crate) fn synthesize_fallback_display(tool_name: &str, error: Option<&str>) -> ToolDisplay {
+pub(crate) fn synthesize_fallback_display(tool_name: &str, error: Option<&str>) -> ToolUseState {
     let (status, status_text) = match error {
-        Some(msg) if !msg.is_empty() => (ToolDisplayStatus::Error, first_error_line(msg)),
-        _ => (ToolDisplayStatus::Success, "ok".to_owned()),
+        Some(msg) if !msg.is_empty() => (ToolUseStatus::Error, first_error_line(msg)),
+        _ => (ToolUseStatus::Success, "ok".to_owned()),
     };
     let _ = tool_name;
-    ToolDisplay {
+    ToolUseState {
         args: String::new(),
         status,
         status_text,
@@ -712,17 +770,17 @@ pub(crate) fn build_tool_summary_display(summary: &ToolSummaryDisplay) -> ToolCa
     }
     ToolCallDisplay {
         tool_name: "tools".to_owned(),
+        mode: String::new(),
         args: format!("{}/{}", summary.completed, summary.total),
         suffixes,
         payload: None,
     }
 }
 
-/// Render the provider-side compaction lifecycle as a compact session
-/// status line: `compact …`, `compact #226.2k …`, or
-/// `compact #226.2k ok: #4.5k`.
-/// Compaction is not a model-visible tool invocation, so this paints the
-/// small lifecycle line directly instead of fabricating a `ToolDisplay`.
+/// Render a completed provider-side compaction item as a compact session
+/// status line. Compaction is not a model-visible tool invocation, so this
+/// paints the small lifecycle line directly instead of fabricating a
+/// `ToolUseState`.
 pub(crate) fn render_compaction_block(
     theme: &tau_themes::Theme,
     status_text: impl Into<String>,
@@ -738,7 +796,6 @@ pub(crate) fn render_compaction_block(
     let spacer = themed.add_style(names::TOOL_ARGS);
     let status_style = themed.add_style(match status {
         CompactionStatus::Success => names::TOOL_STATUS_SUCCESS,
-        CompactionStatus::Error => names::TOOL_STATUS_ERROR,
         CompactionStatus::Progress => names::PROGRESS_INDICATOR,
     });
     let context_style = themed.add_style(names::STATUS_CONTEXT);
@@ -773,12 +830,20 @@ pub(crate) fn render_tool_block(
     let mut themed = ThemedText::new();
     let output = themed.add_style(names::TOOL_OUTPUT);
     let name = themed.add_style(names::TOOL_NAME);
+    let mode = themed.add_style(names::TOOL_MODE);
     let args = themed.add_style(names::TOOL_ARGS);
 
     let mut children = vec![SpanTree::span(
         name,
         vec![SpanTree::text(display.tool_name.clone())],
     )];
+    if !display.mode.is_empty() {
+        children.push(SpanTree::span(args, vec![SpanTree::text(" ")]));
+        children.push(SpanTree::span(
+            mode,
+            vec![SpanTree::text(abbreviate_inline_text(&display.mode))],
+        ));
+    }
     if !display.args.is_empty() {
         children.push(SpanTree::span(
             args,
@@ -791,10 +856,10 @@ pub(crate) fn render_tool_block(
     for suffix in &display.suffixes {
         let status_name = match suffix.status {
             ToolStatus::Success => names::TOOL_STATUS_SUCCESS,
-            // Warning has no dedicated token yet — share the info
+            // Warning/Pending have no dedicated tokens yet — share the info
             // colour so the chip still reads as "non-error" without a
             // theme migration.
-            ToolStatus::Warning | ToolStatus::Info => names::TOOL_STATUS_INFO,
+            ToolStatus::Warning | ToolStatus::Pending | ToolStatus::Info => names::TOOL_STATUS_INFO,
             ToolStatus::Error => names::TOOL_STATUS_ERROR,
             ToolStatus::Progress => names::PROGRESS_INDICATOR,
             ToolStatus::DiffAdded => names::DIFF_ADDED,
@@ -813,7 +878,7 @@ pub(crate) fn render_tool_block(
             vec![SpanTree::text(abbreviate_inline_text(&suffix.text))],
         ));
     }
-    if let Some(ToolDisplayPayload::Text { text }) = &display.payload {
+    if let Some(ToolUsePayload::Text { text }) = &display.payload {
         children.push(SpanTree::span(args, vec![SpanTree::text("\n")]));
         children.push(SpanTree::span(args, vec![SpanTree::text(text.clone())]));
     }
@@ -850,8 +915,9 @@ pub(crate) fn render_diff_tool_block(
     let removed_style = resolve(theme, names::DIFF_REMOVED);
     let context_style = resolve(theme, names::DIFF_CONTEXT);
     let header_style = resolve(theme, names::DIFF_HUNK_HEADER);
-    let added_inline_style = resolve(theme, names::DIFF_ADDED_INLINE);
-    let removed_inline_style = resolve(theme, names::DIFF_REMOVED_INLINE);
+    let added_inline_style = overlay_style(added_style, resolve(theme, names::DIFF_ADDED_INLINE));
+    let removed_inline_style =
+        overlay_style(removed_style, resolve(theme, names::DIFF_REMOVED_INLINE));
 
     for hunk in &diff.hunks {
         spans.push(Span::new("\n", context_style));
@@ -866,19 +932,19 @@ pub(crate) fn render_diff_tool_block(
             spans.push(Span::new("\n", context_style));
             match line {
                 tau_proto::DiffLine::Equal { text } => {
-                    spans.push(Span::new(format!("  {text}"), context_style));
+                    spans.push(Span::new(format!(" {text}"), context_style));
                 }
                 tau_proto::DiffLine::Add { text } => {
-                    spans.push(Span::new(format!("+ {text}"), added_style));
+                    spans.push(Span::new(format!("+{text}"), added_style));
                 }
                 tau_proto::DiffLine::Remove { text } => {
-                    spans.push(Span::new(format!("- {text}"), removed_style));
+                    spans.push(Span::new(format!("-{text}"), removed_style));
                 }
                 tau_proto::DiffLine::Modify { old, new } => {
-                    spans.push(Span::new("- ".to_owned(), removed_style));
+                    spans.push(Span::new("-".to_owned(), removed_style));
                     push_segments(&mut spans, old, removed_style, removed_inline_style);
                     spans.push(Span::new("\n".to_owned(), context_style));
-                    spans.push(Span::new("+ ".to_owned(), added_style));
+                    spans.push(Span::new("+".to_owned(), added_style));
                     push_segments(&mut spans, new, added_style, added_inline_style);
                 }
             }
@@ -910,6 +976,16 @@ fn push_segments(
                 spans.push(Span::new(text.clone(), inline));
             }
         }
+    }
+}
+
+fn overlay_style(base: tau_cli_term::Style, overlay: tau_cli_term::Style) -> tau_cli_term::Style {
+    tau_cli_term::Style {
+        fg: overlay.fg.or(base.fg),
+        bg: overlay.bg.or(base.bg),
+        bold: base.bold || overlay.bold,
+        underline: base.underline || overlay.underline,
+        italic: base.italic || overlay.italic,
     }
 }
 
@@ -955,6 +1031,173 @@ pub(crate) fn render_shell_block(
         spans.push(Span::new(output.to_owned(), args_style));
     }
     StyledBlock::new(StyledText::from(spans))
+}
+
+pub(crate) fn render_action_output_block(
+    theme: &tau_themes::Theme,
+    text: &str,
+) -> tau_cli_term::StyledBlock {
+    use tau_cli_term::resolve::resolve;
+    use tau_cli_term::{Span, StyledBlock, StyledText};
+    use tau_themes::names;
+
+    let styles = ActionStyles {
+        output: resolve(theme, names::ACTION_OUTPUT),
+        label: resolve(theme, names::ACTION_LABEL),
+        value: resolve(theme, names::ACTION_VALUE),
+        id: resolve(theme, names::ACTION_ID),
+    };
+    let mut spans = Vec::new();
+    for line in text.split_inclusive('\n') {
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        push_action_line(&mut spans, body, styles);
+        if line.ends_with('\n') {
+            spans.push(Span::new("\n", styles.output));
+        }
+    }
+    StyledBlock::new(StyledText::from(spans))
+}
+
+pub(crate) fn render_action_error_block(
+    theme: &tau_themes::Theme,
+    action_id: &str,
+    message: &str,
+) -> tau_cli_term::StyledBlock {
+    use tau_cli_term::resolve::resolve;
+    use tau_cli_term::{Span, StyledBlock, StyledText};
+    use tau_themes::names;
+
+    StyledBlock::new(StyledText::from(vec![
+        Span::new(action_id.to_owned(), resolve(theme, names::ACTION_ID)),
+        Span::new(": ", resolve(theme, names::ACTION_OUTPUT)),
+        Span::new(message.to_owned(), resolve(theme, names::ACTION_ERROR)),
+    ]))
+}
+
+#[derive(Clone, Copy)]
+struct ActionStyles {
+    output: tau_cli_term::Style,
+    label: tau_cli_term::Style,
+    value: tau_cli_term::Style,
+    id: tau_cli_term::Style,
+}
+
+fn push_action_line(spans: &mut Vec<tau_cli_term::Span>, line: &str, styles: ActionStyles) {
+    if push_action_approval_heading(spans, line, styles) {
+        return;
+    }
+    if push_action_label_line(spans, line, styles) {
+        return;
+    }
+
+    let mut index = 0;
+    if let Some(end) = leading_action_id_end(line) {
+        spans.push(tau_cli_term::Span::new(line[..end].to_owned(), styles.id));
+        index = end;
+    }
+    push_action_tokens(spans, &line[index..], styles);
+}
+
+fn push_action_approval_heading(
+    spans: &mut Vec<tau_cli_term::Span>,
+    line: &str,
+    styles: ActionStyles,
+) -> bool {
+    let Some((prefix, id)) = line.rsplit_once(' ') else {
+        return false;
+    };
+    if !prefix.to_ascii_lowercase().contains("approval") || !is_action_id_token(id) {
+        return false;
+    }
+    spans.push(tau_cli_term::Span::new(format!("{prefix} "), styles.output));
+    spans.push(tau_cli_term::Span::new(id.to_owned(), styles.id));
+    true
+}
+
+fn push_action_label_line(
+    spans: &mut Vec<tau_cli_term::Span>,
+    line: &str,
+    styles: ActionStyles,
+) -> bool {
+    let Some(colon) = line.find(':') else {
+        return false;
+    };
+    if line[..colon].contains(char::is_whitespace) {
+        return false;
+    }
+    let label = &line[..=colon];
+    let mut value = &line[colon + 1..];
+    spans.push(tau_cli_term::Span::new(label.to_owned(), styles.label));
+    if let Some(stripped) = value.strip_prefix(' ') {
+        spans.push(tau_cli_term::Span::new(" ", styles.output));
+        value = stripped;
+    }
+    let value_style = if is_action_id_label(&line[..colon]) && is_action_id_token(value) {
+        styles.id
+    } else {
+        styles.value
+    };
+    spans.push(tau_cli_term::Span::new(value.to_owned(), value_style));
+    true
+}
+
+fn push_action_tokens(spans: &mut Vec<tau_cli_term::Span>, text: &str, styles: ActionStyles) {
+    let mut rest = text;
+    while !rest.is_empty() {
+        let split_at = rest
+            .find(|c: char| !c.is_whitespace())
+            .unwrap_or(rest.len());
+        if 0 < split_at {
+            spans.push(tau_cli_term::Span::new(
+                rest[..split_at].to_owned(),
+                styles.output,
+            ));
+            rest = &rest[split_at..];
+            continue;
+        }
+        let token_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let token = &rest[..token_end];
+        push_action_token(spans, token, styles);
+        rest = &rest[token_end..];
+    }
+}
+
+fn push_action_token(spans: &mut Vec<tau_cli_term::Span>, token: &str, styles: ActionStyles) {
+    let Some(eq) = token.find('=') else {
+        spans.push(tau_cli_term::Span::new(token.to_owned(), styles.output));
+        return;
+    };
+    if eq == 0 {
+        spans.push(tau_cli_term::Span::new(token.to_owned(), styles.output));
+        return;
+    }
+    spans.push(tau_cli_term::Span::new(
+        token[..=eq].to_owned(),
+        styles.label,
+    ));
+    spans.push(tau_cli_term::Span::new(
+        token[eq + 1..].to_owned(),
+        styles.value,
+    ));
+}
+
+fn leading_action_id_end(line: &str) -> Option<usize> {
+    let end = line.find(char::is_whitespace)?;
+    let token = &line[..end];
+    let rest = &line[end..];
+    (is_action_id_token(token) && rest.contains('=')).then_some(end)
+}
+
+fn is_action_id_label(label: &str) -> bool {
+    label == "id" || label.ends_with("_id") || label.ends_with("-id")
+}
+
+fn is_action_id_token(token: &str) -> bool {
+    !token.is_empty()
+        && token.len() <= 16
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 pub(crate) fn render_harness_info(
@@ -1037,18 +1280,20 @@ pub(crate) fn system_loaded_block(
     tau_cli_term::StyledBlock::new(tau_cli_term::resolve::themed_text(theme, &text))
 }
 
-pub(crate) fn system_status_block(
+pub(crate) fn agent_context_ready_block(
     theme: &tau_themes::Theme,
-    prefix: &str,
-    status: &str,
+    agent_id: &tau_proto::AgentId,
 ) -> tau_cli_term::StyledBlock {
     use tau_themes::{ThemedText, names};
 
     let mut text = ThemedText::new();
     let info = text.add_style(names::SYSTEM_INFO);
+    let agent_style = text.add_style(names::STATUS_ROLE);
     let status_style = text.add_style(names::SYSTEM_STATUS);
-    text.push(info, prefix);
-    text.push(status_style, status);
+    text.push(info, "agent ");
+    text.push(agent_style, format!("@{agent_id}"));
+    text.push(info, " context ");
+    text.push(status_style, "ready");
     tau_cli_term::StyledBlock::new(tau_cli_term::resolve::themed_text(theme, &text))
 }
 
