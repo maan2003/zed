@@ -553,6 +553,15 @@ impl TauGui {
                             }
                         }
                     }
+                } else {
+                    self.remove_live_response(key.as_str(), cx);
+                }
+                if let Some(error) = &finished.error {
+                    self.insert_before_draft_styled(
+                        &format!("[provider error: {error}]\n"),
+                        TranscriptStyle::SystemImportant,
+                        cx,
+                    );
                 }
                 let tool_calls = tool_calls_from_output_items(&finished.output_items);
                 if !tool_calls.is_empty() {
@@ -571,16 +580,95 @@ impl TauGui {
                 }
                 self.ensure_transcript_gap(cx);
             }
-            Event::ToolProgress(progress) => {
-                let text = tau_harness::format_tool_progress(&progress);
+            Event::AgentPromptRecalled(recalled) => {
+                self.select_agent(recalled.agent_id.to_string());
+                self.replace_draft_text(&recalled.text, cx);
                 self.insert_before_draft_styled(
-                    &format!("{text}\n"),
-                    TranscriptStyle::ToolProgress,
+                    "> recalled queued prompt for editing\n",
+                    TranscriptStyle::SystemInfo,
                     cx,
                 );
             }
+            Event::AgentPromptSteered(steered) if !steered.message_class.is_internal() => {
+                self.insert_before_draft_styled(
+                    &format!("> {} (steered)\n", steered.text),
+                    TranscriptStyle::UserPromptQueued,
+                    cx,
+                );
+            }
+            Event::AgentCompactionTriggered(triggered) if triggered.originator.is_user() => {
+                let block = tool_render::render_compaction_block(
+                    &self.cli_theme,
+                    format!("requested #{}", triggered.agent_id),
+                    tool_render::CompactionStatus::Progress,
+                );
+                self.insert_before_draft_block(block, cx);
+            }
+            Event::AgentPromptTerminated(terminated) if terminated.originator.is_user() => {
+                let key = terminated.agent_prompt_id.to_string();
+                self.remove_live_response(key.as_str(), cx);
+                self.insert_before_draft_styled(
+                    &format!(
+                        "[prompt {}: {key}]\n",
+                        agent_prompt_termination_reason(terminated.reason)
+                    ),
+                    TranscriptStyle::SystemInfo,
+                    cx,
+                );
+            }
+            Event::ToolProgress(progress) => {
+                if let Some(display) = progress.display.as_ref() {
+                    self.upsert_tool_display(
+                        progress.call_id.as_str(),
+                        &progress.tool_name,
+                        display,
+                        cx,
+                    );
+                } else {
+                    let text = tau_harness::format_tool_progress(&progress);
+                    if !text.is_empty() {
+                        self.insert_before_draft_styled(
+                            &format!("{text}\n"),
+                            TranscriptStyle::ToolProgress,
+                            cx,
+                        );
+                    }
+                }
+            }
             Event::ToolResult(result) if result.originator.is_user() => {
                 let block = render_tool_result_block(&self.cli_theme, &result);
+                self.finish_tool_call(result.call_id.as_str(), block, cx);
+                self.record_main_tool_completed();
+                self.update_status_line(cx);
+            }
+            Event::ProviderToolResult(result)
+                if result.originator.is_user()
+                    || self
+                        .pending_tool_calls
+                        .contains_key(result.call_id.as_str()) =>
+            {
+                let block = render_tool_result_parts_block(
+                    &self.cli_theme,
+                    &result.tool_name,
+                    &result.result,
+                    result.display.as_ref(),
+                );
+                self.finish_tool_call(result.call_id.as_str(), block, cx);
+                self.record_main_tool_completed();
+                self.update_status_line(cx);
+            }
+            Event::ToolBackgroundResult(result)
+                if result.originator.is_user()
+                    || self
+                        .pending_tool_calls
+                        .contains_key(result.call_id.as_str()) =>
+            {
+                let block = render_tool_result_parts_block(
+                    &self.cli_theme,
+                    &result.tool_name,
+                    &result.result,
+                    result.display.as_ref(),
+                );
                 self.finish_tool_call(result.call_id.as_str(), block, cx);
                 self.record_main_tool_completed();
                 self.update_status_line(cx);
@@ -590,6 +678,61 @@ impl TauGui {
                 self.finish_tool_call(error.call_id.as_str(), block, cx);
                 self.record_main_tool_completed();
                 self.update_status_line(cx);
+            }
+            Event::ProviderToolError(error)
+                if error.originator.is_user()
+                    || self.pending_tool_calls.contains_key(error.call_id.as_str()) =>
+            {
+                let block = render_tool_error_parts_block(
+                    &self.cli_theme,
+                    &error.tool_name,
+                    &error.message,
+                    error.display.as_ref(),
+                );
+                self.finish_tool_call(error.call_id.as_str(), block, cx);
+                self.record_main_tool_completed();
+                self.update_status_line(cx);
+            }
+            Event::ToolBackgroundError(error)
+                if error.originator.is_user()
+                    || self.pending_tool_calls.contains_key(error.call_id.as_str()) =>
+            {
+                let block = render_tool_error_parts_block(
+                    &self.cli_theme,
+                    &error.tool_name,
+                    &error.message,
+                    error.display.as_ref(),
+                );
+                self.finish_tool_call(error.call_id.as_str(), block, cx);
+                self.record_main_tool_completed();
+                self.update_status_line(cx);
+            }
+            Event::ToolRejected(rejected) if rejected.originator.is_user() => {
+                let block = render_tool_error_parts_block(
+                    &self.cli_theme,
+                    &rejected.tool_name,
+                    &rejected.message,
+                    None,
+                );
+                self.finish_tool_call(rejected.call_id.as_str(), block, cx);
+                self.record_main_tool_completed();
+                self.update_status_line(cx);
+            }
+            Event::ToolCancelled(cancelled) => {
+                if self
+                    .pending_tool_calls
+                    .contains_key(cancelled.call_id.as_str())
+                {
+                    let block = render_tool_error_parts_block(
+                        &self.cli_theme,
+                        &cancelled.tool_name,
+                        "cancelled",
+                        None,
+                    );
+                    self.finish_tool_call(cancelled.call_id.as_str(), block, cx);
+                    self.record_main_tool_completed();
+                    self.update_status_line(cx);
+                }
             }
             Event::UiShellCommand(command) => {
                 let block = tool_render::render_shell_block(
@@ -623,12 +766,101 @@ impl TauGui {
                 );
                 self.insert_before_draft_block(block, cx);
             }
-            Event::HarnessInfo(info) => {
-                let style = match info.level {
-                    tau_proto::HarnessInfoLevel::Normal => TranscriptStyle::SystemInfo,
-                    tau_proto::HarnessInfoLevel::Important => TranscriptStyle::SystemImportant,
+            Event::ActionResult(result) => {
+                let text = match result.output {
+                    tau_proto::ActionOutput::Text { text } => text,
+                    tau_proto::ActionOutput::EditorBuffer { title, text, .. } => {
+                        format!("{title}\n{text}")
+                    }
                 };
-                self.insert_before_draft_styled(&format!("{}\n", info.message), style, cx);
+                let block = tool_render::render_action_output_block(&self.cli_theme, &text);
+                self.insert_before_draft_block(block, cx);
+            }
+            Event::ActionError(error) => {
+                let block = tool_render::render_action_error_block(
+                    &self.cli_theme,
+                    &error.action_id,
+                    &error.message,
+                );
+                self.insert_before_draft_block(block, cx);
+            }
+            Event::ExtensionStarting(starting) => {
+                let status = starting.pid.map_or_else(
+                    || "starting".to_owned(),
+                    |pid| format!("starting pid {pid}"),
+                );
+                let block = tool_render::extension_status_block(
+                    &self.cli_theme,
+                    &starting.extension_name,
+                    &status,
+                );
+                self.insert_before_draft_block(block, cx);
+            }
+            Event::ExtensionReady(ready) => {
+                let status = ready
+                    .pid
+                    .map_or_else(|| "ready".to_owned(), |pid| format!("ready pid {pid}"));
+                let block = tool_render::extension_status_block(
+                    &self.cli_theme,
+                    &ready.extension_name,
+                    &status,
+                );
+                self.insert_before_draft_block(block, cx);
+            }
+            Event::ExtensionExited(exited) => {
+                let status = match (exited.exit_code, exited.signal) {
+                    (Some(code), _) => format!("exited {code}"),
+                    (_, Some(signal)) => format!("signal {signal}"),
+                    (None, None) => "exited".to_owned(),
+                };
+                let block = tool_render::extension_status_block(
+                    &self.cli_theme,
+                    &exited.extension_name,
+                    &status,
+                );
+                self.insert_before_draft_block(block, cx);
+            }
+            Event::ExtensionRestarting(restarting) => {
+                let status = restarting.reason.as_ref().map_or_else(
+                    || format!("restarting #{}", restarting.attempt),
+                    |reason| format!("restarting #{}: {reason}", restarting.attempt),
+                );
+                let block = tool_render::extension_status_block(
+                    &self.cli_theme,
+                    &restarting.extension_name,
+                    &status,
+                );
+                self.insert_before_draft_block(block, cx);
+            }
+            Event::ExtAgentsMdAvailable(agents_md) => {
+                let block = tool_render::system_loaded_block(
+                    &self.cli_theme,
+                    &agents_md.file_path,
+                    &agents_md.content,
+                );
+                self.insert_before_draft_block(block, cx);
+            }
+            Event::ExtensionContextReady(ready) => {
+                let block =
+                    tool_render::agent_context_ready_block(&self.cli_theme, &ready.agent_id);
+                self.insert_before_draft_block(block, cx);
+            }
+            Event::HarnessSessionDir(session_dir) => {
+                let block = tool_render::session_status_block(
+                    &self.cli_theme,
+                    &session_dir.path,
+                    "/",
+                    session_dir.status.as_str(),
+                );
+                self.insert_before_draft_block(block, cx);
+            }
+            Event::HarnessUiDir(ui_dir) => {
+                let block = tool_render::ui_dir_block(&self.cli_theme, &ui_dir.path);
+                self.insert_before_draft_block(block, cx);
+            }
+            Event::HarnessInfo(info) => {
+                let block = tool_render::render_harness_info(&self.cli_theme, &info);
+                self.insert_before_draft_block(block, cx);
             }
             Event::HarnessRoleSelected(selected) => {
                 self.current_model = selected.model.clone();
@@ -641,6 +873,14 @@ impl TauGui {
             Event::HarnessContextUsageChanged(changed) => {
                 self.current_context_input_tokens = changed.input_tokens;
                 self.current_context_percent = changed.percent_used;
+                self.update_status_line(cx);
+            }
+            Event::HarnessAgentContextUsageChanged(changed)
+                if self.current_agent_id.as_deref() == Some(changed.agent_id.as_str()) =>
+            {
+                self.current_context_input_tokens = changed.input_tokens;
+                self.current_context_percent = changed.percent_used;
+                self.current_context_window = changed.context_window;
                 self.update_status_line(cx);
             }
             Event::SessionStarted(started) => {
@@ -1265,6 +1505,68 @@ impl TauGui {
         }
     }
 
+    fn remove_live_response(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.streamed_responses.remove(key);
+        if let Some(inserted) = self.live_response_ranges.remove(key) {
+            self.remove_transcript_highlights(inserted.highlight_keys);
+            self.remove_transcript_range(inserted.range, cx);
+        }
+    }
+
+    fn upsert_tool_display(
+        &mut self,
+        call_id: &str,
+        tool_name: &str,
+        display: &tau_proto::ToolUseState,
+        cx: &mut Context<Self>,
+    ) {
+        let display = tool_render::render_tool_use_state(tool_name, display);
+        let block = tool_render::render_tool_block(&self.cli_theme, &display);
+        if let Some(inserted) = self.pending_tool_calls.remove(call_id) {
+            if let Some(inserted) = self.replace_transcript_block(inserted, block, cx) {
+                self.pending_tool_calls.insert(call_id.to_owned(), inserted);
+            }
+        } else if let Some(inserted) = self.insert_before_draft_block(block, cx) {
+            self.pending_tool_calls.insert(call_id.to_owned(), inserted);
+        }
+    }
+
+    fn replace_draft_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.prompt_buffer.update(cx, |buffer, cx| {
+            let start = self.prompt_end.to_offset(buffer);
+            let end = self.draft_end.to_offset(buffer);
+            buffer.edit([(start..end, text)], None, cx);
+            self.prompt_end = buffer.anchor_before(start);
+            self.draft_end = buffer.anchor_after(start + text.len());
+        });
+        self.update_prompt_inlay(cx);
+        cx.notify();
+    }
+
+    fn remove_transcript_range(
+        &mut self,
+        range: std::ops::Range<text::Anchor>,
+        cx: &mut Context<Self>,
+    ) {
+        self.transcript_buffer.update(cx, |buffer, cx| {
+            let start = range.start.to_offset(buffer);
+            let end = range.end.to_offset(buffer);
+            let old_transcript_end = self.transcript_end.to_offset(buffer);
+            let old_len = end.saturating_sub(start);
+            buffer.edit([(start..end, "")], None, cx);
+            let new_transcript_end = if old_transcript_end >= end {
+                old_transcript_end.saturating_sub(old_len)
+            } else if old_transcript_end >= start {
+                start
+            } else {
+                old_transcript_end
+            };
+            self.transcript_end = buffer.anchor_after(new_transcript_end);
+        });
+        self.apply_transcript_highlights(cx);
+        cx.notify();
+    }
+
     fn remove_transcript_highlights(&mut self, highlight_keys: Vec<usize>) {
         let highlight_keys = highlight_keys.into_iter().collect::<HashSet<_>>();
         self.transcript_ranges
@@ -1306,7 +1608,7 @@ impl TauGui {
         inserted: InsertedTranscript,
         block: tau_cli_term::StyledBlock,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Option<InsertedTranscript> {
         let old_highlight_keys = inserted.highlight_keys.into_iter().collect::<HashSet<_>>();
         self.transcript_ranges
             .retain(|range| !old_highlight_keys.contains(&range.highlight_key));
@@ -1326,7 +1628,7 @@ impl TauGui {
         if !spans.last().is_some_and(|(text, _)| text.ends_with('\n')) {
             spans.push(("\n", HighlightStyle::default()));
         }
-        self.replace_transcript_range_with_spans(inserted.range, spans, cx);
+        self.replace_transcript_range_with_spans(inserted.range, spans, cx)
     }
 
     fn ensure_transcript_gap(&mut self, cx: &mut Context<Self>) {
@@ -1847,6 +2149,51 @@ fn render_tool_result_block(
     }
 }
 
+fn render_tool_result_parts_block(
+    theme: &tau_themes::Theme,
+    tool_name: &str,
+    result: &CborValue,
+    display: Option<&tau_proto::ToolUseState>,
+) -> tau_cli_term::StyledBlock {
+    let display = display
+        .map(|display| tool_render::render_tool_use_state(tool_name, display))
+        .unwrap_or_else(|| {
+            tool_render::render_tool_use_state(
+                tool_name,
+                &tool_render::synthesize_fallback_display(tool_name, None),
+            )
+        });
+    let diff = display
+        .payload
+        .as_ref()
+        .and_then(|payload| match payload {
+            tau_proto::ToolUsePayload::Diff(summary) => Some(summary.clone()),
+            _ => None,
+        })
+        .or_else(|| tool_render::extract_diff(result));
+    match diff.as_ref() {
+        Some(diff) => tool_render::render_diff_tool_block(theme, &display, diff, true),
+        None => tool_render::render_tool_block(theme, &display),
+    }
+}
+
+fn render_tool_error_parts_block(
+    theme: &tau_themes::Theme,
+    tool_name: &str,
+    message: &str,
+    display: Option<&tau_proto::ToolUseState>,
+) -> tau_cli_term::StyledBlock {
+    let display = display
+        .map(|display| tool_render::render_tool_use_state(tool_name, display))
+        .unwrap_or_else(|| {
+            tool_render::render_tool_use_state(
+                tool_name,
+                &tool_render::synthesize_fallback_display(tool_name, Some(message)),
+            )
+        });
+    tool_render::render_tool_block(theme, &display)
+}
+
 fn render_tool_error_block(
     theme: &tau_themes::Theme,
     error: &tau_proto::ToolError,
@@ -1895,6 +2242,15 @@ fn cbor_text_field(arguments: &CborValue, key: &str) -> Option<String> {
             }
             _ => None,
         })
+}
+
+fn agent_prompt_termination_reason(
+    reason: tau_proto::AgentPromptTerminationReason,
+) -> &'static str {
+    match reason {
+        tau_proto::AgentPromptTerminationReason::Stale => "stale",
+        tau_proto::AgentPromptTerminationReason::Canceled => "cancelled",
+    }
 }
 
 fn assistant_text_from_update(items: &[tau_proto::ProviderResponseItem]) -> Option<String> {
