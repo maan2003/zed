@@ -267,6 +267,7 @@ struct TauGui {
     session_id: tau_proto::SessionId,
     streamed_responses: HashMap<String, String>,
     live_response_ranges: HashMap<String, InsertedTranscript>,
+    live_compaction_ranges: HashMap<String, InsertedTranscript>,
     cli_theme: tau_themes::Theme,
     transcript_ranges: Vec<TranscriptRange>,
     next_highlight_key: usize,
@@ -442,6 +443,7 @@ impl TauGui {
             session_id: attach_target.session_id,
             streamed_responses: HashMap::default(),
             live_response_ranges: HashMap::default(),
+            live_compaction_ranges: HashMap::default(),
             cli_theme: cli_theme::select_theme(tau_config::settings::CliTheme::Dark),
             transcript_ranges: Vec::new(),
             next_highlight_key: 0,
@@ -543,12 +545,18 @@ impl TauGui {
             }
             Event::ProviderResponseUpdated(update) if update.originator.is_user() => {
                 let key = update.agent_prompt_id.to_string();
+                self.update_live_compaction(
+                    key.as_str(),
+                    provider_update_compaction_status(&update),
+                    cx,
+                );
                 let text = assistant_text_from_update(&update.items).unwrap_or_default();
                 self.streamed_responses.insert(key.clone(), text.clone());
                 self.upsert_live_response(key, text.as_str(), cx);
             }
             Event::ProviderResponseFinished(finished) if finished.originator.is_user() => {
                 let key = finished.agent_prompt_id.to_string();
+                self.remove_live_compaction(key.as_str(), cx);
                 if let Some(text) = assistant_text(&finished.output_items) {
                     match self.streamed_responses.remove(&key) {
                         Some(_) | None => {
@@ -639,6 +647,7 @@ impl TauGui {
             Event::AgentPromptTerminated(terminated) if terminated.originator.is_user() => {
                 let key = terminated.agent_prompt_id.to_string();
                 self.remove_live_response(key.as_str(), cx);
+                self.remove_live_compaction(key.as_str(), cx);
                 self.insert_before_draft_styled(
                     &format!(
                         "[prompt {}: {key}]\n",
@@ -1557,6 +1566,33 @@ impl TauGui {
         }
     }
 
+    fn update_live_compaction(
+        &mut self,
+        key: &str,
+        status: Option<(tool_render::CompactionStatus, String)>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((status, text)) = status else {
+            self.remove_live_compaction(key, cx);
+            return;
+        };
+        let block = tool_render::render_compaction_block(&self.cli_theme, text, status);
+        if let Some(inserted) = self.live_compaction_ranges.remove(key) {
+            if let Some(inserted) = self.replace_transcript_block(inserted, block, cx) {
+                self.live_compaction_ranges.insert(key.to_owned(), inserted);
+            }
+        } else if let Some(inserted) = self.insert_before_draft_block(block, cx) {
+            self.live_compaction_ranges.insert(key.to_owned(), inserted);
+        }
+    }
+
+    fn remove_live_compaction(&mut self, key: &str, cx: &mut Context<Self>) {
+        if let Some(inserted) = self.live_compaction_ranges.remove(key) {
+            self.remove_transcript_highlights(inserted.highlight_keys);
+            self.remove_transcript_range(inserted.range, cx);
+        }
+    }
+
     fn remove_live_response(&mut self, key: &str, cx: &mut Context<Self>) {
         self.streamed_responses.remove(key);
         if let Some(inserted) = self.live_response_ranges.remove(key) {
@@ -2350,8 +2386,44 @@ fn cbor_text_field(arguments: &CborValue, key: &str) -> Option<String> {
         })
 }
 
+fn provider_update_compaction_status(
+    update: &tau_proto::ProviderResponseUpdated,
+) -> Option<(tool_render::CompactionStatus, String)> {
+    if update.items.iter().any(|item| {
+        matches!(
+            item,
+            tau_proto::ProviderResponseItem::Completed(ContextItem::Compaction(_))
+        )
+    }) {
+        return Some((
+            tool_render::CompactionStatus::Success,
+            compaction_success_status(
+                update.compaction_original_input_tokens,
+                update.compaction_compacted_input_tokens,
+            ),
+        ));
+    }
+
+    update.items.iter().find_map(|item| match item {
+        tau_proto::ProviderResponseItem::InProgress(
+            tau_proto::InProgressOutputItem::Compaction { .. },
+        ) => Some((
+            tool_render::CompactionStatus::Progress,
+            compaction_progress_status(update.compaction_original_input_tokens),
+        )),
+        _ => None,
+    })
+}
+
 fn compaction_token_chip(tokens: u64) -> String {
     format!("#{}", tool_render::format_token_count(tokens))
+}
+
+fn compaction_progress_status(original_input_tokens: Option<u64>) -> String {
+    match original_input_tokens {
+        Some(tokens) => format!("{} compacting", compaction_token_chip(tokens)),
+        None => "compacting".to_owned(),
+    }
 }
 
 fn compaction_success_status(

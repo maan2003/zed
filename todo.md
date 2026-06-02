@@ -5,7 +5,6 @@ Remaining work to bring `tau-gui` closer to `tau-cli` while preserving GUI/edito
 ## Event handling and rendering
 
 - Add provider turn-stat latency/cumulative-latency parity; basic token/cache stat rendering from `ProviderResponseFinished.usage` is in place.
-- Render live provider-side compaction progress from `ProviderResponseUpdated` metadata; durable finished compaction items are rendered.
 - Handle `ToolDelegateProgress` by updating the running delegate tool block with properly tracked sub-agent state.
 - Finish full tool-call state parity like tau-cli for out-of-order events and tool summaries; background placeholders/results/cancel status accounting is in place.
 - Decide GUI-specific behavior for `AgentMessageSent` and `AgentMessageReceived` and render user-visible messages where appropriate.
