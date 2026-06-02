@@ -4,7 +4,7 @@ use std::io::{BufReader, BufWriter};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow};
 use editor::{
@@ -591,6 +591,38 @@ impl TauGui {
                 self.record_main_tool_completed();
                 self.update_status_line(cx);
             }
+            Event::UiShellCommand(command) => {
+                let block = tool_render::render_shell_block(
+                    &self.cli_theme,
+                    &command.command,
+                    "",
+                    Some("running"),
+                );
+                self.insert_before_draft_block(block, cx);
+            }
+            Event::ShellCommandProgress(progress) => {
+                if !progress.chunk.is_empty() {
+                    self.insert_before_draft_styled(
+                        &progress.chunk,
+                        TranscriptStyle::ToolProgress,
+                        cx,
+                    );
+                }
+            }
+            Event::ShellCommandFinished(finished) => {
+                let status = if finished.cancelled {
+                    "cancelled".to_owned()
+                } else {
+                    format!("[{}]", finished.exit_code.unwrap_or(-1))
+                };
+                let block = tool_render::render_shell_block(
+                    &self.cli_theme,
+                    &finished.command,
+                    &finished.output,
+                    Some(status.as_str()),
+                );
+                self.insert_before_draft_block(block, cx);
+            }
             Event::HarnessInfo(info) => {
                 let style = match info.level {
                     tau_proto::HarnessInfoLevel::Normal => TranscriptStyle::SystemInfo,
@@ -675,6 +707,336 @@ impl TauGui {
         self.live_agents.contains(agent_id) && !self.suspended_agents.contains(agent_id)
     }
 
+    fn selected_agent_proto_id(&self) -> Option<tau_proto::AgentId> {
+        self.current_agent_id.clone().map(Into::into)
+    }
+
+    fn send_event(&mut self, event: Event, cx: &mut Context<Self>) -> bool {
+        let Some(writer) = &self.writer else {
+            eprintln!("tau-gui: command ignored because socket writer is unavailable");
+            return false;
+        };
+        let frame = Frame::Event(event);
+        if let Err(error) = send_frame(writer, &frame) {
+            eprintln!("tau-gui: send failed: {error:#}");
+            self.insert_before_draft_styled(
+                &format!("\n[send failed: {error}]\n"),
+                TranscriptStyle::SystemDisconnect,
+                cx,
+            );
+            return false;
+        }
+        true
+    }
+
+    fn send_command_event(&mut self, event: Event, cx: &mut Context<Self>) -> bool {
+        self.send_event(event, cx);
+        true
+    }
+
+    fn handle_prompt_command(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+        if text == "/cancel" {
+            return self.send_command_event(
+                Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
+                    session_id: self.session_id.clone(),
+                    target_agent_id: self.selected_agent_proto_id(),
+                    agent_prompt_id: None,
+                }),
+                cx,
+            );
+        }
+        if text == "/tree" {
+            return self.send_command_event(
+                Event::UiTreeRequest(tau_proto::UiTreeRequest {
+                    session_id: self.session_id.clone(),
+                    target_agent_id: self.selected_agent_proto_id(),
+                }),
+                cx,
+            );
+        }
+        if let Some(node_id) = text.strip_prefix("/tree ") {
+            let Ok(node_id) = node_id.trim().parse::<u64>() else {
+                self.insert_before_draft_styled(
+                    "/tree <id>: id must be a non-negative integer\n",
+                    TranscriptStyle::SystemInfo,
+                    cx,
+                );
+                return true;
+            };
+            return self.send_command_event(
+                Event::UiNavigateTree(tau_proto::UiNavigateTree {
+                    session_id: self.session_id.clone(),
+                    target_agent_id: self.selected_agent_proto_id(),
+                    node_id,
+                }),
+                cx,
+            );
+        }
+        if text == "/compact" {
+            return self.send_command_event(
+                Event::UiCompactRequest(tau_proto::UiCompactRequest {
+                    session_id: self.session_id.clone(),
+                    target_agent_id: self.selected_agent_proto_id(),
+                }),
+                cx,
+            );
+        }
+        if text.starts_with("/compact ") {
+            self.insert_before_draft_styled(
+                "/compact forces a compaction pass and takes no arguments\n",
+                TranscriptStyle::SystemInfo,
+                cx,
+            );
+            return true;
+        }
+        if text == "/new" {
+            self.clear_selected_agent(cx);
+            return true;
+        }
+        if text == "/agent" || text.starts_with("/agent ") {
+            self.handle_agent_command(text, cx);
+            return true;
+        }
+        if let Some(role) = text.strip_prefix("/model ") {
+            let role = role.trim();
+            if !role.is_empty() {
+                return self.select_role(role, cx);
+            }
+            return true;
+        }
+        if text == "/model" {
+            self.insert_before_draft_styled("/model <role>\n", TranscriptStyle::SystemInfo, cx);
+            return true;
+        }
+        if text == "/role" {
+            self.insert_before_draft_styled("/role <role>\n", TranscriptStyle::SystemInfo, cx);
+            return true;
+        }
+        if let Some(role) = text.strip_prefix("/role ") {
+            let mut parts = role.split_whitespace();
+            let Some(role) = parts.next() else {
+                return true;
+            };
+            if parts.next().is_some() {
+                self.insert_before_draft_styled("/role <role>\n", TranscriptStyle::SystemInfo, cx);
+                return true;
+            }
+            return self.select_role(role, cx);
+        }
+        if let Some(command) = text.strip_prefix("!!") {
+            return self.send_shell_command(command, false, cx);
+        }
+        if let Some(command) = text.strip_prefix('!') {
+            return self.send_shell_command(command, true, cx);
+        }
+        false
+    }
+
+    fn select_role(&mut self, role: &str, cx: &mut Context<Self>) -> bool {
+        self.send_command_event(
+            Event::UiRoleSelect(tau_proto::UiRoleSelect {
+                role: role.to_owned(),
+            }),
+            cx,
+        )
+    }
+
+    fn handle_agent_command(&mut self, text: &str, cx: &mut Context<Self>) {
+        let rest = text.strip_prefix("/agent").unwrap_or("").trim();
+        if rest.is_empty() {
+            let current = self.current_agent_id.as_deref().unwrap_or("none");
+            let mut known_agents = self.known_agents.iter().cloned().collect::<Vec<_>>();
+            known_agents.sort();
+            let active_count = self.live_agents.difference(&self.suspended_agents).count();
+            self.insert_before_draft_styled(
+                &format!(
+                    "/agent <new|switch|suspend|resume> [agent_id]; current: {current}; active: {active_count}; known: {}\n",
+                    known_agents.join(", ")
+                ),
+                TranscriptStyle::SystemInfo,
+                cx,
+            );
+            return;
+        }
+
+        let mut parts = rest.split_whitespace();
+        let Some(subcommand) = parts.next() else {
+            return;
+        };
+        let target = parts.next();
+        if parts.next().is_some() {
+            self.insert_before_draft_styled(
+                "/agent: too many arguments (use /agent <new|switch|suspend|resume> [agent_id])\n",
+                TranscriptStyle::SystemInfo,
+                cx,
+            );
+            return;
+        }
+        match subcommand {
+            "new" => {
+                if target.is_some() {
+                    self.insert_before_draft_styled(
+                        "/agent new\n",
+                        TranscriptStyle::SystemInfo,
+                        cx,
+                    );
+                } else {
+                    self.clear_selected_agent(cx);
+                }
+            }
+            "switch" => self.switch_agent(target, cx),
+            "suspend" => self.suspend_agent(target, cx),
+            "resume" => self.resume_agent(target, cx),
+            _ => self.insert_before_draft_styled(
+                "/agent <new|switch|suspend|resume> [agent_id]; use /agent switch <agent_id>\n",
+                TranscriptStyle::SystemInfo,
+                cx,
+            ),
+        }
+    }
+
+    fn clear_selected_agent(&mut self, cx: &mut Context<Self>) {
+        self.current_agent_id = None;
+        self.update_status_line(cx);
+        self.update_prompt_inlay(cx);
+    }
+
+    fn switch_agent(&mut self, target: Option<&str>, cx: &mut Context<Self>) {
+        let Some(agent_id) = target
+            .map(str::trim)
+            .filter(|agent_id| !agent_id.is_empty())
+        else {
+            self.insert_before_draft_styled(
+                "/agent switch <agent_id|none>\n",
+                TranscriptStyle::SystemInfo,
+                cx,
+            );
+            return;
+        };
+        if agent_id == "none" {
+            self.clear_selected_agent(cx);
+            return;
+        }
+        if !self.known_agents.contains(agent_id) {
+            self.insert_before_draft_styled(
+                &format!("unknown agent: {agent_id}\n"),
+                TranscriptStyle::SystemInfo,
+                cx,
+            );
+            return;
+        }
+        if self.suspended_agents.contains(agent_id) {
+            self.insert_before_draft_styled(
+                &format!("agent is suspended: {agent_id} (use /agent resume {agent_id})\n"),
+                TranscriptStyle::SystemInfo,
+                cx,
+            );
+            return;
+        }
+        self.current_agent_id = Some(agent_id.to_owned());
+        self.update_status_line(cx);
+        self.update_prompt_inlay(cx);
+    }
+
+    fn suspend_agent(&mut self, target: Option<&str>, cx: &mut Context<Self>) {
+        let target = target
+            .map(str::trim)
+            .filter(|target| !target.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| self.current_agent_id.clone());
+        let Some(agent_id) = target else {
+            self.insert_before_draft_styled(
+                "/agent suspend <agent_id>\n",
+                TranscriptStyle::SystemInfo,
+                cx,
+            );
+            return;
+        };
+        if !self.known_agents.contains(&agent_id) {
+            self.insert_before_draft_styled(
+                &format!("unknown agent: {agent_id}\n"),
+                TranscriptStyle::SystemInfo,
+                cx,
+            );
+            return;
+        }
+        self.suspended_agents.insert(agent_id);
+        self.update_status_line(cx);
+    }
+
+    fn resume_agent(&mut self, target: Option<&str>, cx: &mut Context<Self>) {
+        let target = target
+            .map(str::trim)
+            .filter(|target| !target.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                self.current_agent_id
+                    .clone()
+                    .filter(|agent_id| self.suspended_agents.contains(agent_id))
+            });
+        let Some(agent_id) = target else {
+            self.insert_before_draft_styled(
+                "/agent resume <agent_id>\n",
+                TranscriptStyle::SystemInfo,
+                cx,
+            );
+            return;
+        };
+        if !self.known_agents.contains(&agent_id) {
+            self.insert_before_draft_styled(
+                &format!("unknown agent: {agent_id}\n"),
+                TranscriptStyle::SystemInfo,
+                cx,
+            );
+            return;
+        }
+        self.live_agents.insert(agent_id.clone());
+        self.suspended_agents.remove(&agent_id);
+        self.current_agent_id = Some(agent_id);
+        self.update_status_line(cx);
+        self.update_prompt_inlay(cx);
+    }
+
+    fn send_shell_command(
+        &mut self,
+        command: &str,
+        include_in_context: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let command = command.trim();
+        if command.is_empty() {
+            return true;
+        }
+        let command_id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| format!("ui-sh-{}", duration.as_nanos()))
+            .unwrap_or_else(|_| "ui-sh-0".to_owned());
+        self.send_command_event(
+            Event::UiShellCommand(tau_proto::UiShellCommand {
+                session_id: self.session_id.clone(),
+                command_id: command_id.into(),
+                command: command.to_owned(),
+                include_in_context,
+                target_agent_id: self.selected_agent_proto_id(),
+            }),
+            cx,
+        )
+    }
+
+    fn clear_prompt_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.prompt_buffer.update(cx, |buffer, cx| {
+            let start = self.prompt_end.to_offset(buffer);
+            let end = self.draft_end.to_offset(buffer);
+            buffer.edit([(start..end, "")], None, cx);
+            self.prompt_end = buffer.anchor_before(start);
+            self.draft_end = buffer.anchor_after(start);
+        });
+        self.move_cursor_to_prompt_end(window, cx);
+        self.follow_tail = true;
+        self.scroll_to_tail(window, cx);
+        cx.notify();
+    }
+
     fn submit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         eprintln!("tau-gui: submit_prompt called");
         let buffer = self.prompt_buffer.read(cx);
@@ -690,6 +1052,11 @@ impl TauGui {
         }
         eprintln!("tau-gui: submitting prompt with {} bytes", text.len());
 
+        if self.handle_prompt_command(&text, cx) {
+            self.clear_prompt_draft(window, cx);
+            return;
+        }
+
         if !self.selected_agent_is_active() {
             self.insert_before_draft_styled(
                 "selected agent is suspended; choose a different agent or start a new one\n",
@@ -699,56 +1066,35 @@ impl TauGui {
             return;
         }
 
-        if let Some(writer) = &self.writer {
-            let event = if let Some(agent_id) = self.current_agent_id.clone() {
-                Event::UiPromptSubmitted(UiPromptSubmitted {
-                    session_id: self.session_id.clone(),
-                    text: text.clone(),
-                    agent_id: agent_id.into(),
-                    message_class: PromptMessageClass::User,
-                    originator: PromptOriginator::User,
-                    ctx_id: None,
-                })
-            } else {
-                Event::UiCreateAgent(tau_proto::UiCreateAgent {
-                    session_id: self.session_id.clone(),
-                    role: self
-                        .current_role
-                        .clone()
-                        .unwrap_or_else(|| "engineer".to_owned()),
-                    cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-                    initial_prompt: Some(text.clone()),
-                    message_class: PromptMessageClass::User,
-                    originator: PromptOriginator::User,
-                    ctx_id: None,
-                })
-            };
-            let frame = Frame::Event(event);
-            if let Err(error) = send_frame(writer, &frame) {
-                eprintln!("tau-gui: send failed: {error:#}");
-                self.insert_before_draft_styled(
-                    &format!("\n[send failed: {error}]\n"),
-                    TranscriptStyle::SystemDisconnect,
-                    cx,
-                );
-                return;
-            }
-            eprintln!("tau-gui: prompt frame sent");
+        let event = if let Some(agent_id) = self.current_agent_id.clone() {
+            Event::UiPromptSubmitted(UiPromptSubmitted {
+                session_id: self.session_id.clone(),
+                text: text.clone(),
+                agent_id: agent_id.into(),
+                message_class: PromptMessageClass::User,
+                originator: PromptOriginator::User,
+                ctx_id: None,
+            })
         } else {
-            eprintln!("tau-gui: submit ignored because socket writer is unavailable");
+            Event::UiCreateAgent(tau_proto::UiCreateAgent {
+                session_id: self.session_id.clone(),
+                role: self
+                    .current_role
+                    .clone()
+                    .unwrap_or_else(|| "engineer".to_owned()),
+                cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                initial_prompt: Some(text.clone()),
+                message_class: PromptMessageClass::User,
+                originator: PromptOriginator::User,
+                ctx_id: None,
+            })
+        };
+        if !self.send_event(event, cx) {
+            return;
         }
+        eprintln!("tau-gui: prompt frame sent");
 
-        self.prompt_buffer.update(cx, |buffer, cx| {
-            let start = self.prompt_end.to_offset(buffer);
-            let end = self.draft_end.to_offset(buffer);
-            buffer.edit([(start..end, "")], None, cx);
-            self.prompt_end = buffer.anchor_before(start);
-            self.draft_end = buffer.anchor_after(start);
-        });
-        self.move_cursor_to_prompt_end(window, cx);
-        self.follow_tail = true;
-        self.scroll_to_tail(window, cx);
-        cx.notify();
+        self.clear_prompt_draft(window, cx);
     }
 
     fn move_cursor_to_prompt_end(&self, window: &mut Window, cx: &mut Context<Self>) {
