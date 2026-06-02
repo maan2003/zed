@@ -1210,20 +1210,9 @@ impl TauGui {
             self.insert_before_draft_styled("/model <role>\n", TranscriptStyle::SystemInfo, cx);
             return true;
         }
-        if text == "/role" {
-            self.insert_before_draft_styled("/role <role>\n", TranscriptStyle::SystemInfo, cx);
+        if text == "/role" || text.starts_with("/role ") {
+            self.handle_role_command(text, cx);
             return true;
-        }
-        if let Some(role) = text.strip_prefix("/role ") {
-            let mut parts = role.split_whitespace();
-            let Some(role) = parts.next() else {
-                return true;
-            };
-            if parts.next().is_some() {
-                self.insert_before_draft_styled("/role <role>\n", TranscriptStyle::SystemInfo, cx);
-                return true;
-            }
-            return self.select_role(role, cx);
         }
         if let Some(command) = text.strip_prefix("!!") {
             return self.send_shell_command(command, false, cx);
@@ -1232,6 +1221,79 @@ impl TauGui {
             return self.send_shell_command(command, true, cx);
         }
         false
+    }
+
+    fn handle_role_command(&mut self, text: &str, cx: &mut Context<Self>) {
+        let rest = text.strip_prefix("/role").unwrap_or("").trim();
+        let mut parts = rest.split_whitespace();
+        let role = parts.next();
+        let command = parts.next();
+        let value = parts.next();
+        let extra = parts.next();
+        let Some(role) = role else {
+            self.insert_before_draft_styled(
+                "/role <role> [delete|model|effort|verbosity|thinking-summary|service-tier|compaction-threshold|tools|enable-tools|disable-tools] [value]\n",
+                TranscriptStyle::SystemInfo,
+                cx,
+            );
+            return;
+        };
+        let Some(command) = command else {
+            self.select_role(role, cx);
+            return;
+        };
+        if command == "delete" {
+            if value.is_some() {
+                self.insert_before_draft_styled(
+                    "/role <role> delete takes no value\n",
+                    TranscriptStyle::SystemInfo,
+                    cx,
+                );
+                return;
+            }
+            self.send_command_event(
+                Event::UiRoleUpdate(tau_proto::UiRoleUpdate {
+                    role: role.to_owned(),
+                    action: tau_proto::UiRoleUpdateAction::Delete,
+                }),
+                cx,
+            );
+            return;
+        }
+        let Some(value) = value else {
+            self.insert_before_draft_styled(
+                "/role <role> <setting> <value>\n",
+                TranscriptStyle::SystemInfo,
+                cx,
+            );
+            return;
+        };
+        if extra.is_some() {
+            self.insert_before_draft_styled(
+                "/role: too many arguments\n",
+                TranscriptStyle::SystemInfo,
+                cx,
+            );
+            return;
+        }
+        let action = match parse_role_setting_update(command, value) {
+            Ok(action) => action,
+            Err(error) => {
+                self.insert_before_draft_styled(
+                    &format!("/role: {error}\n"),
+                    TranscriptStyle::SystemInfo,
+                    cx,
+                );
+                return;
+            }
+        };
+        self.send_command_event(
+            Event::UiRoleUpdate(tau_proto::UiRoleUpdate {
+                role: role.to_owned(),
+                action,
+            }),
+            cx,
+        );
     }
 
     fn select_role(&mut self, role: &str, cx: &mut Context<Self>) -> bool {
@@ -2506,6 +2568,121 @@ fn cbor_text_field(arguments: &CborValue, key: &str) -> Option<String> {
             }
             _ => None,
         })
+}
+
+fn is_reset_value(value: &str) -> bool {
+    value == "reset"
+}
+
+fn parse_service_tier_update(value: &str) -> Result<Option<tau_proto::ServiceTier>, String> {
+    match value {
+        "fast" => Ok(Some(tau_proto::ServiceTier::Fast)),
+        "flex" => Ok(Some(tau_proto::ServiceTier::Flex)),
+        "reset" => Ok(None),
+        other => Err(format!(
+            "unknown service tier `{other}`; expected fast/flex/reset"
+        )),
+    }
+}
+
+fn parse_tool_list_update(value: &str) -> Result<Option<Vec<tau_proto::ToolName>>, String> {
+    if is_reset_value(value) {
+        return Ok(None);
+    }
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| {
+            tau_proto::ToolName::try_new(name).ok_or_else(|| format!("invalid tool name: {name}"))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+fn parse_disable_tool_list_update(value: &str) -> Result<Vec<tau_proto::ToolName>, String> {
+    Ok(parse_tool_list_update(value)?.unwrap_or_default())
+}
+
+fn parse_compaction_threshold_update(value: &str) -> Result<Option<u64>, String> {
+    if is_reset_value(value) {
+        return Ok(None);
+    }
+    let threshold = value
+        .parse::<u64>()
+        .map_err(|_| "compaction-threshold must be a token count of at least 1000".to_owned())?;
+    if threshold < 1000 {
+        return Err("compaction-threshold must be a token count of at least 1000".to_owned());
+    }
+    Ok(Some(threshold))
+}
+
+fn parse_role_setting_update(
+    setting: &str,
+    value: &str,
+) -> Result<tau_proto::UiRoleUpdateAction, String> {
+    match setting {
+        "model" => Ok(tau_proto::UiRoleUpdateAction::SetModel {
+            model: if is_reset_value(value) {
+                None
+            } else {
+                Some(
+                    value
+                        .parse::<tau_proto::ModelId>()
+                        .map_err(|error| error.to_string())?,
+                )
+            },
+        }),
+        "effort" => Ok(tau_proto::UiRoleUpdateAction::SetEffort {
+            effort: if is_reset_value(value) {
+                None
+            } else {
+                Some(
+                    value
+                        .parse::<tau_proto::Effort>()
+                        .map_err(|error| error.to_string())?,
+                )
+            },
+        }),
+        "verbosity" => Ok(tau_proto::UiRoleUpdateAction::SetVerbosity {
+            verbosity: if is_reset_value(value) {
+                None
+            } else {
+                Some(
+                    value
+                        .parse::<tau_proto::Verbosity>()
+                        .map_err(|error| error.to_string())?,
+                )
+            },
+        }),
+        "thinking-summary" => Ok(tau_proto::UiRoleUpdateAction::SetThinkingSummary {
+            thinking_summary: if is_reset_value(value) {
+                None
+            } else {
+                Some(
+                    value
+                        .parse::<tau_proto::ThinkingSummary>()
+                        .map_err(|error| error.to_string())?,
+                )
+            },
+        }),
+        "service-tier" => Ok(tau_proto::UiRoleUpdateAction::SetServiceTier {
+            service_tier: parse_service_tier_update(value)?,
+        }),
+        "compaction-threshold" => Ok(tau_proto::UiRoleUpdateAction::SetCompactionThreshold {
+            compaction_threshold: parse_compaction_threshold_update(value)?,
+        }),
+        "tools" => Ok(tau_proto::UiRoleUpdateAction::SetTools {
+            tools: parse_tool_list_update(value)?,
+        }),
+        "enable-tools" => Ok(tau_proto::UiRoleUpdateAction::SetEnableTools {
+            enable_tools: parse_disable_tool_list_update(value)?,
+        }),
+        "disable-tools" => Ok(tau_proto::UiRoleUpdateAction::SetDisableTools {
+            disable_tools: parse_disable_tool_list_update(value)?,
+        }),
+        _ => Err("unknown setting".to_owned()),
+    }
 }
 
 fn agent_message_sent_summary(message: &tau_proto::AgentMessageSent) -> String {

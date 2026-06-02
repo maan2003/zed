@@ -13,7 +13,7 @@ Remaining work to bring `tau-gui` closer to `tau-cli` while preserving GUI/edito
 ## Commands and interaction
 
 - Add command completion/parsing parity for slash commands, roles/models, agents, actions, and shell shortcuts using Zed/editor completion primitives.
-- Mirror tau-cli command validation and help text more closely for `/agent`, `/model`, `/role`, `/tree`, `/compact`, `/cancel`, and shell commands.
+- Mirror tau-cli command validation and help text more closely for `/agent`, `/model`, `/tree`, `/compact`, `/cancel`, and shell commands; `/role` selection/delete/settings parity is in place.
 - Add support for queued prompt recall from the GUI, including a keybinding or command that emits `UiRecallQueuedPrompt`.
 - Improve `/agent` listing/switch UX beyond plain text once GUI affordances exist.
 - Add action-command invocation support if tau-cli exposes extension actions as slash commands in the current protocol.
