@@ -27,7 +27,7 @@ Remaining work to bring `tau-gui` closer to `tau-cli` while preserving GUI/edito
 ## State tracking
 
 - Track prompt ids, live responses, pending tools, background placeholders, and delegate children with the same lifecycle assumptions as tau-cli.
-- Track per-agent context usage and activity like tau-cli so switching agents restores the correct status immediately.
+- Track per-agent activity like tau-cli; per-agent context usage/status restoration is in place.
 - Track available models/roles/efforts/verbosities/thinking-summary options for completion and status parity.
 - Track extension action schemas for completions and command invocation.
 

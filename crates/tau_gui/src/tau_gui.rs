@@ -252,6 +252,12 @@ impl StatusChip {
     }
 }
 
+struct AgentContextUsage {
+    input_tokens: Option<u64>,
+    percent_used: Option<u8>,
+    context_window: Option<u64>,
+}
+
 struct TauGui {
     editor: Entity<Editor>,
     transcript_buffer: Entity<Buffer>,
@@ -290,6 +296,7 @@ struct TauGui {
     known_agents: HashSet<String>,
     live_agents: HashSet<String>,
     suspended_agents: HashSet<String>,
+    agent_context_usage: HashMap<String, AgentContextUsage>,
 }
 
 impl TauGui {
@@ -466,6 +473,7 @@ impl TauGui {
             known_agents: HashSet::default(),
             live_agents: HashSet::default(),
             suspended_agents: HashSet::default(),
+            agent_context_usage: HashMap::default(),
         };
         this.update_prompt_inlay(cx);
         this.update_status_line(cx);
@@ -522,6 +530,7 @@ impl TauGui {
         let previous_agent_id = self.current_agent_id.clone();
         self.learn_agent_metadata(&event);
         if self.current_agent_id != previous_agent_id {
+            self.apply_selected_agent_context_usage();
             self.update_status_line(cx);
             self.update_prompt_inlay(cx);
         }
@@ -985,13 +994,20 @@ impl TauGui {
                 self.current_context_percent = changed.percent_used;
                 self.update_status_line(cx);
             }
-            Event::HarnessAgentContextUsageChanged(changed)
-                if self.current_agent_id.as_deref() == Some(changed.agent_id.as_str()) =>
-            {
-                self.current_context_input_tokens = changed.input_tokens;
-                self.current_context_percent = changed.percent_used;
-                self.current_context_window = changed.context_window;
-                self.update_status_line(cx);
+            Event::HarnessAgentContextUsageChanged(changed) => {
+                let agent_id = changed.agent_id.to_string();
+                self.agent_context_usage.insert(
+                    agent_id.clone(),
+                    AgentContextUsage {
+                        input_tokens: changed.input_tokens,
+                        percent_used: changed.percent_used,
+                        context_window: changed.context_window,
+                    },
+                );
+                if self.current_agent_id.as_deref() == Some(agent_id.as_str()) {
+                    self.apply_selected_agent_context_usage();
+                    self.update_status_line(cx);
+                }
             }
             Event::SessionStarted(started) => {
                 self.session_id = started.session_id;
@@ -1000,6 +1016,7 @@ impl TauGui {
                 self.main_tools_visible = false;
                 self.main_backgrounded_tools.clear();
                 self.previous_provider_usage = None;
+                self.agent_context_usage.clear();
                 self.update_status_line(cx);
             }
             _ => {}
@@ -1068,6 +1085,20 @@ impl TauGui {
         self.suspended_agents.remove(&agent_id);
         if self.current_agent_id.as_deref() != Some(agent_id.as_str()) {
             self.current_agent_id = Some(agent_id);
+        }
+    }
+
+    fn apply_selected_agent_context_usage(&mut self) {
+        let Some(agent_id) = self.current_agent_id.as_deref() else {
+            return;
+        };
+        if let Some(usage) = self.agent_context_usage.get(agent_id) {
+            self.current_context_input_tokens = usage.input_tokens;
+            self.current_context_percent = usage.percent_used;
+            self.current_context_window = usage.context_window;
+        } else {
+            self.current_context_input_tokens = None;
+            self.current_context_percent = None;
         }
     }
 
@@ -1305,6 +1336,7 @@ impl TauGui {
             return;
         }
         self.current_agent_id = Some(agent_id.to_owned());
+        self.apply_selected_agent_context_usage();
         self.update_status_line(cx);
         self.update_prompt_inlay(cx);
     }
@@ -1364,6 +1396,7 @@ impl TauGui {
         self.live_agents.insert(agent_id.clone());
         self.suspended_agents.remove(&agent_id);
         self.current_agent_id = Some(agent_id);
+        self.apply_selected_agent_context_usage();
         self.update_status_line(cx);
         self.update_prompt_inlay(cx);
     }
