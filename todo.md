@@ -7,8 +7,6 @@ Remaining work to bring `tau-gui` closer to `tau-cli` while preserving GUI/edito
 - Add provider turn-stat latency/cumulative-latency parity; basic token/cache stat rendering from `ProviderResponseFinished.usage` is in place.
 - Handle `ToolDelegateProgress` by updating the running delegate tool block with properly tracked sub-agent state.
 - Finish full tool-call state parity like tau-cli for out-of-order events and tool summaries; background placeholders/results/cancel status accounting is in place.
-- Decide GUI-specific behavior for `AgentMessageSent` and `AgentMessageReceived` and render user-visible messages where appropriate.
-- Handle `AgentUserMessageInjected` for visible user-context injections while keeping internal messages hidden.
 - Do not support session switching for now; do not spend parity work on `UiSwitchSession`/session-switch UI beyond safe no-op/reset behavior if events are observed.
 - Ignore terminal-only events (`TermBell`, `Osc1337SetUserVar`) in tau-gui unless a real GUI-specific notification need appears.
 

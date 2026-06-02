@@ -543,6 +543,34 @@ impl TauGui {
                     cx,
                 );
             }
+            Event::AgentUserMessageInjected(injected) if !injected.message_class.is_internal() => {
+                self.insert_before_draft_styled(
+                    &format!("> {} (injected)\n", injected.text),
+                    TranscriptStyle::UserPromptQueued,
+                    cx,
+                );
+            }
+            Event::AgentMessageSent(message) => {
+                self.insert_before_draft_styled(
+                    &format!(
+                        "{}:\n{}\n",
+                        agent_message_sent_summary(&message),
+                        message.message
+                    ),
+                    TranscriptStyle::SystemInfo,
+                    cx,
+                );
+            }
+            Event::AgentMessageReceived(message) => {
+                self.insert_before_draft_styled(
+                    &format!(
+                        "Message from {} to {}:\n{}\n",
+                        message.sender_id, message.recipient_id, message.message
+                    ),
+                    TranscriptStyle::SystemInfo,
+                    cx,
+                );
+            }
             Event::ProviderResponseUpdated(update) if update.originator.is_user() => {
                 let key = update.agent_prompt_id.to_string();
                 self.update_live_compaction(
@@ -977,6 +1005,19 @@ impl TauGui {
             }
             Event::AgentPromptQueued(queued) if !queued.message_class.is_internal() => {
                 self.select_agent(queued.agent_id.to_string());
+            }
+            Event::AgentUserMessageInjected(injected) if !injected.message_class.is_internal() => {
+                self.remember_agent(injected.agent_id.to_string());
+            }
+            Event::AgentMessageSent(message) => {
+                self.remember_agent(message.sender_id.to_string());
+                if let Some(agent_id) = agent_message_sent_recipient_agent_id(message) {
+                    self.remember_agent(agent_id.to_owned());
+                }
+            }
+            Event::AgentMessageReceived(message) => {
+                self.remember_agent(message.sender_id.to_string());
+                self.remember_agent(message.recipient_id.to_string());
             }
             Event::AgentPromptCreated(created) if created.originator.is_user() => {
                 self.select_agent(created.agent_id.to_string());
@@ -2384,6 +2425,28 @@ fn cbor_text_field(arguments: &CborValue, key: &str) -> Option<String> {
             }
             _ => None,
         })
+}
+
+fn agent_message_sent_summary(message: &tau_proto::AgentMessageSent) -> String {
+    format!(
+        "Message from {} to {}",
+        message.sender_id,
+        agent_message_sent_recipient_label(message)
+    )
+}
+
+fn agent_message_sent_recipient_label(message: &tau_proto::AgentMessageSent) -> &str {
+    match &message.recipient {
+        tau_proto::AgentMessageRecipient::Agent { agent_id } => agent_id.as_str(),
+        tau_proto::AgentMessageRecipient::User => "user",
+    }
+}
+
+fn agent_message_sent_recipient_agent_id(message: &tau_proto::AgentMessageSent) -> Option<&str> {
+    match &message.recipient {
+        tau_proto::AgentMessageRecipient::Agent { agent_id } => Some(agent_id.as_str()),
+        tau_proto::AgentMessageRecipient::User => None,
+    }
 }
 
 fn provider_update_compaction_status(
