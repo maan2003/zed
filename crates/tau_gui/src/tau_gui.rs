@@ -282,6 +282,8 @@ struct TauGui {
     main_tools_completed: u64,
     main_tools_total: u64,
     main_tools_visible: bool,
+    main_backgrounded_tools: HashSet<String>,
+    previous_provider_usage: Option<tau_proto::ProviderTokenUsage>,
     follow_tail: bool,
     current_agent_id: Option<String>,
     known_agents: HashSet<String>,
@@ -455,6 +457,8 @@ impl TauGui {
             main_tools_completed: 0,
             main_tools_total: 0,
             main_tools_visible: false,
+            main_backgrounded_tools: HashSet::default(),
+            previous_provider_usage: None,
             follow_tail: true,
             current_agent_id: None,
             known_agents: HashSet::default(),
@@ -556,12 +560,39 @@ impl TauGui {
                 } else {
                     self.remove_live_response(key.as_str(), cx);
                 }
+                if finished.output_items.is_empty() {
+                    let text = finished
+                        .error
+                        .as_deref()
+                        .unwrap_or("(provider returned an empty response)");
+                    self.insert_before_draft_styled(
+                        &format!("{text}\n"),
+                        TranscriptStyle::SystemImportant,
+                        cx,
+                    );
+                    self.render_turn_stats(&finished, cx);
+                    self.ensure_transcript_gap(cx);
+                    return;
+                }
                 if let Some(error) = &finished.error {
                     self.insert_before_draft_styled(
                         &format!("[provider error: {error}]\n"),
                         TranscriptStyle::SystemImportant,
                         cx,
                     );
+                }
+                for item in &finished.output_items {
+                    if matches!(item, ContextItem::Compaction(_)) {
+                        let block = tool_render::render_compaction_block(
+                            &self.cli_theme,
+                            compaction_success_status(
+                                finished.compaction_original_input_tokens,
+                                finished.compaction_compacted_input_tokens,
+                            ),
+                            tool_render::CompactionStatus::Success,
+                        );
+                        self.insert_before_draft_block(block, cx);
+                    }
                 }
                 let tool_calls = tool_calls_from_output_items(&finished.output_items);
                 if !tool_calls.is_empty() {
@@ -578,6 +609,7 @@ impl TauGui {
                             .insert(call.call_id.to_string(), inserted);
                     }
                 }
+                self.render_turn_stats(&finished, cx);
                 self.ensure_transcript_gap(cx);
             }
             Event::AgentPromptRecalled(recalled) => {
@@ -636,9 +668,13 @@ impl TauGui {
                 }
             }
             Event::ToolResult(result) if result.originator.is_user() => {
-                let block = render_tool_result_block(&self.cli_theme, &result);
-                self.finish_tool_call(result.call_id.as_str(), block, cx);
-                self.record_main_tool_completed();
+                if result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder {
+                    self.record_main_tool_backgrounded(result.call_id.as_str());
+                } else {
+                    let block = render_tool_result_block(&self.cli_theme, &result);
+                    self.finish_tool_call(result.call_id.as_str(), block, cx);
+                    self.record_main_tool_completed(result.call_id.as_str());
+                }
                 self.update_status_line(cx);
             }
             Event::ProviderToolResult(result)
@@ -647,21 +683,28 @@ impl TauGui {
                         .pending_tool_calls
                         .contains_key(result.call_id.as_str()) =>
             {
-                let block = render_tool_result_parts_block(
-                    &self.cli_theme,
-                    &result.tool_name,
-                    &result.result,
-                    result.display.as_ref(),
-                );
-                self.finish_tool_call(result.call_id.as_str(), block, cx);
-                self.record_main_tool_completed();
+                if result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder {
+                    self.record_main_tool_backgrounded(result.call_id.as_str());
+                } else {
+                    let block = render_tool_result_parts_block(
+                        &self.cli_theme,
+                        &result.tool_name,
+                        &result.result,
+                        result.display.as_ref(),
+                    );
+                    self.finish_tool_call(result.call_id.as_str(), block, cx);
+                    self.record_main_tool_completed(result.call_id.as_str());
+                }
                 self.update_status_line(cx);
             }
             Event::ToolBackgroundResult(result)
                 if result.originator.is_user()
                     || self
                         .pending_tool_calls
-                        .contains_key(result.call_id.as_str()) =>
+                        .contains_key(result.call_id.as_str())
+                    || self
+                        .main_backgrounded_tools
+                        .contains(result.call_id.as_str()) =>
             {
                 let block = render_tool_result_parts_block(
                     &self.cli_theme,
@@ -670,13 +713,13 @@ impl TauGui {
                     result.display.as_ref(),
                 );
                 self.finish_tool_call(result.call_id.as_str(), block, cx);
-                self.record_main_tool_completed();
+                self.record_main_tool_completed(result.call_id.as_str());
                 self.update_status_line(cx);
             }
             Event::ToolError(error) if error.originator.is_user() => {
                 let block = render_tool_error_block(&self.cli_theme, &error);
                 self.finish_tool_call(error.call_id.as_str(), block, cx);
-                self.record_main_tool_completed();
+                self.record_main_tool_completed(error.call_id.as_str());
                 self.update_status_line(cx);
             }
             Event::ProviderToolError(error)
@@ -690,12 +733,15 @@ impl TauGui {
                     error.display.as_ref(),
                 );
                 self.finish_tool_call(error.call_id.as_str(), block, cx);
-                self.record_main_tool_completed();
+                self.record_main_tool_completed(error.call_id.as_str());
                 self.update_status_line(cx);
             }
             Event::ToolBackgroundError(error)
                 if error.originator.is_user()
-                    || self.pending_tool_calls.contains_key(error.call_id.as_str()) =>
+                    || self.pending_tool_calls.contains_key(error.call_id.as_str())
+                    || self
+                        .main_backgrounded_tools
+                        .contains(error.call_id.as_str()) =>
             {
                 let block = render_tool_error_parts_block(
                     &self.cli_theme,
@@ -704,7 +750,7 @@ impl TauGui {
                     error.display.as_ref(),
                 );
                 self.finish_tool_call(error.call_id.as_str(), block, cx);
-                self.record_main_tool_completed();
+                self.record_main_tool_completed(error.call_id.as_str());
                 self.update_status_line(cx);
             }
             Event::ToolRejected(rejected) if rejected.originator.is_user() => {
@@ -715,13 +761,16 @@ impl TauGui {
                     None,
                 );
                 self.finish_tool_call(rejected.call_id.as_str(), block, cx);
-                self.record_main_tool_completed();
+                self.record_main_tool_completed(rejected.call_id.as_str());
                 self.update_status_line(cx);
             }
             Event::ToolCancelled(cancelled) => {
                 if self
                     .pending_tool_calls
                     .contains_key(cancelled.call_id.as_str())
+                    || self
+                        .main_backgrounded_tools
+                        .contains(cancelled.call_id.as_str())
                 {
                     let block = render_tool_error_parts_block(
                         &self.cli_theme,
@@ -730,7 +779,7 @@ impl TauGui {
                         None,
                     );
                     self.finish_tool_call(cancelled.call_id.as_str(), block, cx);
-                    self.record_main_tool_completed();
+                    self.record_main_tool_completed(cancelled.call_id.as_str());
                     self.update_status_line(cx);
                 }
             }
@@ -870,7 +919,6 @@ impl TauGui {
                 self.current_context_window = selected.context_window;
                 self.update_status_line(cx);
                 self.update_prompt_inlay(cx);
-                self.update_prompt_inlay(cx);
             }
             Event::HarnessContextUsageChanged(changed) => {
                 self.current_context_input_tokens = changed.input_tokens;
@@ -890,6 +938,8 @@ impl TauGui {
                 self.main_tools_completed = 0;
                 self.main_tools_total = 0;
                 self.main_tools_visible = false;
+                self.main_backgrounded_tools.clear();
+                self.previous_provider_usage = None;
                 self.update_status_line(cx);
             }
             _ => {}
@@ -1576,6 +1626,25 @@ impl TauGui {
         self.retired_highlight_keys.extend(highlight_keys);
     }
 
+    fn render_turn_stats(
+        &mut self,
+        finished: &tau_proto::ProviderResponseFinished,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(usage) = finished.usage.as_ref() else {
+            return;
+        };
+        let block = tool_render::render_turn_stats_block(
+            &self.cli_theme,
+            usage,
+            self.previous_provider_usage.as_ref(),
+            None,
+            None,
+        );
+        self.insert_before_draft_block(block, cx);
+        self.previous_provider_usage = Some(usage.clone());
+    }
+
     fn finish_tool_call(
         &mut self,
         call_id: &str,
@@ -1827,7 +1896,15 @@ impl TauGui {
         }
     }
 
-    fn record_main_tool_completed(&mut self) {
+    fn record_main_tool_backgrounded(&mut self, call_id: &str) {
+        self.main_backgrounded_tools.insert(call_id.to_owned());
+        if self.main_tools_total != 0 {
+            self.main_tools_visible = true;
+        }
+    }
+
+    fn record_main_tool_completed(&mut self, call_id: &str) {
+        self.main_backgrounded_tools.remove(call_id);
         if self.main_tools_completed < self.main_tools_total {
             self.main_tools_completed += 1;
         }
@@ -1892,7 +1969,9 @@ impl TauGui {
         use tau_themes::names;
 
         let mut chips = Vec::new();
-        if self.main_tools_visible && self.main_tools_total != 0 {
+        if (self.main_tools_visible || !self.main_backgrounded_tools.is_empty())
+            && self.main_tools_total != 0
+        {
             chips.push(StatusChip::new(
                 format!("%{}/{}", self.main_tools_completed, self.main_tools_total),
                 names::STATUS_TOOLS,
@@ -2269,6 +2348,26 @@ fn cbor_text_field(arguments: &CborValue, key: &str) -> Option<String> {
             }
             _ => None,
         })
+}
+
+fn compaction_token_chip(tokens: u64) -> String {
+    format!("#{}", tool_render::format_token_count(tokens))
+}
+
+fn compaction_success_status(
+    original_input_tokens: Option<u64>,
+    compacted_input_tokens: Option<u64>,
+) -> String {
+    match (original_input_tokens, compacted_input_tokens) {
+        (Some(original), Some(compacted)) => format!(
+            "{} → {} ok",
+            compaction_token_chip(original),
+            compaction_token_chip(compacted)
+        ),
+        (Some(original), None) => format!("{} ok", compaction_token_chip(original)),
+        (None, Some(compacted)) => format!("ok: {}", compaction_token_chip(compacted)),
+        (None, None) => "ok".to_owned(),
+    }
 }
 
 fn agent_prompt_termination_reason(
