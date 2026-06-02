@@ -5,7 +5,7 @@ Remaining work to bring `tau-gui` closer to `tau-cli` while preserving GUI/edito
 ## Event handling and rendering
 
 - Add provider turn-stat latency/cumulative-latency parity; basic token/cache stat rendering from `ProviderResponseFinished.usage` is in place.
-- Handle `ToolDelegateProgress` by updating the running delegate tool block with properly tracked sub-agent state.
+- Finish deeper delegate parity: basic `ToolDelegateProgress` display updates and delegated-agent learning are in place; remaining work is exact tau-cli activity/tool-summary semantics.
 - Finish full tool-call state parity like tau-cli for out-of-order events and tool summaries; background placeholders/results/cancel status accounting is in place.
 - Do not support session switching for now; do not spend parity work on `UiSwitchSession`/session-switch UI beyond safe no-op/reset behavior if events are observed.
 - Ignore terminal-only events (`TermBell`, `Osc1337SetUserVar`) in tau-gui unless a real GUI-specific notification need appears.

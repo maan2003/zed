@@ -685,6 +685,29 @@ impl TauGui {
                     cx,
                 );
             }
+            Event::ToolDelegateProgress(progress) => {
+                if let Some(agent_id) = &progress.agent_id {
+                    self.remember_agent(agent_id.clone());
+                    self.live_agents.insert(agent_id.clone());
+                }
+                let display = progress
+                    .display
+                    .clone()
+                    .unwrap_or_else(|| tau_proto::ToolUseState {
+                        args: progress.task_name.clone(),
+                        status: tau_proto::ToolUseStatus::InProgress,
+                        status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
+                        ..Default::default()
+                    });
+                self.upsert_delegate_display(
+                    progress.call_id.as_str(),
+                    &display,
+                    progress.agent_id.as_deref(),
+                    progress.role.as_deref(),
+                    cx,
+                );
+                self.update_status_line(cx);
+            }
             Event::ToolProgress(progress) => {
                 if let Some(display) = progress.display.as_ref() {
                     self.upsert_tool_display(
@@ -1018,6 +1041,12 @@ impl TauGui {
             Event::AgentMessageReceived(message) => {
                 self.remember_agent(message.sender_id.to_string());
                 self.remember_agent(message.recipient_id.to_string());
+            }
+            Event::ToolDelegateProgress(progress) => {
+                if let Some(agent_id) = &progress.agent_id {
+                    self.remember_agent(agent_id.clone());
+                    self.live_agents.insert(agent_id.clone());
+                }
             }
             Event::AgentPromptCreated(created) if created.originator.is_user() => {
                 self.select_agent(created.agent_id.to_string());
@@ -1639,6 +1668,25 @@ impl TauGui {
         if let Some(inserted) = self.live_response_ranges.remove(key) {
             self.remove_transcript_highlights(inserted.highlight_keys);
             self.remove_transcript_range(inserted.range, cx);
+        }
+    }
+
+    fn upsert_delegate_display(
+        &mut self,
+        call_id: &str,
+        display: &tau_proto::ToolUseState,
+        agent_id: Option<&str>,
+        role: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let display = tool_render::render_delegate_display(display, agent_id, role);
+        let block = tool_render::render_tool_block(&self.cli_theme, &display);
+        if let Some(inserted) = self.pending_tool_calls.remove(call_id) {
+            if let Some(inserted) = self.replace_transcript_block(inserted, block, cx) {
+                self.pending_tool_calls.insert(call_id.to_owned(), inserted);
+            }
+        } else if let Some(inserted) = self.insert_before_draft_block(block, cx) {
+            self.pending_tool_calls.insert(call_id.to_owned(), inserted);
         }
     }
 
