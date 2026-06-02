@@ -866,8 +866,10 @@ impl TauGui {
                 self.current_model = selected.model.clone();
                 self.current_role = Some(selected.role);
                 self.baseline_params = selected.baseline_params;
+                self.current_params = selected.model_params;
                 self.current_context_window = selected.context_window;
                 self.update_status_line(cx);
+                self.update_prompt_inlay(cx);
                 self.update_prompt_inlay(cx);
             }
             Event::HarnessContextUsageChanged(changed) => {
@@ -1838,15 +1840,27 @@ impl TauGui {
         use tau_themes::names;
 
         let mut chips = Vec::new();
-        if let Some(agent_id) = &self.current_agent_id {
-            chips.push(StatusChip::new(format!("@{agent_id}"), names::STATUS_ROLE));
-        }
-        match (self.current_role.as_deref(), self.current_model.as_ref()) {
-            (Some(role), _) => chips.push(StatusChip::new(format!("+{role}"), names::STATUS_ROLE)),
-            (None, Some(model)) => {
+        chips.push(StatusChip::new(
+            format!("&{}", self.session_id),
+            names::STATUS_SESSION,
+        ));
+        match (
+            self.current_agent_id.as_deref(),
+            self.current_role.as_deref(),
+            self.current_model.as_ref(),
+        ) {
+            (Some(agent_id), _, _) => {
+                chips.push(StatusChip::new(format!("@{agent_id}"), names::STATUS_ROLE));
+            }
+            (None, Some(role), _) => {
+                chips.push(StatusChip::new(format!("+{role}"), names::STATUS_ROLE));
+            }
+            (None, None, Some(model)) => {
                 chips.push(StatusChip::new(format!("={model}"), names::STATUS_MODEL));
             }
-            (None, None) => chips.push(StatusChip::new("no role selected", names::MODEL_STATUS)),
+            (None, None, None) => {
+                chips.push(StatusChip::new("no role selected", names::MODEL_STATUS));
+            }
         }
         if self.show_effort_status() {
             chips.push(StatusChip::new(
@@ -1871,10 +1885,6 @@ impl TauGui {
                 names::STATUS_SERVICE_TIER,
             ));
         }
-        chips.push(StatusChip::new(
-            format!("@{}", self.session_id),
-            names::STATUS_SESSION,
-        ));
         chips
     }
 
@@ -1888,6 +1898,13 @@ impl TauGui {
                 names::STATUS_TOOLS,
             ));
         }
+        let active_side_agents = self.active_side_agent_count();
+        if active_side_agents > 0 {
+            chips.push(StatusChip::new(
+                format!("@{active_side_agents}"),
+                names::STATUS_AGENTS,
+            ));
+        }
         if let Some(context) = self.context_status_chip() {
             chips.push(StatusChip::new(
                 format!("#{context}"),
@@ -1895,6 +1912,16 @@ impl TauGui {
             ));
         }
         chips
+    }
+
+    fn active_side_agent_count(&self) -> usize {
+        self.live_agents
+            .iter()
+            .filter(|agent_id| {
+                self.current_agent_id.as_deref() != Some(agent_id.as_str())
+                    && !self.suspended_agents.contains(agent_id.as_str())
+            })
+            .count()
     }
 
     fn show_effort_status(&self) -> bool {
