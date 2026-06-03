@@ -240,7 +240,6 @@ fn selection_outside_prompt(
 ) -> bool {
     selection_offset < prompt_start || selection_offset > draft_end
 }
-
 #[cfg(test)]
 fn buffer_text_ends_with(buffer: &Buffer, end: usize, character: char) -> bool {
     if end == 0 {
@@ -559,6 +558,11 @@ impl TauGui {
                             }
                         };
                         if let Some(target_anchor) = target_anchor {
+                            editor.set_autoscroll_pin(
+                                target_anchor,
+                                AutoscrollStrategy::Bottom,
+                                cx,
+                            );
                             editor.change_selections(
                                 SelectionEffects::no_scroll(),
                                 window,
@@ -1827,7 +1831,6 @@ impl TauGui {
         selection_outside_prompt(selection_offset, prompt_start.0, draft_end_offset.0)
             .then_some(draft_end)
     }
-
     fn select_anchor(
         &self,
         anchor: multi_buffer::Anchor,
@@ -2950,14 +2953,13 @@ mod tests {
     }
 
     #[test]
-    fn prompt_insert_action_only_moves_when_selection_is_outside_draft() {
+    fn prompt_insert_action_moves_when_selection_is_outside_draft() {
         assert!(selection_outside_prompt(4, 5, 10));
         assert!(!selection_outside_prompt(5, 5, 10));
         assert!(!selection_outside_prompt(8, 5, 10));
         assert!(!selection_outside_prompt(10, 5, 10));
         assert!(selection_outside_prompt(11, 5, 10));
     }
-
     #[gpui::test]
     fn anchor_before_stays_before_insertions_at_same_offset(cx: &mut App) {
         let buffer = cx.new(|cx| Buffer::local("ab", cx));
