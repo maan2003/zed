@@ -475,6 +475,9 @@ impl TauGui {
 
     fn handle_event(&mut self, event: Event, cx: &mut Context<Self>) {
         let previous_agent_id = self.agents.current_agent_id_owned();
+        if let Some(agent_id) = self.agents.agent_id_for_event(&event) {
+            self.agents.remember(agent_id);
+        }
         self.agents.observe_event(&event);
         if self.agents.current_agent_id() != previous_agent_id.as_deref() {
             self.apply_selected_agent_context_usage();
@@ -990,6 +993,7 @@ impl TauGui {
                 self.main_tool_activity.reset();
                 self.previous_provider_usage = None;
                 self.agents.clear_context_usage();
+                self.agents.clear_routing();
                 self.update_status_line(cx);
             }
             _ => {}
