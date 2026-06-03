@@ -277,12 +277,6 @@ struct AgentUiState {
     current_context_input_tokens: Option<u64>,
     current_context_window: Option<u64>,
 }
-struct AgentTab {
-    agent_id: Option<String>,
-    label: String,
-    selected: bool,
-    suspended: bool,
-}
 
 struct TauGui {
     editor: Entity<Editor>,
@@ -1498,23 +1492,17 @@ impl TauGui {
         self.show_current_transcript_buffer(cx);
     }
 
-    fn agent_tabs(&self) -> Vec<AgentTab> {
-        let mut tabs = Vec::new();
-        for agent_id in self.agents.known_agents_sorted() {
-            let selected = self.agents.current_agent_id() == Some(agent_id.as_str());
-            let suspended = self.agents.suspended(agent_id.as_str());
-            let status_suffix = if suspended { ":paused" } else { "" };
-            let label = format!("@{agent_id}{status_suffix} ");
-            tabs.push(AgentTab {
-                agent_id: Some(agent_id),
-                label,
-                selected,
-                suspended,
-            });
-        }
-        tabs
+    fn agent_tabs(&self) -> Vec<status_line::AgentTab> {
+        self.agents
+            .known_agents_sorted()
+            .into_iter()
+            .map(|agent_id| {
+                let selected = self.agents.current_agent_id() == Some(agent_id.as_str());
+                let suspended = self.agents.suspended(agent_id.as_str());
+                status_line::AgentTab::new(agent_id, selected, suspended)
+            })
+            .collect()
     }
-
     fn switch_to_agent_tab(
         &mut self,
         agent_id: Option<String>,
@@ -2221,14 +2209,21 @@ impl TauGui {
         cx.notify();
     }
 
-    fn status_line_spans(
-        &self,
-        cx: &App,
-    ) -> (Vec<(String, HighlightStyle)>, Vec<(String, HighlightStyle)>) {
-        (
-            self.status_chip_spans(self.status_left_chips(), cx),
-            self.status_chip_spans(self.status_right_chips(), cx),
-        )
+    fn status_line(&self) -> status_line::StatusLine {
+        status_line::build(status_line::StatusLineInput {
+            agent_tabs: self.agent_tabs(),
+            current_role: self.current_role.as_deref(),
+            current_model: self.current_model.as_ref(),
+            baseline_params: self.baseline_params,
+            current_params: self.current_params,
+            role_default_effort: self.role_state.default_effort(self.current_role.as_deref()),
+            role_default_verbosity: self
+                .role_state
+                .default_verbosity(self.current_role.as_deref()),
+            main_tools_status: self.main_tools_status_chip(),
+            active_agents: self.agents.active_count(),
+            context_status: self.context_status_chip(),
+        })
     }
 
     fn status_chip_spans(
@@ -2272,37 +2267,6 @@ impl TauGui {
     fn record_main_tool_completed(&mut self, call_id: &str) {
         self.tool_state.finish_call(call_id);
         self.main_tool_activity.record_completed(call_id);
-    }
-
-    fn status_left_identity(&self) -> Option<status_line::LeftStatusIdentity<'_>> {
-        if self.agents.current_agent_id().is_some() {
-            None
-        } else if let Some(role) = self.current_role.as_deref() {
-            Some(status_line::LeftStatusIdentity::Role(role))
-        } else if let Some(model) = self.current_model.as_ref() {
-            Some(status_line::LeftStatusIdentity::Model(model))
-        } else {
-            Some(status_line::LeftStatusIdentity::NoRoleSelected)
-        }
-    }
-
-    fn status_left_chips(&self) -> Vec<status_line::Chip> {
-        status_line::left_chips(
-            self.status_left_identity(),
-            self.baseline_params,
-            self.current_params,
-            self.role_state.default_effort(self.current_role.as_deref()),
-            self.role_state
-                .default_verbosity(self.current_role.as_deref()),
-        )
-    }
-
-    fn status_right_chips(&self) -> Vec<status_line::Chip> {
-        status_line::right_chips(
-            self.main_tools_status_chip(),
-            self.agents.active_count(),
-            self.context_status_chip(),
-        )
     }
 
     fn main_tools_status_chip(&self) -> Option<String> {
@@ -2353,13 +2317,15 @@ impl TauGui {
 
 impl Render for TauGui {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (status_left, status_right) = self.status_line_spans(cx);
+        let status_line = self.status_line();
+        let status_left = self.status_chip_spans(status_line.left_chips, cx);
+        let status_right = self.status_chip_spans(status_line.right_chips, cx);
+        let agent_tabs = status_line.agent_tabs;
         let text_style = self
             .editor
             .update(cx, |editor, cx| editor.style(cx).text.clone());
         let status_left = styled_status_text(status_left, &text_style);
         let status_right = styled_status_text(status_right, &text_style);
-        let agent_tabs = self.agent_tabs();
         let muted_color = cx.theme().colors().text_muted;
         let active_agent_color = self
             .highlight_style_for_name(tau_themes::names::STATUS_ROLE, cx)
@@ -2418,7 +2384,11 @@ impl Render for TauGui {
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(move |this, _, window, cx| {
-                                            this.switch_to_agent_tab(agent_id.clone(), window, cx);
+                                            this.switch_to_agent_tab(
+                                                Some(agent_id.clone()),
+                                                window,
+                                                cx,
+                                            );
                                         }),
                                     )
                                     .child(tab.label)
