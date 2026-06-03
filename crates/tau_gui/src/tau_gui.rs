@@ -29,6 +29,7 @@ mod cli_theme;
 mod commands;
 mod prompt_state;
 mod role_state;
+mod shell_state;
 mod socket_client;
 mod status_line;
 mod tool_render;
@@ -39,6 +40,7 @@ use agent_state::{AgentContextUsage, AgentState};
 use commands::parse_role_setting_update;
 use prompt_state::PromptState;
 use role_state::RoleState;
+use shell_state::{ShellCommandState, ShellState};
 use socket_client::{SocketEvent, Writer};
 use tool_state::ToolState;
 #[cfg(test)]
@@ -239,6 +241,7 @@ struct TauGui {
     prompt_state: PromptState,
     cli_theme: tau_themes::Theme,
     tool_state: ToolState,
+    shell_state: ShellState,
     current_model: Option<tau_proto::ModelId>,
     current_role: Option<String>,
     baseline_params: Option<ModelParams>,
@@ -405,6 +408,7 @@ impl TauGui {
             prompt_state: PromptState::default(),
             cli_theme: cli_theme::select_theme(tau_config::settings::CliTheme::Dark),
             tool_state: ToolState::default(),
+            shell_state: ShellState::default(),
             current_model: None,
             current_role: None,
             baseline_params: None,
@@ -789,29 +793,53 @@ impl TauGui {
                 }
             }
             Event::UiShellCommand(command) => {
+                let label = shell_running_label(command.include_in_context);
                 let block = tool_render::render_shell_block(
                     &self.cli_theme,
                     &command.command,
                     "",
-                    Some("running"),
+                    Some(label.as_str()),
                 );
-                self.insert_before_draft_block(block, cx);
-            }
-            Event::ShellCommandProgress(progress) => {
-                if !progress.chunk.is_empty() {
-                    self.insert_before_draft_styled(
-                        &progress.chunk,
-                        TranscriptStyle::ToolProgress,
-                        cx,
+                if let Some(inserted) = self.insert_before_draft_block(block, cx) {
+                    self.shell_state.insert(
+                        command.command_id.to_string(),
+                        ShellCommandState {
+                            inserted,
+                            command: command.command,
+                            include_in_context: command.include_in_context,
+                            output: String::new(),
+                        },
                     );
                 }
             }
+            Event::ShellCommandProgress(progress) => {
+                if let Some(mut state) = self.shell_state.take(progress.command_id.as_str()) {
+                    state.output.push_str(&progress.chunk);
+                    let label = shell_running_label(state.include_in_context);
+                    let block = tool_render::render_shell_block(
+                        &self.cli_theme,
+                        &state.command,
+                        &state.output,
+                        Some(label.as_str()),
+                    );
+                    if let Some(inserted) = self.replace_transcript_block(state.inserted, block, cx)
+                    {
+                        state.inserted = inserted;
+                        self.shell_state
+                            .insert(progress.command_id.to_string(), state);
+                    }
+                }
+            }
             Event::ShellCommandFinished(finished) => {
-                let status = if finished.cancelled {
-                    "cancelled".to_owned()
-                } else {
-                    format!("[{}]", finished.exit_code.unwrap_or(-1))
-                };
+                let include_in_context =
+                    if let Some(state) = self.shell_state.take(finished.command_id.as_str()) {
+                        self.remove_transcript_highlights(state.inserted.highlight_keys);
+                        self.remove_transcript_range(state.inserted.range, cx);
+                        state.include_in_context
+                    } else {
+                        finished.include_in_context
+                    };
+                let status = shell_finished_suffix(&finished, include_in_context);
                 let block = tool_render::render_shell_block(
                     &self.cli_theme,
                     &finished.command,
@@ -2162,6 +2190,34 @@ fn agent_message_sent_recipient_label(message: &tau_proto::AgentMessageSent) -> 
     }
 }
 
+fn shell_running_label(include_in_context: bool) -> String {
+    if include_in_context {
+        "running".to_owned()
+    } else {
+        "running [no context]".to_owned()
+    }
+}
+
+fn shell_finished_suffix(
+    finished: &tau_proto::ShellCommandFinished,
+    include_in_context: bool,
+) -> String {
+    let suffix = if finished.cancelled {
+        "cancelled".to_owned()
+    } else {
+        match finished.exit_code {
+            Some(0) => "[0]".to_owned(),
+            Some(code) => format!("[{code}]"),
+            None => "[?]".to_owned(),
+        }
+    };
+    if include_in_context {
+        suffix
+    } else {
+        format!("{suffix} [no context]")
+    }
+}
+
 fn provider_update_compaction_status(
     update: &tau_proto::ProviderResponseUpdated,
 ) -> Option<(tool_render::CompactionStatus, String)> {
@@ -2542,5 +2598,36 @@ mod tests {
             .anchor_in_excerpt(draft_end)
             .expect("draft end should be present in multibuffer");
         assert_eq!(draft_anchor.to_offset(&snapshot), snapshot.len());
+    }
+    #[test]
+    fn shell_running_label_marks_no_context_commands() {
+        assert_eq!(shell_running_label(true), "running");
+        assert_eq!(shell_running_label(false), "running [no context]");
+    }
+
+    #[test]
+    fn shell_finished_suffix_matches_cli_labels() {
+        let mut finished = tau_proto::ShellCommandFinished {
+            command_id: tau_proto::ShellCommandId::from("command"),
+            session_id: tau_proto::SessionId::from("session"),
+            command: "echo hi".to_owned(),
+            include_in_context: true,
+            target_agent_id: None,
+            output: String::new(),
+            exit_code: Some(0),
+            cancelled: false,
+        };
+
+        assert_eq!(shell_finished_suffix(&finished, true), "[0]");
+        assert_eq!(shell_finished_suffix(&finished, false), "[0] [no context]");
+
+        finished.exit_code = None;
+        assert_eq!(shell_finished_suffix(&finished, true), "[?]");
+
+        finished.cancelled = true;
+        assert_eq!(
+            shell_finished_suffix(&finished, false),
+            "cancelled [no context]"
+        );
     }
 }
