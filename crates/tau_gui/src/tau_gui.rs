@@ -27,8 +27,11 @@ use tau_proto::{
 use text::ToOffset as _;
 use theme::ActiveTheme as _;
 
+mod agent_state;
 mod cli_theme;
 mod tool_render;
+
+use agent_state::{AgentContextUsage, AgentState};
 
 actions!(tau_gui, [SubmitPrompt]);
 
@@ -252,12 +255,6 @@ impl StatusChip {
     }
 }
 
-struct AgentContextUsage {
-    input_tokens: Option<u64>,
-    percent_used: Option<u8>,
-    context_window: Option<u64>,
-}
-
 struct TauGui {
     editor: Entity<Editor>,
     transcript_buffer: Entity<Buffer>,
@@ -292,11 +289,7 @@ struct TauGui {
     main_backgrounded_tools: HashSet<String>,
     previous_provider_usage: Option<tau_proto::ProviderTokenUsage>,
     follow_tail: bool,
-    current_agent_id: Option<String>,
-    known_agents: HashSet<String>,
-    live_agents: HashSet<String>,
-    suspended_agents: HashSet<String>,
-    agent_context_usage: HashMap<String, AgentContextUsage>,
+    agents: AgentState,
 }
 
 impl TauGui {
@@ -469,11 +462,7 @@ impl TauGui {
             main_backgrounded_tools: HashSet::default(),
             previous_provider_usage: None,
             follow_tail: true,
-            current_agent_id: None,
-            known_agents: HashSet::default(),
-            live_agents: HashSet::default(),
-            suspended_agents: HashSet::default(),
-            agent_context_usage: HashMap::default(),
+            agents: AgentState::default(),
         };
         this.update_prompt_inlay(cx);
         this.update_status_line(cx);
@@ -527,9 +516,9 @@ impl TauGui {
     }
 
     fn handle_event(&mut self, event: Event, cx: &mut Context<Self>) {
-        let previous_agent_id = self.current_agent_id.clone();
+        let previous_agent_id = self.agents.current_agent_id_owned();
         self.learn_agent_metadata(&event);
-        if self.current_agent_id != previous_agent_id {
+        if self.agents.current_agent_id() != previous_agent_id.as_deref() {
             self.apply_selected_agent_context_usage();
             self.update_status_line(cx);
             self.update_prompt_inlay(cx);
@@ -658,7 +647,7 @@ impl TauGui {
                 self.ensure_transcript_gap(cx);
             }
             Event::AgentPromptRecalled(recalled) => {
-                self.select_agent(recalled.agent_id.to_string());
+                self.agents.select(recalled.agent_id.to_string());
                 self.replace_draft_text(&recalled.text, cx);
                 self.insert_before_draft_styled(
                     "> recalled queued prompt for editing\n",
@@ -696,8 +685,7 @@ impl TauGui {
             }
             Event::ToolDelegateProgress(progress) => {
                 if let Some(agent_id) = &progress.agent_id {
-                    self.remember_agent(agent_id.clone());
-                    self.live_agents.insert(agent_id.clone());
+                    self.agents.mark_live(agent_id.clone());
                 }
                 let display = progress
                     .display
@@ -996,7 +984,7 @@ impl TauGui {
             }
             Event::HarnessAgentContextUsageChanged(changed) => {
                 let agent_id = changed.agent_id.to_string();
-                self.agent_context_usage.insert(
+                self.agents.record_context_usage(
                     agent_id.clone(),
                     AgentContextUsage {
                         input_tokens: changed.input_tokens,
@@ -1004,7 +992,7 @@ impl TauGui {
                         context_window: changed.context_window,
                     },
                 );
-                if self.current_agent_id.as_deref() == Some(agent_id.as_str()) {
+                if self.agents.current_agent_id() == Some(agent_id.as_str()) {
                     self.apply_selected_agent_context_usage();
                     self.update_status_line(cx);
                 }
@@ -1016,7 +1004,7 @@ impl TauGui {
                 self.main_tools_visible = false;
                 self.main_backgrounded_tools.clear();
                 self.previous_provider_usage = None;
-                self.agent_context_usage.clear();
+                self.agents.clear_context_usage();
                 self.update_status_line(cx);
             }
             _ => {}
@@ -1025,74 +1013,52 @@ impl TauGui {
 
     fn learn_agent_metadata(&mut self, event: &Event) {
         match event {
-            Event::AgentStarted(started) => self.remember_agent(started.agent_id.to_string()),
-            Event::SessionAgentLoaded(loaded) => self.remember_agent(loaded.agent_id.to_string()),
+            Event::AgentStarted(started) => self.agents.remember(started.agent_id.to_string()),
+            Event::SessionAgentLoaded(loaded) => self.agents.remember(loaded.agent_id.to_string()),
             Event::SessionAgentUnloaded(unloaded) => {
-                let agent_id = unloaded.agent_id.to_string();
-                self.live_agents.remove(&agent_id);
-                self.suspended_agents.remove(&agent_id);
-                if self.current_agent_id.as_deref() == Some(agent_id.as_str()) {
-                    self.current_agent_id = None;
-                }
+                self.agents.unload(unloaded.agent_id.as_str());
             }
             Event::UiPromptSubmitted(prompt) if prompt.originator.is_user() => {
-                self.select_agent(prompt.agent_id.to_string());
+                self.agents.select(prompt.agent_id.to_string());
             }
             Event::AgentPromptSubmitted(prompt)
                 if prompt.originator.is_user() && !prompt.message_class.is_internal() =>
             {
-                self.select_agent(prompt.agent_id.to_string());
+                self.agents.select(prompt.agent_id.to_string());
             }
             Event::AgentPromptQueued(queued) if !queued.message_class.is_internal() => {
-                self.select_agent(queued.agent_id.to_string());
+                self.agents.select(queued.agent_id.to_string());
             }
             Event::AgentUserMessageInjected(injected) if !injected.message_class.is_internal() => {
-                self.remember_agent(injected.agent_id.to_string());
+                self.agents.remember(injected.agent_id.to_string());
             }
             Event::AgentMessageSent(message) => {
-                self.remember_agent(message.sender_id.to_string());
+                self.agents.remember(message.sender_id.to_string());
                 if let Some(agent_id) = agent_message_sent_recipient_agent_id(message) {
-                    self.remember_agent(agent_id.to_owned());
+                    self.agents.remember(agent_id.to_owned());
                 }
             }
             Event::AgentMessageReceived(message) => {
-                self.remember_agent(message.sender_id.to_string());
-                self.remember_agent(message.recipient_id.to_string());
+                self.agents.remember(message.sender_id.to_string());
+                self.agents.remember(message.recipient_id.to_string());
             }
             Event::ToolDelegateProgress(progress) => {
                 if let Some(agent_id) = &progress.agent_id {
-                    self.remember_agent(agent_id.clone());
-                    self.live_agents.insert(agent_id.clone());
+                    self.agents.mark_live(agent_id.clone());
                 }
             }
             Event::AgentPromptCreated(created) if created.originator.is_user() => {
-                self.select_agent(created.agent_id.to_string());
+                self.agents.select(created.agent_id.to_string());
             }
             Event::ProviderResponseFinished(finished) if finished.originator.is_user() => {
-                self.select_agent(finished.agent_id.to_string());
+                self.agents.select(finished.agent_id.to_string());
             }
             _ => {}
         }
     }
 
-    fn remember_agent(&mut self, agent_id: String) {
-        self.known_agents.insert(agent_id);
-    }
-
-    fn select_agent(&mut self, agent_id: String) {
-        self.known_agents.insert(agent_id.clone());
-        self.live_agents.insert(agent_id.clone());
-        self.suspended_agents.remove(&agent_id);
-        if self.current_agent_id.as_deref() != Some(agent_id.as_str()) {
-            self.current_agent_id = Some(agent_id);
-        }
-    }
-
     fn apply_selected_agent_context_usage(&mut self) {
-        let Some(agent_id) = self.current_agent_id.as_deref() else {
-            return;
-        };
-        if let Some(usage) = self.agent_context_usage.get(agent_id) {
+        if let Some(usage) = self.agents.selected_context_usage() {
             self.current_context_input_tokens = usage.input_tokens;
             self.current_context_percent = usage.percent_used;
             self.current_context_window = usage.context_window;
@@ -1103,14 +1069,11 @@ impl TauGui {
     }
 
     fn selected_agent_is_active(&self) -> bool {
-        let Some(agent_id) = self.current_agent_id.as_deref() else {
-            return true;
-        };
-        self.live_agents.contains(agent_id) && !self.suspended_agents.contains(agent_id)
+        self.agents.selected_is_active()
     }
 
     fn selected_agent_proto_id(&self) -> Option<tau_proto::AgentId> {
-        self.current_agent_id.clone().map(Into::into)
+        self.agents.current_agent_id_owned().map(Into::into)
     }
 
     fn send_event(&mut self, event: Event, cx: &mut Context<Self>) -> bool {
@@ -1308,10 +1271,9 @@ impl TauGui {
     fn handle_agent_command(&mut self, text: &str, cx: &mut Context<Self>) {
         let rest = text.strip_prefix("/agent").unwrap_or("").trim();
         if rest.is_empty() {
-            let current = self.current_agent_id.as_deref().unwrap_or("none");
-            let mut known_agents = self.known_agents.iter().cloned().collect::<Vec<_>>();
-            known_agents.sort();
-            let active_count = self.live_agents.difference(&self.suspended_agents).count();
+            let current = self.agents.current_agent_id().unwrap_or("none");
+            let known_agents = self.agents.known_agents_sorted();
+            let active_count = self.agents.active_count();
             self.insert_before_draft_styled(
                 &format!(
                     "/agent <new|switch|suspend|resume> [agent_id]; current: {current}; active: {active_count}; known: {}\n",
@@ -1360,7 +1322,7 @@ impl TauGui {
     }
 
     fn clear_selected_agent(&mut self, cx: &mut Context<Self>) {
-        self.current_agent_id = None;
+        self.agents.clear_current_agent();
         self.update_status_line(cx);
         self.update_prompt_inlay(cx);
     }
@@ -1381,7 +1343,7 @@ impl TauGui {
             self.clear_selected_agent(cx);
             return;
         }
-        if !self.known_agents.contains(agent_id) {
+        if !self.agents.known(agent_id) {
             self.insert_before_draft_styled(
                 &format!("unknown agent: {agent_id}\n"),
                 TranscriptStyle::SystemInfo,
@@ -1389,7 +1351,7 @@ impl TauGui {
             );
             return;
         }
-        if self.suspended_agents.contains(agent_id) {
+        if self.agents.suspended(agent_id) {
             self.insert_before_draft_styled(
                 &format!("agent is suspended: {agent_id} (use /agent resume {agent_id})\n"),
                 TranscriptStyle::SystemInfo,
@@ -1397,7 +1359,7 @@ impl TauGui {
             );
             return;
         }
-        self.current_agent_id = Some(agent_id.to_owned());
+        self.agents.select(agent_id.to_owned());
         self.apply_selected_agent_context_usage();
         self.update_status_line(cx);
         self.update_prompt_inlay(cx);
@@ -1408,7 +1370,7 @@ impl TauGui {
             .map(str::trim)
             .filter(|target| !target.is_empty())
             .map(ToOwned::to_owned)
-            .or_else(|| self.current_agent_id.clone());
+            .or_else(|| self.agents.current_agent_id_owned());
         let Some(agent_id) = target else {
             self.insert_before_draft_styled(
                 "/agent suspend <agent_id>\n",
@@ -1417,7 +1379,7 @@ impl TauGui {
             );
             return;
         };
-        if !self.known_agents.contains(&agent_id) {
+        if !self.agents.known(&agent_id) {
             self.insert_before_draft_styled(
                 &format!("unknown agent: {agent_id}\n"),
                 TranscriptStyle::SystemInfo,
@@ -1425,7 +1387,7 @@ impl TauGui {
             );
             return;
         }
-        self.suspended_agents.insert(agent_id);
+        self.agents.suspend(agent_id);
         self.update_status_line(cx);
     }
 
@@ -1435,9 +1397,9 @@ impl TauGui {
             .filter(|target| !target.is_empty())
             .map(ToOwned::to_owned)
             .or_else(|| {
-                self.current_agent_id
-                    .clone()
-                    .filter(|agent_id| self.suspended_agents.contains(agent_id))
+                self.agents
+                    .current_agent_id_owned()
+                    .filter(|agent_id| self.agents.suspended(agent_id))
             });
         let Some(agent_id) = target else {
             self.insert_before_draft_styled(
@@ -1447,7 +1409,7 @@ impl TauGui {
             );
             return;
         };
-        if !self.known_agents.contains(&agent_id) {
+        if !self.agents.known(&agent_id) {
             self.insert_before_draft_styled(
                 &format!("unknown agent: {agent_id}\n"),
                 TranscriptStyle::SystemInfo,
@@ -1455,9 +1417,7 @@ impl TauGui {
             );
             return;
         }
-        self.live_agents.insert(agent_id.clone());
-        self.suspended_agents.remove(&agent_id);
-        self.current_agent_id = Some(agent_id);
+        self.agents.resume(agent_id);
         self.apply_selected_agent_context_usage();
         self.update_status_line(cx);
         self.update_prompt_inlay(cx);
@@ -1532,7 +1492,7 @@ impl TauGui {
             return;
         }
 
-        let event = if let Some(agent_id) = self.current_agent_id.clone() {
+        let event = if let Some(agent_id) = self.agents.current_agent_id_owned() {
             Event::UiPromptSubmitted(UiPromptSubmitted {
                 session_id: self.session_id.clone(),
                 text: text.clone(),
@@ -1624,7 +1584,7 @@ impl TauGui {
     }
 
     fn prompt_placeholder_text(&self) -> String {
-        if let Some(agent_id) = &self.current_agent_id {
+        if let Some(agent_id) = self.agents.current_agent_id() {
             return format!("Write a message to {agent_id}…");
         }
 
@@ -2142,7 +2102,7 @@ impl TauGui {
             names::STATUS_SESSION,
         ));
         match (
-            self.current_agent_id.as_deref(),
+            self.agents.current_agent_id(),
             self.current_role.as_deref(),
             self.current_model.as_ref(),
         ) {
@@ -2197,7 +2157,7 @@ impl TauGui {
                 names::STATUS_TOOLS,
             ));
         }
-        let active_side_agents = self.active_side_agent_count();
+        let active_side_agents = self.agents.active_side_count();
         if active_side_agents > 0 {
             chips.push(StatusChip::new(
                 format!("@{active_side_agents}"),
@@ -2211,16 +2171,6 @@ impl TauGui {
             ));
         }
         chips
-    }
-
-    fn active_side_agent_count(&self) -> usize {
-        self.live_agents
-            .iter()
-            .filter(|agent_id| {
-                self.current_agent_id.as_deref() != Some(agent_id.as_str())
-                    && !self.suspended_agents.contains(agent_id.as_str())
-            })
-            .count()
     }
 
     fn show_effort_status(&self) -> bool {
