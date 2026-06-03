@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -24,6 +24,7 @@ use tau_proto::{
 use text::ToOffset as _;
 use theme::ActiveTheme as _;
 
+mod activity_state;
 mod agent_state;
 mod cli_theme;
 mod commands;
@@ -31,6 +32,7 @@ mod socket_client;
 mod status_line;
 mod tool_render;
 mod transcript;
+use activity_state::MainToolActivity;
 use agent_state::{AgentContextUsage, AgentState};
 use commands::parse_role_setting_update;
 use socket_client::{SocketEvent, Writer};
@@ -241,10 +243,7 @@ struct TauGui {
     current_context_percent: Option<u8>,
     current_context_input_tokens: Option<u64>,
     current_context_window: Option<u64>,
-    main_tools_completed: u64,
-    main_tools_total: u64,
-    main_tools_visible: bool,
-    main_backgrounded_tools: HashSet<String>,
+    main_tool_activity: MainToolActivity,
     previous_provider_usage: Option<tau_proto::ProviderTokenUsage>,
     follow_tail: bool,
     agents: AgentState,
@@ -411,10 +410,7 @@ impl TauGui {
             current_context_percent: None,
             current_context_input_tokens: None,
             current_context_window: None,
-            main_tools_completed: 0,
-            main_tools_total: 0,
-            main_tools_visible: false,
-            main_backgrounded_tools: HashSet::default(),
+            main_tool_activity: MainToolActivity::default(),
             previous_provider_usage: None,
             follow_tail: true,
             agents: AgentState::default(),
@@ -585,10 +581,8 @@ impl TauGui {
                 }
                 let tool_calls = tool_calls_from_output_items(&finished.output_items);
                 if !tool_calls.is_empty() {
-                    self.main_tools_total = self
-                        .main_tools_total
-                        .saturating_add(tool_calls.len() as u64);
-                    self.main_tools_visible = true;
+                    self.main_tool_activity
+                        .add_requested_tools(tool_calls.len());
                     self.update_status_line(cx);
                 }
                 for call in tool_calls {
@@ -715,8 +709,8 @@ impl TauGui {
                         .pending_tool_calls
                         .contains_key(result.call_id.as_str())
                     || self
-                        .main_backgrounded_tools
-                        .contains(result.call_id.as_str()) =>
+                        .main_tool_activity
+                        .is_backgrounded(result.call_id.as_str()) =>
             {
                 let block = render_tool_result_parts_block(
                     &self.cli_theme,
@@ -752,8 +746,8 @@ impl TauGui {
                 if error.originator.is_user()
                     || self.pending_tool_calls.contains_key(error.call_id.as_str())
                     || self
-                        .main_backgrounded_tools
-                        .contains(error.call_id.as_str()) =>
+                        .main_tool_activity
+                        .is_backgrounded(error.call_id.as_str()) =>
             {
                 let block = render_tool_error_parts_block(
                     &self.cli_theme,
@@ -781,8 +775,8 @@ impl TauGui {
                     .pending_tool_calls
                     .contains_key(cancelled.call_id.as_str())
                     || self
-                        .main_backgrounded_tools
-                        .contains(cancelled.call_id.as_str())
+                        .main_tool_activity
+                        .is_backgrounded(cancelled.call_id.as_str())
                 {
                     let block = render_tool_error_parts_block(
                         &self.cli_theme,
@@ -954,10 +948,7 @@ impl TauGui {
             }
             Event::SessionStarted(started) => {
                 self.session_id = started.session_id;
-                self.main_tools_completed = 0;
-                self.main_tools_total = 0;
-                self.main_tools_visible = false;
-                self.main_backgrounded_tools.clear();
+                self.main_tool_activity.reset();
                 self.previous_provider_usage = None;
                 self.agents.clear_context_usage();
                 self.update_status_line(cx);
@@ -1891,20 +1882,11 @@ impl TauGui {
     }
 
     fn record_main_tool_backgrounded(&mut self, call_id: &str) {
-        self.main_backgrounded_tools.insert(call_id.to_owned());
-        if self.main_tools_total != 0 {
-            self.main_tools_visible = true;
-        }
+        self.main_tool_activity.record_backgrounded(call_id);
     }
 
     fn record_main_tool_completed(&mut self, call_id: &str) {
-        self.main_backgrounded_tools.remove(call_id);
-        if self.main_tools_completed < self.main_tools_total {
-            self.main_tools_completed += 1;
-        }
-        if self.main_tools_total != 0 {
-            self.main_tools_visible = true;
-        }
+        self.main_tool_activity.record_completed(call_id);
     }
 
     fn status_left_chips(&self) -> Vec<status_line::Chip> {
@@ -1927,9 +1909,7 @@ impl TauGui {
     }
 
     fn main_tools_status_chip(&self) -> Option<String> {
-        ((self.main_tools_visible || !self.main_backgrounded_tools.is_empty())
-            && self.main_tools_total != 0)
-            .then(|| format!("{}/{}", self.main_tools_completed, self.main_tools_total))
+        self.main_tool_activity.status_chip()
     }
 
     fn context_status_chip(&self) -> Option<String> {
