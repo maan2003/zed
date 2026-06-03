@@ -12,10 +12,14 @@ impl Chip {
     }
 }
 
+pub(crate) enum LeftStatusIdentity<'a> {
+    Role(&'a str),
+    Model(&'a tau_proto::ModelId),
+    NoRoleSelected,
+}
+
 pub(crate) fn left_chips(
-    current_agent_id: Option<&str>,
-    current_role: Option<&str>,
-    current_model: Option<&tau_proto::ModelId>,
+    identity: Option<LeftStatusIdentity<'_>>,
     baseline_params: Option<tau_proto::ModelParams>,
     current_params: tau_proto::ModelParams,
     role_default_effort: Option<tau_proto::Effort>,
@@ -24,13 +28,17 @@ pub(crate) fn left_chips(
     use tau_themes::names;
 
     let mut chips = Vec::new();
-    match (current_agent_id, current_role, current_model) {
-        (Some(agent_id), _, _) => chips.push(Chip::new(format!("@{agent_id}"), names::STATUS_ROLE)),
-        (None, Some(role), _) => chips.push(Chip::new(format!("+{role}"), names::STATUS_ROLE)),
-        (None, None, Some(model)) => {
+    match identity {
+        Some(LeftStatusIdentity::Role(role)) => {
+            chips.push(Chip::new(format!("+{role}"), names::STATUS_ROLE))
+        }
+        Some(LeftStatusIdentity::Model(model)) => {
             chips.push(Chip::new(format!("={model}"), names::STATUS_MODEL))
         }
-        (None, None, None) => chips.push(Chip::new("no role selected", names::MODEL_STATUS)),
+        Some(LeftStatusIdentity::NoRoleSelected) => {
+            chips.push(Chip::new("no role selected", names::MODEL_STATUS))
+        }
+        None => {}
     }
     if show_effort_status(baseline_params, current_params, role_default_effort) {
         chips.push(Chip::new(
@@ -119,6 +127,30 @@ fn show_service_tier_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn left_chips_can_omit_primary_identity() {
+        let chips = left_chips(None, None, tau_proto::ModelParams::default(), None, None);
+
+        assert!(
+            chips.iter().all(|chip| chip.text != "no role selected"),
+            "hidden active-agent identity must not fall through to no-role status"
+        );
+    }
+
+    #[test]
+    fn left_chips_render_no_role_when_identity_says_so() {
+        let chips = left_chips(
+            Some(LeftStatusIdentity::NoRoleSelected),
+            None,
+            tau_proto::ModelParams::default(),
+            None,
+            None,
+        );
+
+        assert_eq!(chips[0].text, "no role selected");
+        assert_eq!(chips[0].style_name, tau_themes::names::MODEL_STATUS);
+    }
 
     #[test]
     fn right_chips_render_tool_agent_and_context_status() {

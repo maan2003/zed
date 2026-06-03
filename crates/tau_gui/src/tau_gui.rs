@@ -2274,20 +2274,21 @@ impl TauGui {
         self.main_tool_activity.record_completed(call_id);
     }
 
+    fn status_left_identity(&self) -> Option<status_line::LeftStatusIdentity<'_>> {
+        if self.agents.current_agent_id().is_some() {
+            None
+        } else if let Some(role) = self.current_role.as_deref() {
+            Some(status_line::LeftStatusIdentity::Role(role))
+        } else if let Some(model) = self.current_model.as_ref() {
+            Some(status_line::LeftStatusIdentity::Model(model))
+        } else {
+            Some(status_line::LeftStatusIdentity::NoRoleSelected)
+        }
+    }
+
     fn status_left_chips(&self) -> Vec<status_line::Chip> {
-        let current_agent_active = self.agents.current_agent_id().is_some();
         status_line::left_chips(
-            None,
-            if current_agent_active {
-                None
-            } else {
-                self.current_role.as_deref()
-            },
-            if current_agent_active {
-                None
-            } else {
-                self.current_model.as_ref()
-            },
+            self.status_left_identity(),
             self.baseline_params,
             self.current_params,
             self.role_state.default_effort(self.current_role.as_deref()),
