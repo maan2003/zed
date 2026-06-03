@@ -43,7 +43,7 @@ use agent_state::{AgentContextUsage, AgentState};
 use commands::parse_role_setting_update;
 use completion_state::{CompletionCandidate, TauCompletionProvider, TauCompletionState};
 use prompt_state::{PromptState, QueuedPrompt};
-use role_state::RoleState;
+use role_state::{RoleCycleKind, RoleCycleOutcome, RoleState};
 use shell_state::{ShellCommandState, ShellState};
 use socket_client::{SocketEvent, Writer};
 use tool_state::ToolState;
@@ -58,8 +58,8 @@ actions!(
         AgentPrevious,
         AgentNext,
         AgentNew,
-        RolePrevious,
-        RoleNext
+        RoleCycle,
+        RoleCycleGroup
     ]
 );
 
@@ -85,8 +85,8 @@ fn run() -> Result<()> {
             eprintln!("tau-gui: binding prompt actions in TauGui > Editor");
             cx.bind_keys([
                 KeyBinding::new("enter", SubmitPrompt, Some("TauGui > Editor")),
-                KeyBinding::new("shift-tab", RolePrevious, Some("TauGui > Editor")),
-                KeyBinding::new("tab", RoleNext, Some("TauGui > Editor")),
+                KeyBinding::new("tab", RoleCycle, Some("TauGui > Editor")),
+                KeyBinding::new("shift-tab", RoleCycleGroup, Some("TauGui > Editor")),
                 KeyBinding::new("ctrl-k", AgentPrevious, Some("TauGui > Editor")),
                 KeyBinding::new("ctrl-j", AgentNext, Some("TauGui > Editor")),
                 KeyBinding::new("ctrl-shift-n", AgentNew, Some("TauGui > Editor")),
@@ -501,19 +501,23 @@ impl TauGui {
                 }
             })
         });
-        let role_previous_subscription = editor.update(cx, |editor, _cx| {
+        let role_cycle_subscription = editor.update(cx, |editor, _cx| {
             let this = this.clone();
-            editor.register_action(move |_: &RolePrevious, _window, cx| {
-                if let Err(error) = this.update(cx, |this, cx| this.switch_role_by_delta(-1, cx)) {
-                    eprintln!("tau-gui: failed to switch to previous role: {error:#}");
+            editor.register_action(move |_: &RoleCycle, _window, cx| {
+                if let Err(error) = this.update(cx, |this, cx| {
+                    this.cycle_role(RoleCycleKind::InnerGroup, cx)
+                }) {
+                    eprintln!("tau-gui: failed to cycle role: {error:#}");
                 }
             })
         });
-        let role_next_subscription = editor.update(cx, |editor, _cx| {
+        let role_cycle_group_subscription = editor.update(cx, |editor, _cx| {
             let this = this.clone();
-            editor.register_action(move |_: &RoleNext, _window, cx| {
-                if let Err(error) = this.update(cx, |this, cx| this.switch_role_by_delta(1, cx)) {
-                    eprintln!("tau-gui: failed to switch to next role: {error:#}");
+            editor.register_action(move |_: &RoleCycleGroup, _window, cx| {
+                if let Err(error) =
+                    this.update(cx, |this, cx| this.cycle_role(RoleCycleKind::Group, cx))
+                {
+                    eprintln!("tau-gui: failed to cycle role group: {error:#}");
                 }
             })
         });
@@ -589,8 +593,8 @@ impl TauGui {
             draft_end,
             _subscriptions: vec![
                 submit_subscription,
-                role_previous_subscription,
-                role_next_subscription,
+                role_cycle_subscription,
+                role_cycle_group_subscription,
                 agent_previous_subscription,
                 agent_next_subscription,
                 agent_new_subscription,
@@ -1401,22 +1405,26 @@ impl TauGui {
         )
     }
 
-    fn switch_role_by_delta(&mut self, delta: isize, cx: &mut Context<Self>) {
+    fn cycle_role(&mut self, kind: RoleCycleKind, cx: &mut Context<Self>) {
         if self.agents.current_agent_id().is_some() {
             return;
         }
-        let Some(role) = self
+        match self
             .role_state
-            .role_by_delta(self.current_role.as_deref(), delta)
-        else {
-            self.insert_before_draft_styled(
-                "cycle-role: no agent roles are available yet\n",
-                TranscriptStyle::SystemInfo,
-                cx,
-            );
-            return;
-        };
-        self.select_role(&role, cx);
+            .cycle_role(self.current_role.as_deref(), kind)
+        {
+            RoleCycleOutcome::Selected(role) => {
+                self.select_role(&role, cx);
+            }
+            RoleCycleOutcome::NoRolesAvailable => {
+                self.insert_before_draft_styled(
+                    "cycle-role: no agent roles are available yet\n",
+                    TranscriptStyle::SystemInfo,
+                    cx,
+                );
+            }
+            RoleCycleOutcome::Noop => {}
+        }
     }
 
     fn handle_agent_command(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
