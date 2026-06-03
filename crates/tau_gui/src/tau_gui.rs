@@ -2244,7 +2244,7 @@ impl TauGui {
     fn status_left_chips(&self) -> Vec<status_line::Chip> {
         status_line::left_chips(
             &self.session_id,
-            self.agents.current_agent_id(),
+            None,
             self.current_role.as_deref(),
             self.current_model.as_ref(),
             self.baseline_params,
@@ -2319,6 +2319,10 @@ impl Render for TauGui {
         let status_right = styled_status_text(status_right, &text_style);
         let agent_tabs = self.agent_tabs(cx);
         let muted_color = cx.theme().colors().text_muted;
+        let active_agent_color = self
+            .highlight_style_for_name(tau_themes::names::STATUS_ROLE, cx)
+            .color
+            .unwrap_or(text_style.color);
 
         div()
             .id("tau-gui")
@@ -2336,44 +2340,6 @@ impl Render for TauGui {
                     .overflow_hidden()
                     .child(self.editor.clone()),
             )
-            .when(!agent_tabs.is_empty(), |this| {
-                this.child(
-                    div()
-                        .id("tau-gui-agent-tabs")
-                        .w_full()
-                        .flex_none()
-                        .flex()
-                        .gap_1()
-                        .overflow_x_scroll()
-                        .py_1()
-                        .font_family(text_style.font_family.clone())
-                        .text_size(text_style.font_size)
-                        .line_height(text_style.line_height)
-                        .children(agent_tabs.into_iter().map(|tab| {
-                            let agent_id = tab.agent_id.clone();
-                            div()
-                                .text_color(if tab.suspended {
-                                    muted_color
-                                } else {
-                                    text_style.color
-                                })
-                                .font_weight(if tab.selected || tab.has_draft {
-                                    FontWeight::BOLD
-                                } else {
-                                    FontWeight::default()
-                                })
-                                .whitespace_nowrap()
-                                .cursor_pointer()
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this, _, window, cx| {
-                                        this.switch_to_agent_tab(agent_id.clone(), window, cx);
-                                    }),
-                                )
-                                .child(tab.label)
-                        })),
-                )
-            })
             .child(
                 div()
                     .id("tau-gui-status")
@@ -2391,10 +2357,43 @@ impl Render for TauGui {
                     .text_color(text_style.color)
                     .child(
                         div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
                             .overflow_hidden()
                             .whitespace_nowrap()
-                            .truncate()
-                            .child(status_left),
+                            .children(agent_tabs.into_iter().map(|tab| {
+                                let agent_id = tab.agent_id.clone();
+                                div()
+                                    .text_color(if tab.selected {
+                                        active_agent_color
+                                    } else if tab.suspended {
+                                        muted_color
+                                    } else {
+                                        text_style.color
+                                    })
+                                    .font_weight(if tab.selected || tab.has_draft {
+                                        FontWeight::BOLD
+                                    } else {
+                                        FontWeight::default()
+                                    })
+                                    .whitespace_nowrap()
+                                    .cursor_pointer()
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _, window, cx| {
+                                            this.switch_to_agent_tab(agent_id.clone(), window, cx);
+                                        }),
+                                    )
+                                    .child(tab.label)
+                            }))
+                            .child(
+                                div()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .truncate()
+                                    .child(status_left),
+                            ),
                     )
                     .child(
                         div()
