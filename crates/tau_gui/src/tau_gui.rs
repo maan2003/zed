@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -32,12 +31,14 @@ mod prompt_state;
 mod socket_client;
 mod status_line;
 mod tool_render;
+mod tool_state;
 mod transcript;
 use activity_state::MainToolActivity;
 use agent_state::{AgentContextUsage, AgentState};
 use commands::parse_role_setting_update;
 use prompt_state::PromptState;
 use socket_client::{SocketEvent, Writer};
+use tool_state::ToolState;
 #[cfg(test)]
 use transcript::buffer_range_starts_with;
 use transcript::{InsertedTranscript, Transcript};
@@ -235,7 +236,7 @@ struct TauGui {
     session_id: tau_proto::SessionId,
     prompt_state: PromptState,
     cli_theme: tau_themes::Theme,
-    pending_tool_calls: HashMap<String, InsertedTranscript>,
+    tool_state: ToolState,
     current_model: Option<tau_proto::ModelId>,
     current_role: Option<String>,
     baseline_params: Option<ModelParams>,
@@ -400,7 +401,7 @@ impl TauGui {
             session_id: attach_target.session_id,
             prompt_state: PromptState::default(),
             cli_theme: cli_theme::select_theme(tau_config::settings::CliTheme::Dark),
-            pending_tool_calls: HashMap::default(),
+            tool_state: ToolState::default(),
             current_model: None,
             current_role: None,
             baseline_params: None,
@@ -587,8 +588,8 @@ impl TauGui {
                 for call in tool_calls {
                     let block = render_tool_call_block(&self.cli_theme, &call);
                     if let Some(inserted) = self.insert_before_draft_block(block, cx) {
-                        self.pending_tool_calls
-                            .insert(call.call_id.to_string(), inserted);
+                        self.tool_state
+                            .insert_pending(call.call_id.to_string(), inserted);
                     }
                 }
                 self.render_turn_stats(&finished, cx);
@@ -684,9 +685,7 @@ impl TauGui {
             }
             Event::ProviderToolResult(result)
                 if result.originator.is_user()
-                    || self
-                        .pending_tool_calls
-                        .contains_key(result.call_id.as_str()) =>
+                    || self.tool_state.contains_pending(result.call_id.as_str()) =>
             {
                 if result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder {
                     self.record_main_tool_backgrounded(result.call_id.as_str());
@@ -704,9 +703,7 @@ impl TauGui {
             }
             Event::ToolBackgroundResult(result)
                 if result.originator.is_user()
-                    || self
-                        .pending_tool_calls
-                        .contains_key(result.call_id.as_str())
+                    || self.tool_state.contains_pending(result.call_id.as_str())
                     || self
                         .main_tool_activity
                         .is_backgrounded(result.call_id.as_str()) =>
@@ -729,7 +726,7 @@ impl TauGui {
             }
             Event::ProviderToolError(error)
                 if error.originator.is_user()
-                    || self.pending_tool_calls.contains_key(error.call_id.as_str()) =>
+                    || self.tool_state.contains_pending(error.call_id.as_str()) =>
             {
                 let block = render_tool_error_parts_block(
                     &self.cli_theme,
@@ -743,7 +740,7 @@ impl TauGui {
             }
             Event::ToolBackgroundError(error)
                 if error.originator.is_user()
-                    || self.pending_tool_calls.contains_key(error.call_id.as_str())
+                    || self.tool_state.contains_pending(error.call_id.as_str())
                     || self
                         .main_tool_activity
                         .is_backgrounded(error.call_id.as_str()) =>
@@ -770,9 +767,7 @@ impl TauGui {
                 self.update_status_line(cx);
             }
             Event::ToolCancelled(cancelled) => {
-                if self
-                    .pending_tool_calls
-                    .contains_key(cancelled.call_id.as_str())
+                if self.tool_state.contains_pending(cancelled.call_id.as_str())
                     || self
                         .main_tool_activity
                         .is_backgrounded(cancelled.call_id.as_str())
@@ -1687,12 +1682,12 @@ impl TauGui {
     ) {
         let display = tool_render::render_delegate_display(display, agent_id, role);
         let block = tool_render::render_tool_block(&self.cli_theme, &display);
-        if let Some(inserted) = self.pending_tool_calls.remove(call_id) {
+        if let Some(inserted) = self.tool_state.take_pending(call_id) {
             if let Some(inserted) = self.replace_transcript_block(inserted, block, cx) {
-                self.pending_tool_calls.insert(call_id.to_owned(), inserted);
+                self.tool_state.insert_pending(call_id.to_owned(), inserted);
             }
         } else if let Some(inserted) = self.insert_before_draft_block(block, cx) {
-            self.pending_tool_calls.insert(call_id.to_owned(), inserted);
+            self.tool_state.insert_pending(call_id.to_owned(), inserted);
         }
     }
 
@@ -1705,12 +1700,12 @@ impl TauGui {
     ) {
         let display = tool_render::render_tool_use_state(tool_name, display);
         let block = tool_render::render_tool_block(&self.cli_theme, &display);
-        if let Some(inserted) = self.pending_tool_calls.remove(call_id) {
+        if let Some(inserted) = self.tool_state.take_pending(call_id) {
             if let Some(inserted) = self.replace_transcript_block(inserted, block, cx) {
-                self.pending_tool_calls.insert(call_id.to_owned(), inserted);
+                self.tool_state.insert_pending(call_id.to_owned(), inserted);
             }
         } else if let Some(inserted) = self.insert_before_draft_block(block, cx) {
-            self.pending_tool_calls.insert(call_id.to_owned(), inserted);
+            self.tool_state.insert_pending(call_id.to_owned(), inserted);
         }
     }
 
@@ -1764,7 +1759,7 @@ impl TauGui {
         block: tau_cli_term::StyledBlock,
         cx: &mut Context<Self>,
     ) {
-        if let Some(inserted) = self.pending_tool_calls.remove(call_id) {
+        if let Some(inserted) = self.tool_state.take_pending(call_id) {
             self.replace_transcript_block(inserted, block, cx);
         } else {
             self.insert_before_draft_block(block, cx);
