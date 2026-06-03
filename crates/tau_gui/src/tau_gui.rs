@@ -2275,14 +2275,19 @@ impl TauGui {
     }
 
     fn status_left_chips(&self) -> Vec<status_line::Chip> {
+        let current_agent_active = self.agents.current_agent_id().is_some();
         status_line::left_chips(
             None,
-            if self.agents.current_agent_id().is_none() {
-                self.current_role.as_deref()
-            } else {
+            if current_agent_active {
                 None
+            } else {
+                self.current_role.as_deref()
             },
-            self.current_model.as_ref(),
+            if current_agent_active {
+                None
+            } else {
+                self.current_model.as_ref()
+            },
             self.baseline_params,
             self.current_params,
             self.role_state.default_effort(self.current_role.as_deref()),
