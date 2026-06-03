@@ -640,6 +640,7 @@ impl TauGui {
                 if let Some(agent_id) = &progress.agent_id {
                     self.agents.mark_live(agent_id.clone());
                 }
+                self.tool_state.record_delegate_progress(&progress);
                 let display = progress
                     .display
                     .clone()
@@ -1848,6 +1849,7 @@ impl TauGui {
     }
 
     fn record_main_tool_completed(&mut self, call_id: &str) {
+        self.tool_state.finish_call(call_id);
         self.main_tool_activity.record_completed(call_id);
     }
 
@@ -1874,7 +1876,9 @@ impl TauGui {
     }
 
     fn main_tools_status_chip(&self) -> Option<String> {
-        self.main_tool_activity.status_chip()
+        self.tool_state
+            .live_delegate_tools_status_chip()
+            .or_else(|| self.main_tool_activity.status_chip())
     }
 
     fn context_status_chip(&self) -> Option<String> {
