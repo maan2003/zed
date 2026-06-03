@@ -1519,11 +1519,7 @@ impl TauGui {
             };
             let status_suffix = if suspended { ":paused" } else { "" };
             let draft_suffix = if has_draft { "*" } else { "" };
-            let label = if selected {
-                format!("[@{agent_id}{status_suffix}{draft_suffix}]")
-            } else {
-                format!(" @{agent_id}{status_suffix}{draft_suffix} ")
-            };
+            let label = format!(" @{agent_id}{status_suffix}{draft_suffix} ");
             tabs.push(AgentTab {
                 agent_id: Some(agent_id),
                 label,
@@ -2298,7 +2294,11 @@ impl TauGui {
         status_line::left_chips(
             &self.session_id,
             None,
-            self.current_role.as_deref(),
+            if self.agents.current_agent_id().is_none() {
+                self.current_role.as_deref()
+            } else {
+                None
+            },
             self.current_model.as_ref(),
             self.baseline_params,
             self.current_params,
@@ -2425,7 +2425,7 @@ impl Render for TauGui {
                                     } else {
                                         text_style.color
                                     })
-                                    .font_weight(if tab.selected || tab.has_draft {
+                                    .font_weight(if tab.has_draft {
                                         FontWeight::BOLD
                                     } else {
                                         FontWeight::default()
