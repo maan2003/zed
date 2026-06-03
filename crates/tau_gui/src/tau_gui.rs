@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow};
@@ -27,6 +28,7 @@ mod activity_state;
 mod agent_state;
 mod cli_theme;
 mod commands;
+mod completion_state;
 mod prompt_state;
 mod role_state;
 mod shell_state;
@@ -38,6 +40,7 @@ mod transcript;
 use activity_state::MainToolActivity;
 use agent_state::{AgentContextUsage, AgentState};
 use commands::parse_role_setting_update;
+use completion_state::{CompletionCandidate, TauCompletionProvider, TauCompletionState};
 use prompt_state::PromptState;
 use role_state::RoleState;
 use shell_state::{ShellCommandState, ShellState};
@@ -254,6 +257,7 @@ struct TauGui {
     previous_provider_usage: Option<tau_proto::ProviderTokenUsage>,
     follow_tail: bool,
     agents: AgentState,
+    completion_state: Arc<Mutex<TauCompletionState>>,
 }
 
 impl TauGui {
@@ -267,6 +271,7 @@ impl TauGui {
         let prompt_start = prompt_buffer.read(cx).anchor_before(0);
         let prompt_end = prompt_start;
         let draft_end = prompt_buffer.read(cx).anchor_after(0);
+        let completion_state = Arc::new(Mutex::new(TauCompletionState::default()));
         let multi_buffer = cx.new(|cx| {
             let mut multi_buffer = MultiBuffer::without_headers(Capability::ReadWrite);
             multi_buffer.set_excerpts_for_path(
@@ -311,6 +316,9 @@ impl TauGui {
             editor.disable_header_for_buffer(transcript_buffer.read(cx).remote_id(), cx);
             editor.disable_header_for_buffer(prompt_buffer.read(cx).remote_id(), cx);
             editor.disable_expand_excerpt_buttons(cx);
+            editor.set_completion_provider(Some(Rc::new(TauCompletionProvider::new(
+                completion_state.clone(),
+            ))));
             editor
         });
         let this = cx.entity().downgrade();
@@ -421,6 +429,7 @@ impl TauGui {
             previous_provider_usage: None,
             follow_tail: true,
             agents: AgentState::default(),
+            completion_state,
         };
         this.update_prompt_inlay(cx);
         this.update_status_line(cx);
@@ -479,6 +488,7 @@ impl TauGui {
             self.agents.remember(agent_id);
         }
         self.agents.observe_event(&event);
+        self.refresh_agent_completions();
         if self.agents.current_agent_id() != previous_agent_id.as_deref() {
             self.apply_selected_agent_context_usage();
             self.update_status_line(cx);
@@ -957,6 +967,7 @@ impl TauGui {
             }
             Event::HarnessRolesAvailable(roles) => {
                 self.role_state.update_available(&roles);
+                self.refresh_role_completions(&roles);
                 self.update_status_line(cx);
             }
             Event::HarnessRoleSelected(selected) => {
@@ -1834,6 +1845,24 @@ impl TauGui {
         let inserted = self.transcript.replace_range_with_spans(range, spans, cx);
         cx.notify();
         inserted
+    }
+
+    fn refresh_agent_completions(&mut self) {
+        let (known_agents, live_agents, suspended_agents) = self.agents.completion_snapshot();
+        if let Ok(mut state) = self.completion_state.lock() {
+            state.set_agents(known_agents, live_agents, suspended_agents);
+        }
+    }
+
+    fn refresh_role_completions(&mut self, roles: &tau_proto::HarnessRolesAvailable) {
+        let candidates = roles
+            .roles
+            .iter()
+            .map(|role| CompletionCandidate::new(role.name.clone(), role.description.clone()))
+            .collect();
+        if let Ok(mut state) = self.completion_state.lock() {
+            state.set_roles(candidates);
+        }
     }
 
     fn update_status_line(&mut self, cx: &mut Context<Self>) {

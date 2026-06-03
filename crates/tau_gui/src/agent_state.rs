@@ -87,6 +87,14 @@ impl AgentState {
         self.live_agents.difference(&self.suspended_agents).count()
     }
 
+    pub(crate) fn completion_snapshot(&self) -> (Vec<String>, HashSet<String>, HashSet<String>) {
+        (
+            self.known_agents_sorted(),
+            self.live_agents.clone(),
+            self.suspended_agents.clone(),
+        )
+    }
+
     pub(crate) fn suspend(&mut self, agent_id: String) {
         self.suspended_agents.insert(agent_id);
     }
