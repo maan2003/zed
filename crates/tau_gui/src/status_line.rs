@@ -19,6 +19,8 @@ pub(crate) fn left_chips(
     current_model: Option<&tau_proto::ModelId>,
     baseline_params: Option<tau_proto::ModelParams>,
     current_params: tau_proto::ModelParams,
+    role_default_effort: Option<tau_proto::Effort>,
+    role_default_verbosity: Option<tau_proto::Verbosity>,
 ) -> Vec<Chip> {
     use tau_themes::names;
 
@@ -32,13 +34,13 @@ pub(crate) fn left_chips(
         }
         (None, None, None) => chips.push(Chip::new("no role selected", names::MODEL_STATUS)),
     }
-    if show_effort_status(baseline_params, current_params) {
+    if show_effort_status(baseline_params, current_params, role_default_effort) {
         chips.push(Chip::new(
             format!("^{}", current_params.effort.as_str()),
             names::STATUS_EFFORT,
         ));
     }
-    if show_verbosity_status(baseline_params, current_params) {
+    if show_verbosity_status(baseline_params, current_params, role_default_verbosity) {
         chips.push(Chip::new(
             format!("~{}", current_params.verbosity.as_str()),
             names::STATUS_VERBOSITY,
@@ -80,9 +82,14 @@ pub(crate) fn right_chips(
 fn show_effort_status(
     baseline_params: Option<tau_proto::ModelParams>,
     current_params: tau_proto::ModelParams,
+    role_default_effort: Option<tau_proto::Effort>,
 ) -> bool {
     baseline_params.map_or_else(
-        || !current_params.effort.is_default(),
+        || {
+            role_default_effort.map_or(!current_params.effort.is_default(), |default| {
+                current_params.effort != default
+            })
+        },
         |default| current_params.effort != default.effort,
     )
 }
@@ -90,9 +97,14 @@ fn show_effort_status(
 fn show_verbosity_status(
     baseline_params: Option<tau_proto::ModelParams>,
     current_params: tau_proto::ModelParams,
+    role_default_verbosity: Option<tau_proto::Verbosity>,
 ) -> bool {
     baseline_params.map_or_else(
-        || !current_params.verbosity.is_default(),
+        || {
+            role_default_verbosity.map_or(!current_params.verbosity.is_default(), |default| {
+                current_params.verbosity != default
+            })
+        },
         |default| current_params.verbosity != default.verbosity,
     )
 }

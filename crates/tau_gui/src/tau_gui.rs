@@ -28,6 +28,7 @@ mod agent_state;
 mod cli_theme;
 mod commands;
 mod prompt_state;
+mod role_state;
 mod socket_client;
 mod status_line;
 mod tool_render;
@@ -37,6 +38,7 @@ use activity_state::MainToolActivity;
 use agent_state::{AgentContextUsage, AgentState};
 use commands::parse_role_setting_update;
 use prompt_state::PromptState;
+use role_state::RoleState;
 use socket_client::{SocketEvent, Writer};
 use tool_state::ToolState;
 #[cfg(test)]
@@ -240,6 +242,7 @@ struct TauGui {
     current_model: Option<tau_proto::ModelId>,
     current_role: Option<String>,
     baseline_params: Option<ModelParams>,
+    role_state: RoleState,
     current_params: ModelParams,
     current_context_percent: Option<u8>,
     current_context_input_tokens: Option<u64>,
@@ -405,6 +408,7 @@ impl TauGui {
             current_model: None,
             current_role: None,
             baseline_params: None,
+            role_state: RoleState::default(),
             current_params: ModelParams::default(),
             current_context_percent: None,
             current_context_input_tokens: None,
@@ -910,6 +914,10 @@ impl TauGui {
             Event::HarnessInfo(info) => {
                 let block = tool_render::render_harness_info(&self.cli_theme, &info);
                 self.insert_before_draft_block(block, cx);
+            }
+            Event::HarnessRolesAvailable(roles) => {
+                self.role_state.update_available(&roles);
+                self.update_status_line(cx);
             }
             Event::HarnessRoleSelected(selected) => {
                 self.current_model = selected.model.clone();
@@ -1897,6 +1905,9 @@ impl TauGui {
             self.current_model.as_ref(),
             self.baseline_params,
             self.current_params,
+            self.role_state.default_effort(self.current_role.as_deref()),
+            self.role_state
+                .default_verbosity(self.current_role.as_deref()),
         )
     }
 
