@@ -29,10 +29,13 @@ mod cli_theme;
 mod commands;
 mod socket_client;
 mod tool_render;
-
+mod transcript;
 use agent_state::{AgentContextUsage, AgentState};
 use commands::parse_role_setting_update;
 use socket_client::{SocketEvent, Writer};
+#[cfg(test)]
+use transcript::buffer_range_starts_with;
+use transcript::{InsertedTranscript, Transcript};
 
 actions!(tau_gui, [SubmitPrompt]);
 
@@ -177,21 +180,6 @@ fn selection_outside_prompt(
     selection_offset < prompt_start || selection_offset > draft_end
 }
 
-fn buffer_range_starts_with(
-    buffer: &Buffer,
-    range: std::ops::Range<usize>,
-    character: char,
-) -> bool {
-    if range.start >= range.end {
-        return false;
-    }
-
-    buffer
-        .text_for_range(range)
-        .next()
-        .is_some_and(|text| text.starts_with(character))
-}
-
 #[cfg(test)]
 fn buffer_text_ends_with(buffer: &Buffer, end: usize, character: char) -> bool {
     if end == 0 {
@@ -202,12 +190,6 @@ fn buffer_text_ends_with(buffer: &Buffer, end: usize, character: char) -> bool {
         .text_for_range(0..end)
         .collect::<String>()
         .ends_with(character)
-}
-
-struct TranscriptRange {
-    range: std::ops::Range<text::Anchor>,
-    highlight_key: usize,
-    style: HighlightStyle,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -235,11 +217,6 @@ impl TranscriptStyle {
     }
 }
 
-struct InsertedTranscript {
-    range: std::ops::Range<text::Anchor>,
-    highlight_keys: Vec<usize>,
-}
-
 struct StatusChip {
     text: String,
     style_name: &'static str,
@@ -256,10 +233,9 @@ impl StatusChip {
 
 struct TauGui {
     editor: Entity<Editor>,
-    transcript_buffer: Entity<Buffer>,
     prompt_buffer: Entity<Buffer>,
     multi_buffer: Entity<MultiBuffer>,
-    transcript_end: text::Anchor,
+    transcript: Transcript,
     prompt_end: text::Anchor,
     draft_end: text::Anchor,
     writer: Option<Writer>,
@@ -271,10 +247,7 @@ struct TauGui {
     live_response_ranges: HashMap<String, InsertedTranscript>,
     live_compaction_ranges: HashMap<String, InsertedTranscript>,
     cli_theme: tau_themes::Theme,
-    transcript_ranges: Vec<TranscriptRange>,
-    next_highlight_key: usize,
     pending_tool_calls: HashMap<String, InsertedTranscript>,
-    retired_highlight_keys: Vec<usize>,
     current_model: Option<tau_proto::ModelId>,
     current_role: Option<String>,
     baseline_params: Option<ModelParams>,
@@ -299,7 +272,6 @@ impl TauGui {
             buffer
         });
         let prompt_buffer = cx.new(|cx| Buffer::local("", cx));
-        let transcript_end = transcript_buffer.read(cx).anchor_after(0);
         let prompt_start = prompt_buffer.read(cx).anchor_before(0);
         let prompt_end = prompt_start;
         let draft_end = prompt_buffer.read(cx).anchor_after(0);
@@ -427,12 +399,13 @@ impl TauGui {
                 }
             }
         });
+        let transcript =
+            Transcript::new(transcript_buffer, editor.clone(), multi_buffer.clone(), cx);
         let mut this = Self {
             editor,
-            transcript_buffer,
             prompt_buffer,
             multi_buffer,
-            transcript_end,
+            transcript,
             prompt_end,
             draft_end,
             writer,
@@ -444,10 +417,7 @@ impl TauGui {
             live_response_ranges: HashMap::default(),
             live_compaction_ranges: HashMap::default(),
             cli_theme: cli_theme::select_theme(tau_config::settings::CliTheme::Dark),
-            transcript_ranges: Vec::new(),
-            next_highlight_key: 0,
             pending_tool_calls: HashMap::default(),
-            retired_highlight_keys: Vec::new(),
             current_model: None,
             current_role: None,
             baseline_params: None,
@@ -1779,30 +1749,12 @@ impl TauGui {
         range: std::ops::Range<text::Anchor>,
         cx: &mut Context<Self>,
     ) {
-        self.transcript_buffer.update(cx, |buffer, cx| {
-            let start = range.start.to_offset(buffer);
-            let end = range.end.to_offset(buffer);
-            let old_transcript_end = self.transcript_end.to_offset(buffer);
-            let old_len = end.saturating_sub(start);
-            buffer.edit([(start..end, "")], None, cx);
-            let new_transcript_end = if old_transcript_end >= end {
-                old_transcript_end.saturating_sub(old_len)
-            } else if old_transcript_end >= start {
-                start
-            } else {
-                old_transcript_end
-            };
-            self.transcript_end = buffer.anchor_after(new_transcript_end);
-        });
-        self.apply_transcript_highlights(cx);
+        self.transcript.remove_range(range, cx);
         cx.notify();
     }
 
     fn remove_transcript_highlights(&mut self, highlight_keys: Vec<usize>) {
-        let highlight_keys = highlight_keys.into_iter().collect::<HashSet<_>>();
-        self.transcript_ranges
-            .retain(|range| !highlight_keys.contains(&range.highlight_key));
-        self.retired_highlight_keys.extend(highlight_keys);
+        self.transcript.remove_highlights(highlight_keys);
     }
 
     fn render_turn_stats(
@@ -1859,18 +1811,10 @@ impl TauGui {
         block: tau_cli_term::StyledBlock,
         cx: &mut Context<Self>,
     ) -> Option<InsertedTranscript> {
-        let old_highlight_keys = inserted.highlight_keys.into_iter().collect::<HashSet<_>>();
-        self.transcript_ranges
-            .retain(|range| !old_highlight_keys.contains(&range.highlight_key));
-        self.retired_highlight_keys.extend(old_highlight_keys);
+        self.remove_transcript_highlights(inserted.highlight_keys);
 
         let mut spans = Vec::new();
-        let starts_with_newline = {
-            let buffer = self.transcript_buffer.read(cx);
-            let start = inserted.range.start.to_offset(buffer);
-            let end = inserted.range.end.to_offset(buffer);
-            buffer_range_starts_with(buffer, start..end, '\n')
-        };
+        let starts_with_newline = self.transcript.range_starts_with(&inserted.range, '\n', cx);
         if starts_with_newline {
             spans.push(("\n", HighlightStyle::default()));
         }
@@ -1888,15 +1832,7 @@ impl TauGui {
     }
 
     fn transcript_trailing_newlines(&self, cx: &mut Context<Self>) -> usize {
-        let buffer = self.transcript_buffer.read(cx);
-        let transcript_end = self.transcript_end.to_offset(buffer);
-        buffer
-            .text_for_range(0..transcript_end)
-            .collect::<String>()
-            .chars()
-            .rev()
-            .take_while(|character| *character == '\n')
-            .count()
+        self.transcript.trailing_newlines(cx)
     }
 
     fn insert_before_draft_spans<'a>(
@@ -1904,43 +1840,9 @@ impl TauGui {
         spans: impl IntoIterator<Item = (&'a str, HighlightStyle)>,
         cx: &mut Context<Self>,
     ) -> Option<InsertedTranscript> {
-        let spans = spans
-            .into_iter()
-            .filter(|(text, _)| !text.is_empty())
-            .collect::<Vec<_>>();
-        if spans.is_empty() {
-            return None;
-        }
-        let text = spans.iter().map(|(text, _)| *text).collect::<String>();
-        let buffer = self.transcript_buffer.clone();
-        let inserted = buffer.update(cx, |buffer, cx| {
-            let offset = self.transcript_end.to_offset(buffer);
-            buffer.edit([(offset..offset, text.as_str())], None, cx);
-            let inserted_len = text.len();
-            let mut span_start = offset;
-            let mut highlight_keys = Vec::new();
-            for (span_text, style) in spans {
-                let span_end = span_start + span_text.len();
-                let highlight_key = self.next_highlight_key;
-                self.transcript_ranges.push(TranscriptRange {
-                    range: buffer.anchor_before(span_start)..buffer.anchor_before(span_end),
-                    highlight_key,
-                    style,
-                });
-                highlight_keys.push(highlight_key);
-                self.next_highlight_key = self.next_highlight_key.saturating_add(1);
-                span_start = span_end;
-            }
-            let end = offset + inserted_len;
-            self.transcript_end = buffer.anchor_after(end);
-            InsertedTranscript {
-                range: buffer.anchor_before(offset)..buffer.anchor_before(end),
-                highlight_keys,
-            }
-        });
-        self.apply_transcript_highlights(cx);
+        let inserted = self.transcript.insert_spans(spans, cx);
         cx.notify();
-        Some(inserted)
+        inserted
     }
 
     fn replace_transcript_range_with_spans<'a>(
@@ -1949,86 +1851,9 @@ impl TauGui {
         spans: impl IntoIterator<Item = (&'a str, HighlightStyle)>,
         cx: &mut Context<Self>,
     ) -> Option<InsertedTranscript> {
-        let spans = spans
-            .into_iter()
-            .filter(|(text, _)| !text.is_empty())
-            .collect::<Vec<_>>();
-        if spans.is_empty() {
-            return None;
-        }
-        let text = spans.iter().map(|(text, _)| *text).collect::<String>();
-        let buffer = self.transcript_buffer.clone();
-        let inserted = buffer.update(cx, |buffer, cx| {
-            let start = range.start.to_offset(buffer);
-            let end = range.end.to_offset(buffer);
-            let old_transcript_end = self.transcript_end.to_offset(buffer);
-            let old_len = end.saturating_sub(start);
-            let new_len = text.len();
-            buffer.edit([(start..end, text.as_str())], None, cx);
-            let mut span_start = start;
-            let mut highlight_keys = Vec::new();
-            for (span_text, style) in spans {
-                let span_end = span_start + span_text.len();
-                let highlight_key = self.next_highlight_key;
-                self.transcript_ranges.push(TranscriptRange {
-                    range: buffer.anchor_before(span_start)..buffer.anchor_before(span_end),
-                    highlight_key,
-                    style,
-                });
-                highlight_keys.push(highlight_key);
-                self.next_highlight_key = self.next_highlight_key.saturating_add(1);
-                span_start = span_end;
-            }
-            let new_transcript_end = if old_transcript_end >= end {
-                old_transcript_end - old_len + new_len
-            } else if old_transcript_end >= start {
-                start + new_len
-            } else {
-                old_transcript_end
-            };
-            self.transcript_end = buffer.anchor_after(new_transcript_end);
-            InsertedTranscript {
-                range: buffer.anchor_before(start)..buffer.anchor_before(start + new_len),
-                highlight_keys,
-            }
-        });
-        self.apply_transcript_highlights(cx);
+        let inserted = self.transcript.replace_range_with_spans(range, spans, cx);
         cx.notify();
-        Some(inserted)
-    }
-
-    fn apply_transcript_highlights(&mut self, cx: &mut Context<Self>) {
-        let snapshot = self.multi_buffer.read(cx).snapshot(cx);
-        let mut highlights = Vec::new();
-        for range in &self.transcript_ranges {
-            let Some(start) = snapshot.anchor_in_excerpt(range.range.start) else {
-                continue;
-            };
-            let Some(end) = snapshot.anchor_in_excerpt(range.range.end) else {
-                continue;
-            };
-            highlights.push((range.highlight_key, start..end, range.style));
-        }
-
-        let retired_highlight_keys = std::mem::take(&mut self.retired_highlight_keys);
-        self.editor.update(cx, |editor, cx| {
-            for highlight_key in retired_highlight_keys {
-                editor.highlight_text(
-                    editor::HighlightKey::SyntaxTreeView(highlight_key),
-                    Vec::new(),
-                    HighlightStyle::default(),
-                    cx,
-                );
-            }
-            for (highlight_key, range, style) in highlights {
-                editor.highlight_text(
-                    editor::HighlightKey::SyntaxTreeView(highlight_key),
-                    vec![range],
-                    style,
-                    cx,
-                );
-            }
-        });
+        inserted
     }
 
     fn update_status_line(&mut self, cx: &mut Context<Self>) {
