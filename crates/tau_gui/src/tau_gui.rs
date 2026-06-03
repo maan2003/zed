@@ -402,7 +402,6 @@ impl TauGui {
             cx,
         );
         this.focus_editor(window, cx);
-        this.pin_tail_to_bottom(cx);
         this
     }
 
@@ -580,6 +579,7 @@ impl TauGui {
             .anchor_in_excerpt(draft_end);
         if let Some(draft_anchor) = draft_anchor {
             editor.update(cx, |editor, cx| {
+                editor.set_autoscroll_pin(draft_anchor, AutoscrollStrategy::Bottom, cx);
                 editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
                     selections.select_anchor_ranges([draft_anchor..draft_anchor]);
                 });
