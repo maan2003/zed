@@ -51,7 +51,17 @@ use tool_state::ToolState;
 use transcript::buffer_range_starts_with;
 use transcript::{InsertedTranscript, Transcript};
 
-actions!(tau_gui, [SubmitPrompt, AgentPrevious, AgentNext, AgentNew]);
+actions!(
+    tau_gui,
+    [
+        SubmitPrompt,
+        AgentPrevious,
+        AgentNext,
+        AgentNew,
+        RolePrevious,
+        RoleNext
+    ]
+);
 
 fn main() {
     if let Err(error) = run() {
@@ -74,7 +84,9 @@ fn run() -> Result<()> {
 
             eprintln!("tau-gui: binding prompt actions in TauGui > Editor");
             cx.bind_keys([
-                KeyBinding::new("ctrl-enter", SubmitPrompt, Some("TauGui > Editor")),
+                KeyBinding::new("enter", SubmitPrompt, Some("TauGui > Editor")),
+                KeyBinding::new("shift-tab", RolePrevious, Some("TauGui > Editor")),
+                KeyBinding::new("tab", RoleNext, Some("TauGui > Editor")),
                 KeyBinding::new("ctrl-k", AgentPrevious, Some("TauGui > Editor")),
                 KeyBinding::new("ctrl-j", AgentNext, Some("TauGui > Editor")),
                 KeyBinding::new("ctrl-shift-n", AgentNew, Some("TauGui > Editor")),
@@ -489,6 +501,22 @@ impl TauGui {
                 }
             })
         });
+        let role_previous_subscription = editor.update(cx, |editor, _cx| {
+            let this = this.clone();
+            editor.register_action(move |_: &RolePrevious, _window, cx| {
+                if let Err(error) = this.update(cx, |this, cx| this.switch_role_by_delta(-1, cx)) {
+                    eprintln!("tau-gui: failed to switch to previous role: {error:#}");
+                }
+            })
+        });
+        let role_next_subscription = editor.update(cx, |editor, _cx| {
+            let this = this.clone();
+            editor.register_action(move |_: &RoleNext, _window, cx| {
+                if let Err(error) = this.update(cx, |this, cx| this.switch_role_by_delta(1, cx)) {
+                    eprintln!("tau-gui: failed to switch to next role: {error:#}");
+                }
+            })
+        });
         let agent_new_subscription = editor.update(cx, |editor, _cx| {
             let this = this.clone();
             editor.register_action(move |_: &AgentNew, window, cx| {
@@ -561,6 +589,8 @@ impl TauGui {
             draft_end,
             _subscriptions: vec![
                 submit_subscription,
+                role_previous_subscription,
+                role_next_subscription,
                 agent_previous_subscription,
                 agent_next_subscription,
                 agent_new_subscription,
@@ -1369,6 +1399,24 @@ impl TauGui {
             }),
             cx,
         )
+    }
+
+    fn switch_role_by_delta(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.agents.current_agent_id().is_some() {
+            return;
+        }
+        let Some(role) = self
+            .role_state
+            .role_by_delta(self.current_role.as_deref(), delta)
+        else {
+            self.insert_before_draft_styled(
+                "cycle-role: no agent roles are available yet\n",
+                TranscriptStyle::SystemInfo,
+                cx,
+            );
+            return;
+        };
+        self.select_role(&role, cx);
     }
 
     fn handle_agent_command(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
