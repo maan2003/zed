@@ -84,6 +84,11 @@ fn run() -> Result<()> {
 
             eprintln!("tau-gui: binding prompt actions in TauGui > Editor");
             cx.bind_keys([
+                KeyBinding::new(
+                    "shift-enter",
+                    editor::actions::Newline,
+                    Some("TauGui > Editor"),
+                ),
                 KeyBinding::new("enter", SubmitPrompt, Some("TauGui > Editor")),
                 KeyBinding::new("tab", RoleCycle, Some("TauGui > Editor")),
                 KeyBinding::new("shift-tab", RoleCycleGroup, Some("TauGui > Editor")),
