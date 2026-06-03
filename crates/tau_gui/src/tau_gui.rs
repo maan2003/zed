@@ -7,7 +7,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow};
 use editor::{
-    Editor, EditorMode, Inlay, RowExt, SelectionEffects, SizingBehavior, scroll::Autoscroll,
+    Editor, EditorEvent, EditorMode, Inlay, RowExt, SelectionEffects, SizingBehavior,
+    scroll::Autoscroll,
 };
 use gpui::{
     App, Context, Entity, Focusable as _, FontStyle, FontWeight, HighlightStyle, Hsla, KeyBinding,
@@ -473,6 +474,14 @@ impl TauGui {
             ))));
             editor
         });
+        let scroll_subscription = cx.subscribe(&editor, |this, editor, event, cx| {
+            if !matches!(event, EditorEvent::ScrollPositionChanged { .. }) {
+                return;
+            }
+            if editor.entity_id() == this.editor.entity_id() {
+                this.follow_tail = this.is_tail_visible(cx);
+            }
+        });
         let prompt_buffer_subscription = cx.subscribe(&prompt_buffer, |this, _, event, cx| {
             if matches!(event, BufferEvent::Edited { .. }) {
                 this.update_prompt_inlay(cx);
@@ -597,6 +606,7 @@ impl TauGui {
             transcript,
             prompt_end,
             draft_end,
+            follow_tail: true,
             _subscriptions: vec![
                 submit_subscription,
                 role_cycle_subscription,
@@ -605,8 +615,8 @@ impl TauGui {
                 agent_next_subscription,
                 agent_new_subscription,
                 prompt_buffer_subscription,
+                scroll_subscription,
             ],
-            follow_tail: true,
             prompt_state: PromptState::default(),
             tool_state: ToolState::default(),
             shell_state: ShellState::default(),
