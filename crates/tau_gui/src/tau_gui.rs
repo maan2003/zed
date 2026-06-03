@@ -42,7 +42,7 @@ use activity_state::MainToolActivity;
 use agent_state::{AgentContextUsage, AgentState};
 use commands::parse_role_setting_update;
 use completion_state::{CompletionCandidate, TauCompletionProvider, TauCompletionState};
-use prompt_state::PromptState;
+use prompt_state::{PromptState, QueuedPrompt};
 use role_state::RoleState;
 use shell_state::{ShellCommandState, ShellState};
 use socket_client::{SocketEvent, Writer};
@@ -645,18 +645,10 @@ impl TauGui {
             Event::AgentPromptSubmitted(prompt)
                 if prompt.originator.is_user() && !prompt.message_class.is_internal() =>
             {
-                self.insert_before_draft_styled(
-                    &format!("> {}\n", prompt.text),
-                    TranscriptStyle::UserPrompt,
-                    cx,
-                );
+                self.handle_submitted_user_prompt(&prompt.text, cx);
             }
             Event::AgentPromptQueued(queued) if !queued.message_class.is_internal() => {
-                self.insert_before_draft_styled(
-                    &format!("> {} (queued)\n", queued.text),
-                    TranscriptStyle::UserPromptQueued,
-                    cx,
-                );
+                self.handle_agent_prompt_queued(&queued.text, cx);
             }
             Event::AgentMessageSent(message) => {
                 self.insert_before_draft_styled(
@@ -756,6 +748,9 @@ impl TauGui {
                 self.ensure_transcript_gap(cx);
             }
             Event::AgentPromptRecalled(recalled) => {
+                if let Some(queued) = self.prompt_state.pop_back_queued_prompt() {
+                    self.remove_queued_prompt(queued, cx);
+                }
                 let agent_id = recalled.agent_id.to_string();
                 self.show_agent_transcript(Some(agent_id.clone()), window, cx);
                 self.agents.select(agent_id);
@@ -767,11 +762,10 @@ impl TauGui {
                 );
             }
             Event::AgentPromptSteered(steered) if !steered.message_class.is_internal() => {
-                self.insert_before_draft_styled(
-                    &format!("> {} (steered)\n", steered.text),
-                    TranscriptStyle::UserPromptQueued,
-                    cx,
-                );
+                self.handle_agent_prompt_steered(&steered.text, cx);
+            }
+            Event::AgentPromptCreated(_) => {
+                self.promote_next_queued_prompt(cx);
             }
             Event::AgentCompactionTriggered(triggered) if triggered.originator.is_user() => {
                 let block = tool_render::render_compaction_block(
@@ -1906,6 +1900,65 @@ impl TauGui {
         self.editor.update(cx, |editor, cx| {
             editor.request_autoscroll(Autoscroll::bottom().for_anchor(anchor), cx);
         });
+    }
+
+    fn handle_submitted_user_prompt(&mut self, text: &str, cx: &mut Context<Self>) {
+        if let Some(queued) = self.prompt_state.pop_matching_queued_prompt(text) {
+            let text = queued.text.clone();
+            self.remove_queued_prompt(queued, cx);
+            self.insert_before_draft_styled(
+                &format!("> {text}\n"),
+                TranscriptStyle::UserPrompt,
+                cx,
+            );
+            return;
+        }
+        self.insert_before_draft_styled(&format!("> {text}\n"), TranscriptStyle::UserPrompt, cx);
+    }
+
+    fn handle_agent_prompt_queued(&mut self, text: &str, cx: &mut Context<Self>) {
+        let style = self.highlight_style(TranscriptStyle::UserPromptQueued, cx);
+        if let Some(inserted) =
+            self.insert_before_draft_highlighted(&format!("> {text} (queued)\n"), style, cx)
+        {
+            self.prompt_state
+                .push_queued_prompt(text.to_owned(), inserted);
+        }
+    }
+
+    fn handle_agent_prompt_steered(&mut self, text: &str, cx: &mut Context<Self>) {
+        if let Some(queued) = self.prompt_state.pop_front_queued_prompt() {
+            let text = queued.text.clone();
+            self.remove_queued_prompt(queued, cx);
+            self.insert_before_draft_styled(
+                &format!("> {text}\n"),
+                TranscriptStyle::UserPrompt,
+                cx,
+            );
+        } else {
+            self.insert_before_draft_styled(
+                &format!("> {text}\n"),
+                TranscriptStyle::UserPrompt,
+                cx,
+            );
+        }
+    }
+
+    fn promote_next_queued_prompt(&mut self, cx: &mut Context<Self>) {
+        if let Some(queued) = self.prompt_state.pop_front_queued_prompt() {
+            let text = queued.text.clone();
+            self.remove_queued_prompt(queued, cx);
+            self.insert_before_draft_styled(
+                &format!("> {text}\n"),
+                TranscriptStyle::UserPrompt,
+                cx,
+            );
+        }
+    }
+
+    fn remove_queued_prompt(&mut self, queued: QueuedPrompt, cx: &mut Context<Self>) {
+        self.remove_transcript_highlights(queued.inserted.highlight_keys);
+        self.remove_transcript_range(queued.inserted.range, cx);
     }
 
     fn insert_before_draft_styled(

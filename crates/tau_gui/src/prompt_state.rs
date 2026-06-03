@@ -1,15 +1,44 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use crate::transcript::InsertedTranscript;
 
 #[derive(Default)]
 pub(crate) struct PromptState {
+    queued_prompts: VecDeque<QueuedPrompt>,
     streamed_responses: HashMap<String, String>,
     live_response_ranges: HashMap<String, InsertedTranscript>,
     live_compaction_ranges: HashMap<String, InsertedTranscript>,
 }
 
+pub(crate) struct QueuedPrompt {
+    pub(crate) text: String,
+    pub(crate) inserted: InsertedTranscript,
+}
+
 impl PromptState {
+    pub(crate) fn push_queued_prompt(&mut self, text: String, inserted: InsertedTranscript) {
+        self.queued_prompts
+            .push_back(QueuedPrompt { text, inserted });
+    }
+
+    pub(crate) fn pop_matching_queued_prompt(&mut self, text: &str) -> Option<QueuedPrompt> {
+        if self
+            .queued_prompts
+            .front()
+            .is_some_and(|queued| queued.text == text)
+        {
+            return self.queued_prompts.pop_front();
+        }
+        None
+    }
+
+    pub(crate) fn pop_front_queued_prompt(&mut self) -> Option<QueuedPrompt> {
+        self.queued_prompts.pop_front()
+    }
+
+    pub(crate) fn pop_back_queued_prompt(&mut self) -> Option<QueuedPrompt> {
+        self.queued_prompts.pop_back()
+    }
     pub(crate) fn record_streamed_response(&mut self, key: String, text: String) {
         self.streamed_responses.insert(key, text);
     }
