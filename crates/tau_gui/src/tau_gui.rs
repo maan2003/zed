@@ -155,6 +155,35 @@ const DEFAULT_TAU_GUI_SETTINGS: &str = r#"// Tau GUI user settings. Values here 
 {}
 "#;
 
+const STARTUP_PUNS: &[&str] = &[
+    "Tau is like Pi, but twice as much.",
+    "A whole new angle on coding agents.",
+    "Tau day is every day if you care about circles enough.",
+    "Come for the agent, stay for the circumference discourse.",
+    "Tau is the irrational choice for rational Unix hackers.",
+    "Small tools, loosely joined — that’s the Tau of Unix.",
+    "In Tau, what goes around comes around over stdio.",
+    "We’ve come full τurn.",
+    "Tau keeps the loop tight and the pipes honest.",
+    "Every extension gets its turn in Tau.",
+    "Tau speaks fluent stdio with a circular accent.",
+    "Agents, tools, sockets, loops: a well-rounded lineup.",
+    "Ready, set, Tau!",
+    "Tau day to code.",
+    "Tau-tau control.",
+    "Tau-tally operational.",
+    "Tau much power in one terminal.",
+    "Tau infinity and beyond.",
+    "Tau the line between human and agent.",
+    "Tau’s what I’m talking about.",
+    "One shell to Tau them all.",
+    "Tau-powered, Unix-native.",
+    "Complete revolution.",
+    "Wrapping around nicely.",
+    "Continuous on S¹, probably.",
+    "Cohomology remains left as exercise.",
+];
+
 fn tau_gui_settings_path() -> Result<PathBuf> {
     let config_dir = match std::env::var_os("XDG_CONFIG_HOME") {
         Some(config_home) => PathBuf::from(config_home),
@@ -360,9 +389,8 @@ impl TauGui {
         };
         this.update_prompt_inlay(cx);
         this.update_status_line(cx);
-        this.insert_before_draft_styled(
-            "Tau GUI attached. Type a prompt and press Ctrl-Enter.\n\n",
-            TranscriptStyle::SystemInfo,
+        this.insert_before_draft_block(
+            tau_cli_term::StyledBlock::new(build_banner(&this.cli_theme)),
             cx,
         );
         this.focus_editor(window, cx);
@@ -626,13 +654,6 @@ impl TauGui {
             Event::AgentPromptQueued(queued) if !queued.message_class.is_internal() => {
                 self.insert_before_draft_styled(
                     &format!("> {} (queued)\n", queued.text),
-                    TranscriptStyle::UserPromptQueued,
-                    cx,
-                );
-            }
-            Event::AgentUserMessageInjected(injected) if !injected.message_class.is_internal() => {
-                self.insert_before_draft_styled(
-                    &format!("> {} (injected)\n", injected.text),
                     TranscriptStyle::UserPromptQueued,
                     cx,
                 );
@@ -2385,6 +2406,45 @@ impl Render for TauGui {
                     ),
             )
     }
+}
+
+fn startup_pun() -> &'static str {
+    let index = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as usize % STARTUP_PUNS.len())
+        .unwrap_or(0);
+    STARTUP_PUNS[index]
+}
+
+fn build_label_parts() -> (String, String) {
+    let version = format!("tau {}", env!("CARGO_PKG_VERSION"));
+    let build = match tau_harness::version::build_last_modified() {
+        Some(date) => format!("({}, {})", tau_harness::version::build_revision(), date),
+        None => format!("({})", tau_harness::version::build_revision()),
+    };
+    (version, build)
+}
+
+fn build_banner(theme: &tau_themes::Theme) -> tau_cli_term::StyledText {
+    use tau_themes::names;
+
+    let logo = tau_cli_term::resolve::resolve(theme, names::BANNER_LOGO);
+    let name = tau_cli_term::resolve::resolve(theme, names::BANNER_NAME);
+    let version_style = tau_cli_term::resolve::resolve(theme, names::BANNER_VERSION);
+    let build_style = tau_cli_term::resolve::resolve(theme, names::BANNER_BUILD);
+    let pun_style = tau_cli_term::resolve::resolve(theme, names::BANNER_PUN);
+    let pun = startup_pun();
+    let (version, build) = build_label_parts();
+    tau_cli_term::StyledText::from(vec![
+        tau_cli_term::Span::new("▝▜▛▀ ", logo),
+        tau_cli_term::Span::new("tau", name),
+        tau_cli_term::Span::new(version.trim_start_matches("tau"), version_style),
+        tau_cli_term::Span::new(" ", Default::default()),
+        tau_cli_term::Span::new(build, build_style),
+        tau_cli_term::Span::new("\n", Default::default()),
+        tau_cli_term::Span::new(" ▐▙▖ ", logo),
+        tau_cli_term::Span::new(pun, pun_style),
+    ])
 }
 
 fn styled_status_text(
