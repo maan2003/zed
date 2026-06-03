@@ -282,7 +282,6 @@ struct AgentTab {
     label: String,
     selected: bool,
     suspended: bool,
-    has_draft: bool,
 }
 
 struct TauGui {
@@ -1499,33 +1498,18 @@ impl TauGui {
         self.show_current_transcript_buffer(cx);
     }
 
-    fn agent_ui_state_has_draft(&self, state: &AgentUiState, cx: &Context<Self>) -> bool {
-        let buffer = state.prompt_buffer.read(cx);
-        state.prompt_end.to_offset(buffer) != state.draft_end.to_offset(buffer)
-    }
-
-    fn agent_tabs(&self, cx: &mut Context<Self>) -> Vec<AgentTab> {
-        let visible_has_draft = !self.draft_is_empty(cx);
+    fn agent_tabs(&self) -> Vec<AgentTab> {
         let mut tabs = Vec::new();
         for agent_id in self.agents.known_agents_sorted() {
             let selected = self.agents.current_agent_id() == Some(agent_id.as_str());
             let suspended = self.agents.suspended(agent_id.as_str());
-            let has_draft = if self.displayed_agent_id.as_deref() == Some(agent_id.as_str()) {
-                visible_has_draft
-            } else {
-                self.agent_ui_states
-                    .get(agent_id.as_str())
-                    .is_some_and(|state| self.agent_ui_state_has_draft(state, cx))
-            };
             let status_suffix = if suspended { ":paused" } else { "" };
-            let draft_suffix = if has_draft { "*" } else { "" };
-            let label = format!(" @{agent_id}{status_suffix}{draft_suffix} ");
+            let label = format!("@{agent_id}{status_suffix} ");
             tabs.push(AgentTab {
                 agent_id: Some(agent_id),
                 label,
                 selected,
                 suspended,
-                has_draft,
             });
         }
         tabs
@@ -2292,7 +2276,6 @@ impl TauGui {
 
     fn status_left_chips(&self) -> Vec<status_line::Chip> {
         status_line::left_chips(
-            &self.session_id,
             None,
             if self.agents.current_agent_id().is_none() {
                 self.current_role.as_deref()
@@ -2370,7 +2353,7 @@ impl Render for TauGui {
             .update(cx, |editor, cx| editor.style(cx).text.clone());
         let status_left = styled_status_text(status_left, &text_style);
         let status_right = styled_status_text(status_right, &text_style);
-        let agent_tabs = self.agent_tabs(cx);
+        let agent_tabs = self.agent_tabs();
         let muted_color = cx.theme().colors().text_muted;
         let active_agent_color = self
             .highlight_style_for_name(tau_themes::names::STATUS_ROLE, cx)
@@ -2412,7 +2395,6 @@ impl Render for TauGui {
                         div()
                             .flex()
                             .items_center()
-                            .gap_1()
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .children(agent_tabs.into_iter().map(|tab| {
@@ -2424,11 +2406,6 @@ impl Render for TauGui {
                                         muted_color
                                     } else {
                                         text_style.color
-                                    })
-                                    .font_weight(if tab.has_draft {
-                                        FontWeight::BOLD
-                                    } else {
-                                        FontWeight::default()
                                     })
                                     .whitespace_nowrap()
                                     .cursor_pointer()

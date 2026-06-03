@@ -18,6 +18,10 @@ Completions should therefore be implemented through Zed editor completion provid
 
 When the protocol sends `ActionOutput::EditorBuffer`, `tau-gui` should treat it as a real GUI editor buffer/view instead of only rendering it as terminal transcript text. Text-only action output can still render into the transcript.
 
+## Status line hides session ids
+
+Unlike `tau-cli`, `tau-gui` intentionally omits the `&session` chip from the status line. The GUI attaches to the harness/session for the current project, does not support session switching yet, and uses the status line space for agent tabs and model/parameter status.
+
 ## No session switching for now
 
 `tau-gui` intentionally does not support session switching yet. It attaches to the harness/session for the current project and should avoid building session-switch UI until that becomes a deliberate GUI feature.

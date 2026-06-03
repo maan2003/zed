@@ -13,7 +13,6 @@ impl Chip {
 }
 
 pub(crate) fn left_chips(
-    session_id: &tau_proto::SessionId,
     current_agent_id: Option<&str>,
     current_role: Option<&str>,
     current_model: Option<&tau_proto::ModelId>,
@@ -25,7 +24,6 @@ pub(crate) fn left_chips(
     use tau_themes::names;
 
     let mut chips = Vec::new();
-    chips.push(Chip::new(format!("&{session_id}"), names::STATUS_SESSION));
     match (current_agent_id, current_role, current_model) {
         (Some(agent_id), _, _) => chips.push(Chip::new(format!("@{agent_id}"), names::STATUS_ROLE)),
         (None, Some(role), _) => chips.push(Chip::new(format!("+{role}"), names::STATUS_ROLE)),
