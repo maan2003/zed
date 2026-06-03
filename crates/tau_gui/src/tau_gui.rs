@@ -284,6 +284,7 @@ struct AgentUiState {
     transcript: Transcript,
     prompt_end: text::Anchor,
     draft_end: text::Anchor,
+    follow_tail: bool,
     _subscriptions: Vec<Subscription>,
     prompt_state: PromptState,
     tool_state: ToolState,
@@ -605,6 +606,7 @@ impl TauGui {
                 agent_new_subscription,
                 prompt_buffer_subscription,
             ],
+            follow_tail: true,
             prompt_state: PromptState::default(),
             tool_state: ToolState::default(),
             shell_state: ShellState::default(),
@@ -1492,6 +1494,7 @@ impl TauGui {
         std::mem::swap(&mut self.transcript, &mut state.transcript);
         std::mem::swap(&mut self.prompt_end, &mut state.prompt_end);
         std::mem::swap(&mut self.draft_end, &mut state.draft_end);
+        std::mem::swap(&mut self.follow_tail, &mut state.follow_tail);
         std::mem::swap(&mut self._subscriptions, &mut state._subscriptions);
         std::mem::swap(&mut self.prompt_state, &mut state.prompt_state);
         std::mem::swap(&mut self.tool_state, &mut state.tool_state);
@@ -1538,6 +1541,7 @@ impl TauGui {
         if self.displayed_agent_id == agent_id {
             return;
         }
+        self.refresh_follow_tail(cx);
         let previous_agent_id = std::mem::replace(&mut self.displayed_agent_id, agent_id.clone());
         let mut state = match &agent_id {
             Some(agent_id) => self.agent_ui_states.remove(agent_id),
@@ -1551,6 +1555,9 @@ impl TauGui {
             self.no_agent_ui_state = Some(state);
         }
         self.show_current_transcript_buffer(cx);
+        if self.follow_tail {
+            self.scroll_to_tail(window, cx);
+        }
     }
 
     fn agent_tabs(&self) -> Vec<status_line::AgentTab> {
