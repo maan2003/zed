@@ -83,16 +83,6 @@ impl AgentState {
         self.live_agents.difference(&self.suspended_agents).count()
     }
 
-    pub(crate) fn active_side_count(&self) -> usize {
-        self.live_agents
-            .iter()
-            .filter(|agent_id| {
-                self.current_agent_id.as_deref() != Some(agent_id.as_str())
-                    && !self.suspended_agents.contains(agent_id.as_str())
-            })
-            .count()
-    }
-
     pub(crate) fn suspend(&mut self, agent_id: String) {
         self.suspended_agents.insert(agent_id);
     }

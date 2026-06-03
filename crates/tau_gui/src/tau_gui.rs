@@ -28,6 +28,7 @@ mod agent_state;
 mod cli_theme;
 mod commands;
 mod socket_client;
+mod status_line;
 mod tool_render;
 mod transcript;
 use agent_state::{AgentContextUsage, AgentState};
@@ -216,21 +217,6 @@ impl TranscriptStyle {
         }
     }
 }
-
-struct StatusChip {
-    text: String,
-    style_name: &'static str,
-}
-
-impl StatusChip {
-    fn new(text: impl Into<String>, style_name: &'static str) -> Self {
-        Self {
-            text: text.into(),
-            style_name,
-        }
-    }
-}
-
 struct TauGui {
     editor: Entity<Editor>,
     prompt_buffer: Entity<Buffer>,
@@ -1870,7 +1856,11 @@ impl TauGui {
         )
     }
 
-    fn status_chip_spans(&self, chips: Vec<StatusChip>, cx: &App) -> Vec<(String, HighlightStyle)> {
+    fn status_chip_spans(
+        &self,
+        chips: Vec<status_line::Chip>,
+        cx: &App,
+    ) -> Vec<(String, HighlightStyle)> {
         let separator_style = self.highlight_style_for_name(tau_themes::names::MODEL_STATUS, cx);
         let mut spans = Vec::new();
         for (index, chip) in chips.into_iter().enumerate() {
@@ -1917,105 +1907,29 @@ impl TauGui {
         }
     }
 
-    fn status_left_chips(&self) -> Vec<StatusChip> {
-        use tau_themes::names;
-
-        let mut chips = Vec::new();
-        chips.push(StatusChip::new(
-            format!("&{}", self.session_id),
-            names::STATUS_SESSION,
-        ));
-        match (
+    fn status_left_chips(&self) -> Vec<status_line::Chip> {
+        status_line::left_chips(
+            &self.session_id,
             self.agents.current_agent_id(),
             self.current_role.as_deref(),
             self.current_model.as_ref(),
-        ) {
-            (Some(agent_id), _, _) => {
-                chips.push(StatusChip::new(format!("@{agent_id}"), names::STATUS_ROLE));
-            }
-            (None, Some(role), _) => {
-                chips.push(StatusChip::new(format!("+{role}"), names::STATUS_ROLE));
-            }
-            (None, None, Some(model)) => {
-                chips.push(StatusChip::new(format!("={model}"), names::STATUS_MODEL));
-            }
-            (None, None, None) => {
-                chips.push(StatusChip::new("no role selected", names::MODEL_STATUS));
-            }
-        }
-        if self.show_effort_status() {
-            chips.push(StatusChip::new(
-                format!("^{}", self.current_params.effort.as_str()),
-                names::STATUS_EFFORT,
-            ));
-        }
-        if self.show_verbosity_status() {
-            chips.push(StatusChip::new(
-                format!("~{}", self.current_params.verbosity.as_str()),
-                names::STATUS_VERBOSITY,
-            ));
-        }
-        if self.show_service_tier_status() {
-            let service_tier = self
-                .current_params
-                .service_tier
-                .map(|tier| tier.as_str())
-                .unwrap_or("off");
-            chips.push(StatusChip::new(
-                format!("!{service_tier}"),
-                names::STATUS_SERVICE_TIER,
-            ));
-        }
-        chips
-    }
-
-    fn status_right_chips(&self) -> Vec<StatusChip> {
-        use tau_themes::names;
-
-        let mut chips = Vec::new();
-        if (self.main_tools_visible || !self.main_backgrounded_tools.is_empty())
-            && self.main_tools_total != 0
-        {
-            chips.push(StatusChip::new(
-                format!("%{}/{}", self.main_tools_completed, self.main_tools_total),
-                names::STATUS_TOOLS,
-            ));
-        }
-        let active_side_agents = self.agents.active_side_count();
-        if active_side_agents > 0 {
-            chips.push(StatusChip::new(
-                format!("@{active_side_agents}"),
-                names::STATUS_AGENTS,
-            ));
-        }
-        if let Some(context) = self.context_status_chip() {
-            chips.push(StatusChip::new(
-                format!("#{context}"),
-                names::STATUS_CONTEXT,
-            ));
-        }
-        chips
-    }
-
-    fn show_effort_status(&self) -> bool {
-        self.baseline_params.map_or_else(
-            || !self.current_params.effort.is_default(),
-            |default| self.current_params.effort != default.effort,
+            self.baseline_params,
+            self.current_params,
         )
     }
 
-    fn show_verbosity_status(&self) -> bool {
-        self.baseline_params.map_or_else(
-            || !self.current_params.verbosity.is_default(),
-            |default| self.current_params.verbosity != default.verbosity,
+    fn status_right_chips(&self) -> Vec<status_line::Chip> {
+        status_line::right_chips(
+            self.main_tools_status_chip(),
+            self.agents.active_count(),
+            self.context_status_chip(),
         )
     }
 
-    fn show_service_tier_status(&self) -> bool {
-        self.baseline_params
-            .map_or(self.current_params.service_tier.is_some(), |default| {
-                self.current_params.service_tier != default.service_tier
-            })
+    fn main_tools_status_chip(&self) -> Option<String> {
+        ((self.main_tools_visible || !self.main_backgrounded_tools.is_empty())
+            && self.main_tools_total != 0)
+            .then(|| format!("{}/{}", self.main_tools_completed, self.main_tools_total))
     }
 
     fn context_status_chip(&self) -> Option<String> {
