@@ -28,6 +28,7 @@ mod activity_state;
 mod agent_state;
 mod cli_theme;
 mod commands;
+mod prompt_state;
 mod socket_client;
 mod status_line;
 mod tool_render;
@@ -35,6 +36,7 @@ mod transcript;
 use activity_state::MainToolActivity;
 use agent_state::{AgentContextUsage, AgentState};
 use commands::parse_role_setting_update;
+use prompt_state::PromptState;
 use socket_client::{SocketEvent, Writer};
 #[cfg(test)]
 use transcript::buffer_range_starts_with;
@@ -231,9 +233,7 @@ struct TauGui {
     _poll_task: Task<()>,
     _subscriptions: Vec<Subscription>,
     session_id: tau_proto::SessionId,
-    streamed_responses: HashMap<String, String>,
-    live_response_ranges: HashMap<String, InsertedTranscript>,
-    live_compaction_ranges: HashMap<String, InsertedTranscript>,
+    prompt_state: PromptState,
     cli_theme: tau_themes::Theme,
     pending_tool_calls: HashMap<String, InsertedTranscript>,
     current_model: Option<tau_proto::ModelId>,
@@ -398,9 +398,7 @@ impl TauGui {
             _poll_task: poll_task,
             _subscriptions: vec![submit_subscription, prompt_buffer_subscription],
             session_id: attach_target.session_id,
-            streamed_responses: HashMap::default(),
-            live_response_ranges: HashMap::default(),
-            live_compaction_ranges: HashMap::default(),
+            prompt_state: PromptState::default(),
             cli_theme: cli_theme::select_theme(tau_config::settings::CliTheme::Dark),
             pending_tool_calls: HashMap::default(),
             current_model: None,
@@ -528,14 +526,15 @@ impl TauGui {
                     cx,
                 );
                 let text = assistant_text_from_update(&update.items).unwrap_or_default();
-                self.streamed_responses.insert(key.clone(), text.clone());
+                self.prompt_state
+                    .record_streamed_response(key.clone(), text.clone());
                 self.upsert_live_response(key, text.as_str(), cx);
             }
             Event::ProviderResponseFinished(finished) if finished.originator.is_user() => {
                 let key = finished.agent_prompt_id.to_string();
                 self.remove_live_compaction(key.as_str(), cx);
                 if let Some(text) = assistant_text(&finished.output_items) {
-                    match self.streamed_responses.remove(&key) {
+                    match self.prompt_state.remove_streamed_response(&key) {
                         Some(_) | None => {
                             if !text.is_empty() {
                                 self.finalize_live_response(key.as_str(), &text, cx);
@@ -1610,26 +1609,26 @@ impl TauGui {
             .into_iter()
             .map(|(text, style)| (text.to_owned(), style))
             .collect::<Vec<_>>();
-        if let Some(inserted) = self.live_response_ranges.remove(&key) {
+        if let Some(inserted) = self.prompt_state.take_live_response(&key) {
             self.remove_transcript_highlights(inserted.highlight_keys);
             if let Some(inserted) = self.replace_transcript_range_with_spans(
                 inserted.range,
                 spans.iter().map(|(text, style)| (text.as_str(), *style)),
                 cx,
             ) {
-                self.live_response_ranges.insert(key, inserted);
+                self.prompt_state.insert_live_response(key, inserted);
             }
         } else if let Some(inserted) = self.insert_before_draft_spans(
             spans.iter().map(|(text, style)| (text.as_str(), *style)),
             cx,
         ) {
-            self.live_response_ranges.insert(key, inserted);
+            self.prompt_state.insert_live_response(key, inserted);
         }
     }
 
     fn finalize_live_response(&mut self, key: &str, text: &str, cx: &mut Context<Self>) {
         let style = self.highlight_style(TranscriptStyle::AgentResponse, cx);
-        if let Some(inserted) = self.live_response_ranges.remove(key) {
+        if let Some(inserted) = self.prompt_state.take_live_response(key) {
             self.remove_transcript_highlights(inserted.highlight_keys);
             self.replace_transcript_range_with_spans(inserted.range, [(text, style)], cx);
         } else {
@@ -1648,25 +1647,31 @@ impl TauGui {
             return;
         };
         let block = tool_render::render_compaction_block(&self.cli_theme, text, status);
-        if let Some(inserted) = self.live_compaction_ranges.remove(key) {
+        if let Some(inserted) = self.prompt_state.take_live_compaction(key) {
             if let Some(inserted) = self.replace_transcript_block(inserted, block, cx) {
-                self.live_compaction_ranges.insert(key.to_owned(), inserted);
+                self.prompt_state
+                    .insert_live_compaction(key.to_owned(), inserted);
             }
         } else if let Some(inserted) = self.insert_before_draft_block(block, cx) {
-            self.live_compaction_ranges.insert(key.to_owned(), inserted);
+            self.prompt_state
+                .insert_live_compaction(key.to_owned(), inserted);
         }
     }
 
     fn remove_live_compaction(&mut self, key: &str, cx: &mut Context<Self>) {
-        if let Some(inserted) = self.live_compaction_ranges.remove(key) {
+        if let Some(inserted) = self.prompt_state.take_live_compaction(key) {
             self.remove_transcript_highlights(inserted.highlight_keys);
             self.remove_transcript_range(inserted.range, cx);
         }
     }
 
     fn remove_live_response(&mut self, key: &str, cx: &mut Context<Self>) {
-        self.streamed_responses.remove(key);
-        if let Some(inserted) = self.live_response_ranges.remove(key) {
+        let cleanup = self.prompt_state.remove_prompt(key);
+        if let Some(inserted) = cleanup.live_compaction {
+            self.remove_transcript_highlights(inserted.highlight_keys);
+            self.remove_transcript_range(inserted.range, cx);
+        }
+        if let Some(inserted) = cleanup.live_response {
             self.remove_transcript_highlights(inserted.highlight_keys);
             self.remove_transcript_range(inserted.range, cx);
         }
