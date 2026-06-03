@@ -1,9 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufReader, BufWriter};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow};
@@ -20,9 +18,8 @@ use multi_buffer::{MultiBuffer, PathKey};
 use project::InlayId;
 use settings::SettingsStore;
 use tau_proto::{
-    CborValue, ClientKind, ContentPart, ContextItem, ContextRole, Event, EventSelector, Frame,
-    FrameReader, FrameWriter, Hello, Message, ModelParams, PROTOCOL_VERSION, PromptMessageClass,
-    PromptOriginator, Subscribe, ToolCallItem, UiPromptSubmitted,
+    CborValue, ContentPart, ContextItem, ContextRole, Event, Frame, Message, ModelParams,
+    PromptMessageClass, PromptOriginator, ToolCallItem, UiPromptSubmitted,
 };
 use text::ToOffset as _;
 use theme::ActiveTheme as _;
@@ -30,10 +27,12 @@ use theme::ActiveTheme as _;
 mod agent_state;
 mod cli_theme;
 mod commands;
+mod socket_client;
 mod tool_render;
 
 use agent_state::{AgentContextUsage, AgentState};
 use commands::parse_role_setting_update;
+use socket_client::{SocketEvent, Writer};
 
 actions!(tau_gui, [SubmitPrompt]);
 
@@ -204,8 +203,6 @@ fn buffer_text_ends_with(buffer: &Buffer, end: usize, character: char) -> bool {
         .collect::<String>()
         .ends_with(character)
 }
-
-type Writer = Arc<Mutex<FrameWriter<BufWriter<UnixStream>>>>;
 
 struct TranscriptRange {
     range: std::ops::Range<text::Anchor>,
@@ -409,7 +406,7 @@ impl TauGui {
         window.focus(&editor.focus_handle(cx), cx);
 
         let (tx, rx) = mpsc::channel();
-        let writer = match spawn_socket_client(attach_target.socket_path.clone(), tx) {
+        let writer = match socket_client::spawn(attach_target.socket_path.clone(), tx) {
             Ok(writer) => Some(writer),
             Err(error) => {
                 eprintln!("tau-gui: failed to connect to Tau harness: {error:#}");
@@ -1084,7 +1081,7 @@ impl TauGui {
             return false;
         };
         let frame = Frame::Event(event);
-        if let Err(error) = send_frame(writer, &frame) {
+        if let Err(error) = socket_client::send_frame(writer, &frame) {
             eprintln!("tau-gui: send failed: {error:#}");
             self.insert_before_draft_styled(
                 &format!("\n[send failed: {error}]\n"),
@@ -2310,74 +2307,6 @@ fn styled_status_text(
         }
     }
     StyledText::new(text).with_default_highlights(default_style, highlights)
-}
-
-enum SocketEvent {
-    Frame(Frame),
-    Disconnected(String),
-}
-
-fn spawn_socket_client(socket_path: PathBuf, tx: mpsc::Sender<SocketEvent>) -> Result<Writer> {
-    let stream = UnixStream::connect(&socket_path)
-        .with_context(|| format!("failed to connect to {}", socket_path.display()))?;
-    let read_stream = stream.try_clone().context("failed to clone socket")?;
-    let writer = Arc::new(Mutex::new(FrameWriter::new(BufWriter::new(stream))));
-
-    send_frame(
-        &writer,
-        &Frame::Message(Message::Hello(Hello {
-            protocol_version: PROTOCOL_VERSION,
-            client_name: "tau-gui".into(),
-            client_kind: ClientKind::Ui,
-        })),
-    )?;
-    send_frame(
-        &writer,
-        &Frame::Message(Message::Subscribe(Subscribe {
-            selectors: vec![
-                EventSelector::Prefix("ui.".to_owned()),
-                EventSelector::Prefix("session.".to_owned()),
-                EventSelector::Prefix("provider.".to_owned()),
-                EventSelector::Prefix("tool.".to_owned()),
-                EventSelector::Prefix("extension.".to_owned()),
-                EventSelector::Prefix("agent.".to_owned()),
-                EventSelector::Prefix("harness.".to_owned()),
-                EventSelector::Prefix("shell.".to_owned()),
-                EventSelector::Prefix("term.".to_owned()),
-            ],
-        })),
-    )?;
-
-    std::thread::spawn(move || {
-        let mut reader = FrameReader::new(BufReader::new(read_stream));
-        loop {
-            match reader.read_frame() {
-                Ok(Some(frame)) => {
-                    if tx.send(SocketEvent::Frame(frame)).is_err() {
-                        return;
-                    }
-                }
-                Ok(None) => {
-                    let _ = tx.send(SocketEvent::Disconnected("eof".to_owned()));
-                    return;
-                }
-                Err(error) => {
-                    let _ = tx.send(SocketEvent::Disconnected(error.to_string()));
-                    return;
-                }
-            }
-        }
-    });
-
-    Ok(writer)
-}
-
-fn send_frame(writer: &Writer, frame: &Frame) -> Result<()> {
-    let mut writer = writer
-        .lock()
-        .map_err(|_| anyhow!("socket writer mutex poisoned"))?;
-    writer.write_frame(frame).map_err(|error| anyhow!(error))?;
-    writer.flush().context("failed to flush socket frame")
 }
 
 fn tool_calls_from_output_items(output_items: &[ContextItem]) -> Vec<ToolCallItem> {
