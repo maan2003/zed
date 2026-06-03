@@ -471,7 +471,7 @@ impl TauGui {
 
     fn handle_event(&mut self, event: Event, cx: &mut Context<Self>) {
         let previous_agent_id = self.agents.current_agent_id_owned();
-        self.learn_agent_metadata(&event);
+        self.agents.observe_event(&event);
         if self.agents.current_agent_id() != previous_agent_id.as_deref() {
             self.apply_selected_agent_context_usage();
             self.update_status_line(cx);
@@ -954,52 +954,6 @@ impl TauGui {
                 self.previous_provider_usage = None;
                 self.agents.clear_context_usage();
                 self.update_status_line(cx);
-            }
-            _ => {}
-        }
-    }
-
-    fn learn_agent_metadata(&mut self, event: &Event) {
-        match event {
-            Event::AgentStarted(started) => self.agents.remember(started.agent_id.to_string()),
-            Event::SessionAgentLoaded(loaded) => self.agents.remember(loaded.agent_id.to_string()),
-            Event::SessionAgentUnloaded(unloaded) => {
-                self.agents.unload(unloaded.agent_id.as_str());
-            }
-            Event::UiPromptSubmitted(prompt) if prompt.originator.is_user() => {
-                self.agents.select(prompt.agent_id.to_string());
-            }
-            Event::AgentPromptSubmitted(prompt)
-                if prompt.originator.is_user() && !prompt.message_class.is_internal() =>
-            {
-                self.agents.select(prompt.agent_id.to_string());
-            }
-            Event::AgentPromptQueued(queued) if !queued.message_class.is_internal() => {
-                self.agents.select(queued.agent_id.to_string());
-            }
-            Event::AgentUserMessageInjected(injected) if !injected.message_class.is_internal() => {
-                self.agents.remember(injected.agent_id.to_string());
-            }
-            Event::AgentMessageSent(message) => {
-                self.agents.remember(message.sender_id.to_string());
-                if let Some(agent_id) = agent_message_sent_recipient_agent_id(message) {
-                    self.agents.remember(agent_id.to_owned());
-                }
-            }
-            Event::AgentMessageReceived(message) => {
-                self.agents.remember(message.sender_id.to_string());
-                self.agents.remember(message.recipient_id.to_string());
-            }
-            Event::ToolDelegateProgress(progress) => {
-                if let Some(agent_id) = &progress.agent_id {
-                    self.agents.mark_live(agent_id.clone());
-                }
-            }
-            Event::AgentPromptCreated(created) if created.originator.is_user() => {
-                self.agents.select(created.agent_id.to_string());
-            }
-            Event::ProviderResponseFinished(finished) if finished.originator.is_user() => {
-                self.agents.select(finished.agent_id.to_string());
             }
             _ => {}
         }
@@ -2193,13 +2147,6 @@ fn agent_message_sent_recipient_label(message: &tau_proto::AgentMessageSent) -> 
     match &message.recipient {
         tau_proto::AgentMessageRecipient::Agent { agent_id } => agent_id.as_str(),
         tau_proto::AgentMessageRecipient::User => "user",
-    }
-}
-
-fn agent_message_sent_recipient_agent_id(message: &tau_proto::AgentMessageSent) -> Option<&str> {
-    match &message.recipient {
-        tau_proto::AgentMessageRecipient::Agent { agent_id } => Some(agent_id.as_str()),
-        tau_proto::AgentMessageRecipient::User => None,
     }
 }
 

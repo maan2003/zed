@@ -106,4 +106,63 @@ impl AgentState {
     pub(crate) fn clear_context_usage(&mut self) {
         self.context_usage.clear();
     }
+
+    pub(crate) fn observe_event(&mut self, event: &tau_proto::Event) {
+        match event {
+            tau_proto::Event::AgentStarted(started) => self.remember(started.agent_id.to_string()),
+            tau_proto::Event::SessionAgentLoaded(loaded) => {
+                self.remember(loaded.agent_id.to_string())
+            }
+            tau_proto::Event::SessionAgentUnloaded(unloaded) => {
+                self.unload(unloaded.agent_id.as_str());
+            }
+            tau_proto::Event::UiPromptSubmitted(prompt) if prompt.originator.is_user() => {
+                self.select(prompt.agent_id.to_string());
+            }
+            tau_proto::Event::AgentPromptSubmitted(prompt)
+                if prompt.originator.is_user() && !prompt.message_class.is_internal() =>
+            {
+                self.select(prompt.agent_id.to_string());
+            }
+            tau_proto::Event::AgentPromptQueued(queued) if !queued.message_class.is_internal() => {
+                self.select(queued.agent_id.to_string());
+            }
+            tau_proto::Event::AgentUserMessageInjected(injected)
+                if !injected.message_class.is_internal() =>
+            {
+                self.remember(injected.agent_id.to_string());
+            }
+            tau_proto::Event::AgentMessageSent(message) => {
+                self.remember(message.sender_id.to_string());
+                if let Some(agent_id) = agent_message_sent_recipient_agent_id(message) {
+                    self.remember(agent_id.to_owned());
+                }
+            }
+            tau_proto::Event::AgentMessageReceived(message) => {
+                self.remember(message.sender_id.to_string());
+                self.remember(message.recipient_id.to_string());
+            }
+            tau_proto::Event::ToolDelegateProgress(progress) => {
+                if let Some(agent_id) = &progress.agent_id {
+                    self.mark_live(agent_id.clone());
+                }
+            }
+            tau_proto::Event::AgentPromptCreated(created) if created.originator.is_user() => {
+                self.select(created.agent_id.to_string());
+            }
+            tau_proto::Event::ProviderResponseFinished(finished)
+                if finished.originator.is_user() =>
+            {
+                self.select(finished.agent_id.to_string());
+            }
+            _ => {}
+        }
+    }
+}
+
+fn agent_message_sent_recipient_agent_id(message: &tau_proto::AgentMessageSent) -> Option<&str> {
+    match &message.recipient {
+        tau_proto::AgentMessageRecipient::Agent { agent_id } => Some(agent_id.as_str()),
+        tau_proto::AgentMessageRecipient::User => None,
+    }
 }
