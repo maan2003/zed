@@ -501,7 +501,7 @@ impl ScrollManager {
         };
 
         self.scroll_max_x.take();
-        if local && !autoscroll {
+        if local {
             let visible_line_count = self.visible_line_count;
             let scroll_position = adjusted_anchor.scroll_position(display_map);
             if let Some(pin) = &mut self.autoscroll_pin {

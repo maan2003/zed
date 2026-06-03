@@ -6,7 +6,7 @@ use crate::{
     element::{StickyHeader, header_jump_data},
     linked_editing_ranges::LinkedEditingRanges,
     runnables::RunnableTasks,
-    scroll::{AutoscrollStrategy, scroll_amount::ScrollAmount},
+    scroll::{Autoscroll, AutoscrollStrategy, scroll_amount::ScrollAmount},
     test::{
         assert_text_with_selections, build_editor, editor_content_with_blocks,
         editor_lsp_test_context::{EditorLspTestContext, git_commit_lang},
@@ -3198,9 +3198,25 @@ async fn test_autoscroll_pin_follows_target_until_user_scrolls_away(cx: &mut Tes
     assert_scrolled_to_bottom(&mut cx);
 
     cx.update_editor(|editor, window, cx| {
+        editor.change_selections(
+            SelectionEffects::scroll(Autoscroll::top()),
+            window,
+            cx,
+            |selections| {
+                selections.select_ranges([Point::zero()..Point::zero()]);
+            },
+        );
+    });
+    draw_editor(&mut cx);
+    assert_eq!(scroll_top(&mut cx), 0.);
+    append_to_buffer(&mut cx, "thirteen\nfourteen\n");
+    draw_editor(&mut cx);
+    assert_eq!(scroll_top(&mut cx), 0.);
+
+    cx.update_editor(|editor, window, cx| {
         editor.set_scroll_position(gpui::Point::new(0., 0.), window, cx);
     });
-    append_to_buffer(&mut cx, "thirteen\nfourteen\n");
+    append_to_buffer(&mut cx, "fifteen\nsixteen\n");
     draw_editor(&mut cx);
     assert_eq!(scroll_top(&mut cx), 0.);
 
@@ -3208,7 +3224,7 @@ async fn test_autoscroll_pin_follows_target_until_user_scrolls_away(cx: &mut Tes
     cx.update_editor(|editor, window, cx| {
         editor.set_scroll_position(gpui::Point::new(0., bottom), window, cx);
     });
-    append_to_buffer(&mut cx, "fifteen\nsixteen\n");
+    append_to_buffer(&mut cx, "seventeen\neighteen\n");
     draw_editor(&mut cx);
     assert_scrolled_to_bottom(&mut cx);
 }
