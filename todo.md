@@ -15,7 +15,7 @@ Remaining work to bring `tau-gui` closer to `tau-cli` while preserving GUI/edito
 - Finish command completion/parsing parity for `/set`, actions, shell shortcuts, and any remaining slash commands; root slash, `/agent`, `/model`, `/role`, and `@agent` mention completions now use Zed/editor completion primitives.
 - Mirror tau-cli command validation and help text more closely for `/agent`, `/model`, `/tree`, `/compact`, `/cancel`, and shell commands; `/role` selection/delete/settings parity is in place.
 - Add support for queued prompt recall from the GUI, including a keybinding or command that emits `UiRecallQueuedPrompt`.
-- Improve `/agent` listing/switch UX beyond plain text once GUI affordances exist.
+- Improve `/agent` listing/switch UX beyond plain text once GUI affordances exist; explicit switching now restores per-agent visible transcript state and `ctrl-k`/`ctrl-j` cycle active agents.
 - Add action-command invocation support if tau-cli exposes extension actions as slash commands in the current protocol.
 
 ## GUI-specific behavior
@@ -27,6 +27,7 @@ Remaining work to bring `tau-gui` closer to `tau-cli` while preserving GUI/edito
 ## State tracking
 
 - Track prompt ids, live responses, pending tools, background placeholders, and delegate children with the same lifecycle assumptions as tau-cli.
+- Route events for hidden agents through hidden `AgentUiState` instead of only swapping visible history on selection changes.
 - Track per-agent activity like tau-cli; per-agent context usage/status restoration is in place.
 - Track available models/roles/efforts/verbosities/thinking-summary options for status and deeper completion parity; role/model names and static setting values are now exposed through prompt completions.
 - Track extension action schemas for completions and command invocation.
