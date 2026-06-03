@@ -6,7 +6,7 @@ use crate::{
     element::{StickyHeader, header_jump_data},
     linked_editing_ranges::LinkedEditingRanges,
     runnables::RunnableTasks,
-    scroll::scroll_amount::ScrollAmount,
+    scroll::{AutoscrollStrategy, scroll_amount::ScrollAmount},
     test::{
         assert_text_with_selections, build_editor, editor_content_with_blocks,
         editor_lsp_test_context::{EditorLspTestContext, git_commit_lang},
@@ -3155,6 +3155,98 @@ async fn test_exclude_overscroll_margin_clamps_scroll_position(cx: &mut TestAppC
             gpui::Point::new(0., max_scroll_top)
         );
     });
+}
+
+#[gpui::test]
+async fn test_autoscroll_pin_follows_target_until_user_scrolls_away(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    update_test_editor_settings(cx, &|settings| {
+        settings.scroll_beyond_last_line = Some(ScrollBeyondLastLine::Off);
+    });
+
+    let mut cx = EditorTestContext::new(cx).await;
+    let line_height = cx.update_editor(|editor, window, cx| {
+        editor
+            .style(cx)
+            .text
+            .line_height_in_pixels(window.rem_size())
+    });
+    let window = cx.window;
+    cx.simulate_window_resize(window, size(px(1000.), 4. * line_height));
+    cx.set_state(
+        &r#"
+        ˇone
+        two
+        three
+        four
+        five
+        six
+        seven
+        eight
+        nine
+        ten
+        "#
+        .unindent(),
+    );
+
+    pin_to_buffer_end(&mut cx);
+    draw_editor(&mut cx);
+    assert_scrolled_to_bottom(&mut cx);
+
+    append_to_buffer(&mut cx, "eleven\ntwelve\n");
+    draw_editor(&mut cx);
+    assert_scrolled_to_bottom(&mut cx);
+
+    cx.update_editor(|editor, window, cx| {
+        editor.set_scroll_position(gpui::Point::new(0., 0.), window, cx);
+    });
+    append_to_buffer(&mut cx, "thirteen\nfourteen\n");
+    draw_editor(&mut cx);
+    assert_eq!(scroll_top(&mut cx), 0.);
+
+    let bottom = max_scroll_top(&mut cx);
+    cx.update_editor(|editor, window, cx| {
+        editor.set_scroll_position(gpui::Point::new(0., bottom), window, cx);
+    });
+    append_to_buffer(&mut cx, "fifteen\nsixteen\n");
+    draw_editor(&mut cx);
+    assert_scrolled_to_bottom(&mut cx);
+}
+
+fn pin_to_buffer_end(cx: &mut EditorTestContext) {
+    cx.update_editor(|editor, _, cx| {
+        let snapshot = editor.buffer().read(cx).snapshot(cx);
+        let anchor = snapshot.anchor_after(snapshot.max_point());
+        editor.set_autoscroll_pin(anchor, AutoscrollStrategy::Bottom, cx);
+    });
+}
+
+fn append_to_buffer(cx: &mut EditorTestContext, text: &str) {
+    cx.update_multibuffer(|buffer, cx| {
+        let end = buffer.len(cx);
+        buffer.edit([(end..end, text)], None, cx);
+    });
+}
+
+fn draw_editor(cx: &mut EditorTestContext) {
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+}
+
+fn scroll_top(cx: &mut EditorTestContext) -> f64 {
+    cx.update_editor(|editor, _, cx| editor.scroll_position(cx).y)
+}
+
+fn max_scroll_top(cx: &mut EditorTestContext) -> f64 {
+    cx.update_editor(|editor, window, cx| {
+        let snapshot = editor.snapshot(window, cx);
+        (snapshot.max_point().row().as_f64() - editor.visible_line_count().unwrap() + 1.).max(0.)
+    })
+}
+
+fn assert_scrolled_to_bottom(cx: &mut EditorTestContext) {
+    assert_eq!(scroll_top(cx), max_scroll_top(cx));
 }
 
 #[gpui::test]

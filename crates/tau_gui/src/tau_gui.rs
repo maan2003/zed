@@ -7,8 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow};
 use editor::{
-    Editor, EditorEvent, EditorMode, Inlay, RowExt, SelectionEffects, SizingBehavior,
-    scroll::Autoscroll,
+    Editor, EditorMode, Inlay, SelectionEffects, SizingBehavior, scroll::AutoscrollStrategy,
 };
 use gpui::{
     App, Context, Entity, Focusable as _, FontStyle, FontWeight, HighlightStyle, Hsla, KeyBinding,
@@ -285,7 +284,6 @@ struct AgentUiState {
     transcript: Transcript,
     prompt_end: text::Anchor,
     draft_end: text::Anchor,
-    follow_tail: bool,
     _subscriptions: Vec<Subscription>,
     prompt_state: PromptState,
     tool_state: ToolState,
@@ -323,7 +321,6 @@ struct TauGui {
     current_context_window: Option<u64>,
     main_tool_activity: MainToolActivity,
     previous_provider_usage: Option<tau_proto::ProviderTokenUsage>,
-    follow_tail: bool,
     agents: AgentState,
     completion_state: Arc<Mutex<TauCompletionState>>,
     displayed_agent_id: Option<String>,
@@ -392,7 +389,6 @@ impl TauGui {
             current_context_window: None,
             main_tool_activity: MainToolActivity::default(),
             previous_provider_usage: None,
-            follow_tail: true,
             agents: AgentState::default(),
             completion_state,
             displayed_agent_id: None,
@@ -406,7 +402,7 @@ impl TauGui {
             cx,
         );
         this.focus_editor(window, cx);
-        this.scroll_to_tail(window, cx);
+        this.pin_tail_to_bottom(cx);
         this
     }
 
@@ -473,14 +469,6 @@ impl TauGui {
                 completion_state.clone(),
             ))));
             editor
-        });
-        let scroll_subscription = cx.subscribe(&editor, |this, editor, event, cx| {
-            if !matches!(event, EditorEvent::ScrollPositionChanged { .. }) {
-                return;
-            }
-            if editor.entity_id() == this.editor.entity_id() {
-                this.follow_tail = this.is_tail_visible(cx);
-            }
         });
         let prompt_buffer_subscription = cx.subscribe(&prompt_buffer, |this, _, event, cx| {
             if matches!(event, BufferEvent::Edited { .. }) {
@@ -606,7 +594,6 @@ impl TauGui {
             transcript,
             prompt_end,
             draft_end,
-            follow_tail: true,
             _subscriptions: vec![
                 submit_subscription,
                 role_cycle_subscription,
@@ -615,7 +602,6 @@ impl TauGui {
                 agent_next_subscription,
                 agent_new_subscription,
                 prompt_buffer_subscription,
-                scroll_subscription,
             ],
             prompt_state: PromptState::default(),
             tool_state: ToolState::default(),
@@ -629,8 +615,6 @@ impl TauGui {
     }
 
     fn drain_socket_events(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.refresh_follow_tail(cx);
-        let should_follow_tail = self.follow_tail;
         while let Ok(event) = self.rx.try_recv() {
             match event {
                 SocketEvent::Frame(frame) => self.handle_frame(frame, window, cx),
@@ -642,10 +626,6 @@ impl TauGui {
                     );
                 }
             }
-        }
-        if should_follow_tail {
-            self.follow_tail = true;
-            self.scroll_to_tail(window, cx);
         }
     }
 
@@ -1504,7 +1484,6 @@ impl TauGui {
         std::mem::swap(&mut self.transcript, &mut state.transcript);
         std::mem::swap(&mut self.prompt_end, &mut state.prompt_end);
         std::mem::swap(&mut self.draft_end, &mut state.draft_end);
-        std::mem::swap(&mut self.follow_tail, &mut state.follow_tail);
         std::mem::swap(&mut self._subscriptions, &mut state._subscriptions);
         std::mem::swap(&mut self.prompt_state, &mut state.prompt_state);
         std::mem::swap(&mut self.tool_state, &mut state.tool_state);
@@ -1551,7 +1530,6 @@ impl TauGui {
         if self.displayed_agent_id == agent_id {
             return;
         }
-        self.refresh_follow_tail(cx);
         let previous_agent_id = std::mem::replace(&mut self.displayed_agent_id, agent_id.clone());
         let mut state = match &agent_id {
             Some(agent_id) => self.agent_ui_states.remove(agent_id),
@@ -1565,9 +1543,6 @@ impl TauGui {
             self.no_agent_ui_state = Some(state);
         }
         self.show_current_transcript_buffer(cx);
-        if self.follow_tail {
-            self.scroll_to_tail(window, cx);
-        }
     }
 
     fn agent_tabs(&self) -> Vec<status_line::AgentTab> {
@@ -1760,8 +1735,7 @@ impl TauGui {
             self.draft_end = buffer.anchor_after(start);
         });
         self.move_cursor_to_prompt_end(window, cx);
-        self.follow_tail = true;
-        self.scroll_to_tail(window, cx);
+        self.pin_tail_to_bottom(cx);
         cx.notify();
     }
 
@@ -1923,31 +1897,14 @@ impl TauGui {
             .anchor_in_excerpt(anchor)
     }
 
-    fn refresh_follow_tail(&mut self, cx: &mut Context<Self>) {
-        self.follow_tail = self.is_tail_visible(cx);
-    }
-
-    fn is_tail_visible(&self, cx: &mut Context<Self>) -> bool {
-        self.editor.update(cx, |editor, cx| {
-            let Some(visible_lines) = editor.visible_line_count() else {
-                return true;
-            };
-            let snapshot = editor.display_snapshot(cx);
-            let scroll_top = editor.scroll_position(cx).y;
-            let max_scroll_top = (snapshot.max_point().row().as_f64() - visible_lines + 1.).max(0.);
-            scroll_top >= max_scroll_top - 1.
-        })
-    }
-
-    fn scroll_to_tail(&self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn pin_tail_to_bottom(&self, cx: &mut Context<Self>) {
         let Some(anchor) = self.anchor_in_excerpt(self.draft_end, cx) else {
             return;
         };
         self.editor.update(cx, |editor, cx| {
-            editor.request_autoscroll(Autoscroll::bottom().for_anchor(anchor), cx);
+            editor.set_autoscroll_pin(anchor, AutoscrollStrategy::Bottom, cx);
         });
     }
-
     fn handle_submitted_user_prompt(&mut self, text: &str, cx: &mut Context<Self>) {
         if let Some(queued) = self.prompt_state.pop_matching_queued_prompt(text) {
             let text = queued.text.clone();
