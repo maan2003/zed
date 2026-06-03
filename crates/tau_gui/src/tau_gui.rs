@@ -51,7 +51,7 @@ use tool_state::ToolState;
 use transcript::buffer_range_starts_with;
 use transcript::{InsertedTranscript, Transcript};
 
-actions!(tau_gui, [SubmitPrompt, AgentPrevious, AgentNext]);
+actions!(tau_gui, [SubmitPrompt, AgentPrevious, AgentNext, AgentNew]);
 
 fn main() {
     if let Err(error) = run() {
@@ -77,6 +77,7 @@ fn run() -> Result<()> {
                 KeyBinding::new("ctrl-enter", SubmitPrompt, Some("TauGui > Editor")),
                 KeyBinding::new("ctrl-k", AgentPrevious, Some("TauGui > Editor")),
                 KeyBinding::new("ctrl-j", AgentNext, Some("TauGui > Editor")),
+                KeyBinding::new("ctrl-shift-n", AgentNew, Some("TauGui > Editor")),
             ]);
             cx.activate(true);
 
@@ -364,8 +365,7 @@ impl TauGui {
             TranscriptStyle::SystemInfo,
             cx,
         );
-        window.focus(&this.editor.focus_handle(cx), cx);
-        this.move_cursor_to_prompt_end(window, cx);
+        this.focus_editor(window, cx);
         this.scroll_to_tail(window, cx);
         this
     }
@@ -468,6 +468,17 @@ impl TauGui {
                 }
             })
         });
+        let agent_new_subscription = editor.update(cx, |editor, _cx| {
+            let this = this.clone();
+            editor.register_action(move |_: &AgentNew, window, cx| {
+                if let Err(error) = this.update(cx, |this, cx| {
+                    this.clear_selected_agent(window, cx);
+                    this.focus_editor(window, cx);
+                }) {
+                    eprintln!("tau-gui: failed to start a new agent draft: {error:#}");
+                }
+            })
+        });
         editor.update(cx, |editor, cx| {
             let this = this.clone();
             editor.set_prepare_for_insert(
@@ -507,6 +518,17 @@ impl TauGui {
                 cx,
             );
         });
+        let draft_anchor = multi_buffer
+            .read(cx)
+            .snapshot(cx)
+            .anchor_in_excerpt(draft_end);
+        if let Some(draft_anchor) = draft_anchor {
+            editor.update(cx, |editor, cx| {
+                editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+                    selections.select_anchor_ranges([draft_anchor..draft_anchor]);
+                });
+            });
+        }
         let transcript =
             Transcript::new(transcript_buffer, editor.clone(), multi_buffer.clone(), cx);
         AgentUiState {
@@ -520,6 +542,7 @@ impl TauGui {
                 submit_subscription,
                 agent_previous_subscription,
                 agent_next_subscription,
+                agent_new_subscription,
                 prompt_buffer_subscription,
             ],
             prompt_state: PromptState::default(),
@@ -587,6 +610,7 @@ impl TauGui {
             self.apply_selected_agent_context_usage();
             self.update_status_line(cx);
             self.update_prompt_inlay(cx);
+            self.focus_editor(window, cx);
         }
         match event {
             Event::UiPromptSubmitted(_) => {}
@@ -1468,19 +1492,6 @@ impl TauGui {
     fn agent_tabs(&self, cx: &mut Context<Self>) -> Vec<AgentTab> {
         let visible_has_draft = !self.draft_is_empty(cx);
         let mut tabs = Vec::new();
-        tabs.push(AgentTab {
-            agent_id: None,
-            label: "+ new".to_owned(),
-            selected: self.agents.current_agent_id().is_none(),
-            suspended: false,
-            has_draft: if self.displayed_agent_id.is_none() {
-                visible_has_draft
-            } else {
-                self.no_agent_ui_state
-                    .as_ref()
-                    .is_some_and(|state| self.agent_ui_state_has_draft(state, cx))
-            },
-        });
         for agent_id in self.agents.known_agents_sorted() {
             let selected = self.agents.current_agent_id() == Some(agent_id.as_str());
             let suspended = self.agents.suspended(agent_id.as_str());
@@ -1491,13 +1502,13 @@ impl TauGui {
                     .get(agent_id.as_str())
                     .is_some_and(|state| self.agent_ui_state_has_draft(state, cx))
             };
-            let mut label = format!("@{agent_id}");
-            if suspended {
-                label.push_str(" paused");
-            }
-            if has_draft {
-                label.push('*');
-            }
+            let status_suffix = if suspended { ":paused" } else { "" };
+            let draft_suffix = if has_draft { "*" } else { "" };
+            let label = if selected {
+                format!("[@{agent_id}{status_suffix}{draft_suffix}]")
+            } else {
+                format!(" @{agent_id}{status_suffix}{draft_suffix} ")
+            };
             tabs.push(AgentTab {
                 agent_id: Some(agent_id),
                 label,
@@ -1530,6 +1541,7 @@ impl TauGui {
         self.agents.clear_current_agent();
         self.update_status_line(cx);
         self.update_prompt_inlay(cx);
+        self.focus_editor(window, cx);
     }
 
     fn switch_agent(&mut self, target: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
@@ -1569,6 +1581,7 @@ impl TauGui {
         self.apply_selected_agent_context_usage();
         self.update_status_line(cx);
         self.update_prompt_inlay(cx);
+        self.focus_editor(window, cx);
     }
 
     fn switch_agent_by_delta(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
@@ -1588,6 +1601,7 @@ impl TauGui {
         self.apply_selected_agent_context_usage();
         self.update_status_line(cx);
         self.update_prompt_inlay(cx);
+        self.focus_editor(window, cx);
     }
 
     fn suspend_agent(&mut self, target: Option<&str>, cx: &mut Context<Self>) {
@@ -1647,6 +1661,7 @@ impl TauGui {
         self.apply_selected_agent_context_usage();
         self.update_status_line(cx);
         self.update_prompt_inlay(cx);
+        self.focus_editor(window, cx);
     }
 
     fn send_shell_command(
@@ -1748,6 +1763,10 @@ impl TauGui {
         eprintln!("tau-gui: prompt frame sent");
 
         self.clear_prompt_draft(window, cx);
+    }
+
+    fn focus_editor(&self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.editor.focus_handle(cx), cx);
     }
 
     fn move_cursor_to_prompt_end(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2278,10 +2297,6 @@ impl Render for TauGui {
         let status_left = styled_status_text(status_left, &text_style);
         let status_right = styled_status_text(status_right, &text_style);
         let agent_tabs = self.agent_tabs(cx);
-        let border_color = cx.theme().colors().border_variant;
-        let active_tab_background = cx.theme().colors().element_selected;
-        let inactive_tab_background = cx.theme().colors().element_background;
-        let hover_tab_background = cx.theme().colors().element_hover;
         let muted_color = cx.theme().colors().text_muted;
 
         div()
@@ -2300,53 +2315,44 @@ impl Render for TauGui {
                     .overflow_hidden()
                     .child(self.editor.clone()),
             )
-            .child(
-                div()
-                    .id("tau-gui-agent-tabs")
-                    .w_full()
-                    .flex_none()
-                    .flex()
-                    .gap_1()
-                    .overflow_x_scroll()
-                    .py_1()
-                    .font_family(text_style.font_family.clone())
-                    .text_size(text_style.font_size)
-                    .line_height(text_style.line_height)
-                    .children(agent_tabs.into_iter().map(|tab| {
-                        let agent_id = tab.agent_id.clone();
-                        div()
-                            .px_2()
-                            .py_1()
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(border_color)
-                            .bg(if tab.selected {
-                                active_tab_background
-                            } else {
-                                inactive_tab_background
-                            })
-                            .text_color(if tab.suspended {
-                                muted_color
-                            } else {
-                                text_style.color
-                            })
-                            .font_weight(if tab.selected || tab.has_draft {
-                                FontWeight::BOLD
-                            } else {
-                                FontWeight::default()
-                            })
-                            .whitespace_nowrap()
-                            .cursor_pointer()
-                            .hover(move |style| style.bg(hover_tab_background))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, window, cx| {
-                                    this.switch_to_agent_tab(agent_id.clone(), window, cx);
-                                }),
-                            )
-                            .child(tab.label)
-                    })),
-            )
+            .when(!agent_tabs.is_empty(), |this| {
+                this.child(
+                    div()
+                        .id("tau-gui-agent-tabs")
+                        .w_full()
+                        .flex_none()
+                        .flex()
+                        .gap_1()
+                        .overflow_x_scroll()
+                        .py_1()
+                        .font_family(text_style.font_family.clone())
+                        .text_size(text_style.font_size)
+                        .line_height(text_style.line_height)
+                        .children(agent_tabs.into_iter().map(|tab| {
+                            let agent_id = tab.agent_id.clone();
+                            div()
+                                .text_color(if tab.suspended {
+                                    muted_color
+                                } else {
+                                    text_style.color
+                                })
+                                .font_weight(if tab.selected || tab.has_draft {
+                                    FontWeight::BOLD
+                                } else {
+                                    FontWeight::default()
+                                })
+                                .whitespace_nowrap()
+                                .cursor_pointer()
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, window, cx| {
+                                        this.switch_to_agent_tab(agent_id.clone(), window, cx);
+                                    }),
+                                )
+                                .child(tab.label)
+                        })),
+                )
+            })
             .child(
                 div()
                     .id("tau-gui-status")
