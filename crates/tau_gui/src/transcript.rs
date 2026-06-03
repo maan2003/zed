@@ -46,10 +46,6 @@ impl Transcript {
         }
     }
 
-    pub(crate) fn buffer(&self) -> Entity<Buffer> {
-        self.buffer.clone()
-    }
-
     pub(crate) fn refresh_highlights<T>(&mut self, cx: &mut Context<T>) {
         self.apply_highlights(cx);
     }

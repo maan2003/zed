@@ -11,8 +11,8 @@ use editor::{
 };
 use gpui::{
     App, Context, Entity, Focusable as _, FontStyle, FontWeight, HighlightStyle, Hsla, KeyBinding,
-    MouseButton, Rgba, StyledText, Subscription, Task, TextStyle, Window, WindowOptions, actions,
-    div, prelude::*, px,
+    MouseButton, Rgba, StyledText, Subscription, Task, TextStyle, WeakEntity, Window,
+    WindowOptions, actions, div, prelude::*, px,
 };
 use language::{Buffer, BufferEvent, Capability, Point};
 use multi_buffer::{MultiBuffer, PathKey};
@@ -231,8 +231,13 @@ impl TranscriptStyle {
     }
 }
 struct AgentUiState {
+    editor: Entity<Editor>,
+    prompt_buffer: Entity<Buffer>,
+    multi_buffer: Entity<MultiBuffer>,
     transcript: Transcript,
-    draft_text: String,
+    prompt_end: text::Anchor,
+    draft_end: text::Anchor,
+    _subscriptions: Vec<Subscription>,
     prompt_state: PromptState,
     tool_state: ToolState,
     shell_state: ShellState,
@@ -242,7 +247,6 @@ struct AgentUiState {
     current_context_input_tokens: Option<u64>,
     current_context_window: Option<u64>,
 }
-
 struct AgentTab {
     agent_id: Option<String>,
     label: String,
@@ -287,6 +291,91 @@ struct TauGui {
 
 impl TauGui {
     fn new(attach_target: AttachTarget, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let completion_state = Arc::new(Mutex::new(TauCompletionState::default()));
+        let this = cx.entity().downgrade();
+        let ui_state = Self::new_agent_ui_state(this, completion_state.clone(), window, cx);
+        let editor = ui_state.editor.clone();
+        let prompt_buffer = ui_state.prompt_buffer.clone();
+        let multi_buffer = ui_state.multi_buffer.clone();
+        let transcript = ui_state.transcript;
+        let prompt_end = ui_state.prompt_end;
+        let draft_end = ui_state.draft_end;
+        let ui_subscriptions = ui_state._subscriptions;
+
+        let (tx, rx) = mpsc::channel();
+        let writer = match socket_client::spawn(attach_target.socket_path.clone(), tx) {
+            Ok(writer) => Some(writer),
+            Err(error) => {
+                eprintln!("tau-gui: failed to connect to Tau harness: {error:#}");
+                None
+            }
+        };
+
+        let poll_task = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(30))
+                    .await;
+                if this
+                    .update_in(cx, |this, window, cx| this.drain_socket_events(window, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let mut this = Self {
+            editor,
+            prompt_buffer,
+            multi_buffer,
+            transcript,
+            prompt_end,
+            draft_end,
+            writer,
+            rx,
+            _poll_task: poll_task,
+            _subscriptions: ui_subscriptions,
+            session_id: attach_target.session_id,
+            prompt_state: PromptState::default(),
+            cli_theme: cli_theme::select_theme(tau_config::settings::CliTheme::Dark),
+            tool_state: ToolState::default(),
+            shell_state: ShellState::default(),
+            current_model: None,
+            current_role: None,
+            baseline_params: None,
+            role_state: RoleState::default(),
+            current_params: ModelParams::default(),
+            current_context_percent: None,
+            current_context_input_tokens: None,
+            current_context_window: None,
+            main_tool_activity: MainToolActivity::default(),
+            previous_provider_usage: None,
+            follow_tail: true,
+            agents: AgentState::default(),
+            completion_state,
+            displayed_agent_id: None,
+            no_agent_ui_state: None,
+            agent_ui_states: HashMap::new(),
+        };
+        this.update_prompt_inlay(cx);
+        this.update_status_line(cx);
+        this.insert_before_draft_styled(
+            "Tau GUI attached. Type a prompt and press Ctrl-Enter.\n\n",
+            TranscriptStyle::SystemInfo,
+            cx,
+        );
+        window.focus(&this.editor.focus_handle(cx), cx);
+        this.move_cursor_to_prompt_end(window, cx);
+        this.scroll_to_tail(window, cx);
+        this
+    }
+
+    fn new_agent_ui_state(
+        this: WeakEntity<Self>,
+        completion_state: Arc<Mutex<TauCompletionState>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AgentUiState {
         let transcript_buffer = cx.new(|cx| {
             let mut buffer = Buffer::local("", cx);
             buffer.set_capability(Capability::Read, cx);
@@ -296,7 +385,6 @@ impl TauGui {
         let prompt_start = prompt_buffer.read(cx).anchor_before(0);
         let prompt_end = prompt_start;
         let draft_end = prompt_buffer.read(cx).anchor_after(0);
-        let completion_state = Arc::new(Mutex::new(TauCompletionState::default()));
         let multi_buffer = cx.new(|cx| {
             let mut multi_buffer = MultiBuffer::without_headers(Capability::ReadWrite);
             multi_buffer.set_excerpts_for_path(
@@ -346,7 +434,6 @@ impl TauGui {
             ))));
             editor
         });
-        let this = cx.entity().downgrade();
         let prompt_buffer_subscription = cx.subscribe(&prompt_buffer, |this, _, event, cx| {
             if matches!(event, BufferEvent::Edited { .. }) {
                 this.update_prompt_inlay(cx);
@@ -363,16 +450,20 @@ impl TauGui {
         });
         let agent_previous_subscription = editor.update(cx, |editor, _cx| {
             let this = this.clone();
-            editor.register_action(move |_: &AgentPrevious, _window, cx| {
-                if let Err(error) = this.update(cx, |this, cx| this.switch_agent_by_delta(-1, cx)) {
+            editor.register_action(move |_: &AgentPrevious, window, cx| {
+                if let Err(error) =
+                    this.update(cx, |this, cx| this.switch_agent_by_delta(-1, window, cx))
+                {
                     eprintln!("tau-gui: failed to switch to previous agent: {error:#}");
                 }
             })
         });
         let agent_next_subscription = editor.update(cx, |editor, _cx| {
             let this = this.clone();
-            editor.register_action(move |_: &AgentNext, _window, cx| {
-                if let Err(error) = this.update(cx, |this, cx| this.switch_agent_by_delta(1, cx)) {
+            editor.register_action(move |_: &AgentNext, window, cx| {
+                if let Err(error) =
+                    this.update(cx, |this, cx| this.switch_agent_by_delta(1, window, cx))
+                {
                     eprintln!("tau-gui: failed to switch to next agent: {error:#}");
                 }
             })
@@ -416,80 +507,30 @@ impl TauGui {
                 cx,
             );
         });
-        window.focus(&editor.focus_handle(cx), cx);
-
-        let (tx, rx) = mpsc::channel();
-        let writer = match socket_client::spawn(attach_target.socket_path.clone(), tx) {
-            Ok(writer) => Some(writer),
-            Err(error) => {
-                eprintln!("tau-gui: failed to connect to Tau harness: {error:#}");
-                None
-            }
-        };
-
-        let poll_task = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(30))
-                    .await;
-                if this
-                    .update_in(cx, |this, window, cx| this.drain_socket_events(window, cx))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
         let transcript =
             Transcript::new(transcript_buffer, editor.clone(), multi_buffer.clone(), cx);
-        let mut this = Self {
+        AgentUiState {
             editor,
             prompt_buffer,
             multi_buffer,
             transcript,
             prompt_end,
             draft_end,
-            writer,
-            rx,
-            _poll_task: poll_task,
             _subscriptions: vec![
                 submit_subscription,
                 agent_previous_subscription,
                 agent_next_subscription,
                 prompt_buffer_subscription,
             ],
-            session_id: attach_target.session_id,
             prompt_state: PromptState::default(),
-            cli_theme: cli_theme::select_theme(tau_config::settings::CliTheme::Dark),
             tool_state: ToolState::default(),
             shell_state: ShellState::default(),
-            current_model: None,
-            current_role: None,
-            baseline_params: None,
-            role_state: RoleState::default(),
-            current_params: ModelParams::default(),
+            main_tool_activity: MainToolActivity::default(),
+            previous_provider_usage: None,
             current_context_percent: None,
             current_context_input_tokens: None,
             current_context_window: None,
-            main_tool_activity: MainToolActivity::default(),
-            previous_provider_usage: None,
-            follow_tail: true,
-            agents: AgentState::default(),
-            completion_state,
-            displayed_agent_id: None,
-            no_agent_ui_state: None,
-            agent_ui_states: HashMap::new(),
-        };
-        this.update_prompt_inlay(cx);
-        this.update_status_line(cx);
-        this.insert_before_draft_styled(
-            "Tau GUI attached. Type a prompt and press Ctrl-Enter.\n\n",
-            TranscriptStyle::SystemInfo,
-            cx,
-        );
-        this.move_cursor_to_prompt_end(window, cx);
-        this.scroll_to_tail(window, cx);
-        this
+        }
     }
 
     fn drain_socket_events(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -497,7 +538,7 @@ impl TauGui {
         let should_follow_tail = self.follow_tail;
         while let Ok(event) = self.rx.try_recv() {
             match event {
-                SocketEvent::Frame(frame) => self.handle_frame(frame, cx),
+                SocketEvent::Frame(frame) => self.handle_frame(frame, window, cx),
                 SocketEvent::Disconnected(reason) => {
                     self.insert_before_draft_styled(
                         &format!("\n[disconnected: {reason}]\n"),
@@ -513,10 +554,10 @@ impl TauGui {
         }
     }
 
-    fn handle_frame(&mut self, frame: Frame, cx: &mut Context<Self>) {
+    fn handle_frame(&mut self, frame: Frame, window: &mut Window, cx: &mut Context<Self>) {
         let (_log_id, frame) = frame.peel_log();
         match frame {
-            Frame::Event(event) => self.handle_event(event, cx),
+            Frame::Event(event) => self.handle_event(event, window, cx),
             Frame::Message(Message::Disconnect(disconnect)) => {
                 self.insert_before_draft_styled(
                     &format!(
@@ -531,7 +572,7 @@ impl TauGui {
         }
     }
 
-    fn handle_event(&mut self, event: Event, cx: &mut Context<Self>) {
+    fn handle_event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
         let previous_agent_id = self.agents.current_agent_id_owned();
         if let Some(agent_id) = self.agents.agent_id_for_event(&event) {
             self.agents.remember(agent_id);
@@ -541,7 +582,7 @@ impl TauGui {
         if self.agents.current_agent_id() != previous_agent_id.as_deref() {
             let current_agent_id = self.agents.current_agent_id_owned();
             if self.displayed_agent_id != current_agent_id {
-                self.show_agent_transcript(current_agent_id, cx);
+                self.show_agent_transcript(current_agent_id, window, cx);
             }
             self.apply_selected_agent_context_usage();
             self.update_status_line(cx);
@@ -670,7 +711,9 @@ impl TauGui {
                 self.ensure_transcript_gap(cx);
             }
             Event::AgentPromptRecalled(recalled) => {
-                self.agents.select(recalled.agent_id.to_string());
+                let agent_id = recalled.agent_id.to_string();
+                self.show_agent_transcript(Some(agent_id.clone()), window, cx);
+                self.agents.select(agent_id);
                 self.replace_draft_text(&recalled.text, cx);
                 self.insert_before_draft_styled(
                     "> recalled queued prompt for editing\n",
@@ -1106,7 +1149,28 @@ impl TauGui {
         true
     }
 
-    fn handle_prompt_command(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+    fn is_prompt_command(text: &str) -> bool {
+        text == "/cancel"
+            || text == "/tree"
+            || text.starts_with("/tree ")
+            || text == "/compact"
+            || text.starts_with("/compact ")
+            || text == "/new"
+            || text == "/agent"
+            || text.starts_with("/agent ")
+            || text == "/model"
+            || text.starts_with("/model ")
+            || text == "/role"
+            || text.starts_with("/role ")
+            || text.starts_with('!')
+    }
+
+    fn handle_prompt_command(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if text == "/cancel" {
             return self.send_command_event(
                 Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
@@ -1162,11 +1226,11 @@ impl TauGui {
             return true;
         }
         if text == "/new" {
-            self.clear_selected_agent(cx);
+            self.clear_selected_agent(window, cx);
             return true;
         }
         if text == "/agent" || text.starts_with("/agent ") {
-            self.handle_agent_command(text, cx);
+            self.handle_agent_command(text, window, cx);
             return true;
         }
         if let Some(role) = text.strip_prefix("/model ") {
@@ -1275,7 +1339,7 @@ impl TauGui {
         )
     }
 
-    fn handle_agent_command(&mut self, text: &str, cx: &mut Context<Self>) {
+    fn handle_agent_command(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         let rest = text.strip_prefix("/agent").unwrap_or("").trim();
         if rest.is_empty() {
             let current = self.agents.current_agent_id().unwrap_or("none");
@@ -1314,12 +1378,12 @@ impl TauGui {
                         cx,
                     );
                 } else {
-                    self.clear_selected_agent(cx);
+                    self.clear_selected_agent(window, cx);
                 }
             }
-            "switch" => self.switch_agent(target, cx),
+            "switch" => self.switch_agent(target, window, cx),
             "suspend" => self.suspend_agent(target, cx),
-            "resume" => self.resume_agent(target, cx),
+            "resume" => self.resume_agent(target, window, cx),
             _ => self.insert_before_draft_styled(
                 "/agent <new|switch|suspend|resume> [agent_id]; use /agent switch <agent_id>\n",
                 TranscriptStyle::SystemInfo,
@@ -1328,101 +1392,81 @@ impl TauGui {
         }
     }
 
-    fn empty_transcript(&self, cx: &mut Context<Self>) -> Transcript {
-        let buffer = cx.new(|cx| {
-            let mut buffer = Buffer::local("", cx);
-            buffer.set_capability(Capability::Read, cx);
-            buffer
-        });
-        Transcript::new(buffer, self.editor.clone(), self.multi_buffer.clone(), cx)
-    }
-
-    fn take_visible_agent_ui_state(&mut self, cx: &mut Context<Self>) -> AgentUiState {
-        let draft_text = self.draft_text(cx);
-        let replacement = self.empty_transcript(cx);
-        AgentUiState {
-            transcript: std::mem::replace(&mut self.transcript, replacement),
-            draft_text,
-            prompt_state: std::mem::take(&mut self.prompt_state),
-            tool_state: std::mem::take(&mut self.tool_state),
-            shell_state: std::mem::take(&mut self.shell_state),
-            main_tool_activity: std::mem::take(&mut self.main_tool_activity),
-            previous_provider_usage: self.previous_provider_usage.take(),
-            current_context_percent: self.current_context_percent.take(),
-            current_context_input_tokens: self.current_context_input_tokens.take(),
-            current_context_window: self.current_context_window.take(),
-        }
-    }
-
-    fn restore_visible_agent_ui_state(&mut self, state: AgentUiState, cx: &mut Context<Self>) {
-        self.transcript = state.transcript;
-        self.prompt_state = state.prompt_state;
-        self.tool_state = state.tool_state;
-        self.shell_state = state.shell_state;
-        self.main_tool_activity = state.main_tool_activity;
-        self.previous_provider_usage = state.previous_provider_usage;
-        self.current_context_percent = state.current_context_percent;
-        self.current_context_input_tokens = state.current_context_input_tokens;
-        self.current_context_window = state.current_context_window;
-        self.show_current_transcript_buffer(cx);
-        self.replace_draft_text(&state.draft_text, cx);
+    fn swap_visible_agent_ui_state(&mut self, state: &mut AgentUiState) {
+        std::mem::swap(&mut self.editor, &mut state.editor);
+        std::mem::swap(&mut self.prompt_buffer, &mut state.prompt_buffer);
+        std::mem::swap(&mut self.multi_buffer, &mut state.multi_buffer);
+        std::mem::swap(&mut self.transcript, &mut state.transcript);
+        std::mem::swap(&mut self.prompt_end, &mut state.prompt_end);
+        std::mem::swap(&mut self.draft_end, &mut state.draft_end);
+        std::mem::swap(&mut self._subscriptions, &mut state._subscriptions);
+        std::mem::swap(&mut self.prompt_state, &mut state.prompt_state);
+        std::mem::swap(&mut self.tool_state, &mut state.tool_state);
+        std::mem::swap(&mut self.shell_state, &mut state.shell_state);
+        std::mem::swap(&mut self.main_tool_activity, &mut state.main_tool_activity);
+        std::mem::swap(
+            &mut self.previous_provider_usage,
+            &mut state.previous_provider_usage,
+        );
+        std::mem::swap(
+            &mut self.current_context_percent,
+            &mut state.current_context_percent,
+        );
+        std::mem::swap(
+            &mut self.current_context_input_tokens,
+            &mut state.current_context_input_tokens,
+        );
+        std::mem::swap(
+            &mut self.current_context_window,
+            &mut state.current_context_window,
+        );
     }
 
     fn show_current_transcript_buffer(&mut self, cx: &mut Context<Self>) {
-        let transcript_buffer = self.transcript.buffer();
-        self.multi_buffer.update(cx, |multi_buffer, cx| {
-            multi_buffer.set_excerpts_for_path(
-                PathKey::sorted(0),
-                transcript_buffer.clone(),
-                [Point::zero()..transcript_buffer.read(cx).max_point()],
-                0,
-                cx,
-            );
-        });
         self.transcript.refresh_highlights(cx);
         cx.notify();
     }
 
-    fn store_visible_agent_ui_state(&mut self, cx: &mut Context<Self>) {
-        let state = self.take_visible_agent_ui_state(cx);
-        if let Some(agent_id) = self.displayed_agent_id.clone() {
-            self.agent_ui_states.insert(agent_id, state);
-        } else {
-            self.no_agent_ui_state = Some(state);
-        }
+    fn empty_agent_ui_state(&self, window: &mut Window, cx: &mut Context<Self>) -> AgentUiState {
+        Self::new_agent_ui_state(
+            cx.entity().downgrade(),
+            self.completion_state.clone(),
+            window,
+            cx,
+        )
     }
 
-    fn empty_agent_ui_state(&self, cx: &mut Context<Self>) -> AgentUiState {
-        AgentUiState {
-            transcript: self.empty_transcript(cx),
-            draft_text: String::new(),
-            prompt_state: PromptState::default(),
-            tool_state: ToolState::default(),
-            shell_state: ShellState::default(),
-            main_tool_activity: MainToolActivity::default(),
-            previous_provider_usage: None,
-            current_context_percent: None,
-            current_context_input_tokens: None,
-            current_context_window: None,
-        }
-    }
-
-    fn show_agent_transcript(&mut self, agent_id: Option<String>, cx: &mut Context<Self>) {
+    fn show_agent_transcript(
+        &mut self,
+        agent_id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.displayed_agent_id == agent_id {
             return;
         }
-        self.store_visible_agent_ui_state(cx);
-        let state = match &agent_id {
+        let previous_agent_id = std::mem::replace(&mut self.displayed_agent_id, agent_id.clone());
+        let mut state = match &agent_id {
             Some(agent_id) => self.agent_ui_states.remove(agent_id),
             None => self.no_agent_ui_state.take(),
         }
-        .unwrap_or_else(|| self.empty_agent_ui_state(cx));
-        self.displayed_agent_id = agent_id;
-        self.restore_visible_agent_ui_state(state, cx);
+        .unwrap_or_else(|| self.empty_agent_ui_state(window, cx));
+        self.swap_visible_agent_ui_state(&mut state);
+        if let Some(previous_agent_id) = previous_agent_id {
+            self.agent_ui_states.insert(previous_agent_id, state);
+        } else {
+            self.no_agent_ui_state = Some(state);
+        }
+        self.show_current_transcript_buffer(cx);
+    }
+
+    fn agent_ui_state_has_draft(&self, state: &AgentUiState, cx: &Context<Self>) -> bool {
+        let buffer = state.prompt_buffer.read(cx);
+        state.prompt_end.to_offset(buffer) != state.draft_end.to_offset(buffer)
     }
 
     fn agent_tabs(&self, cx: &mut Context<Self>) -> Vec<AgentTab> {
-        let visible_draft_text = self.draft_text(cx);
+        let visible_has_draft = !self.draft_is_empty(cx);
         let mut tabs = Vec::new();
         tabs.push(AgentTab {
             agent_id: None,
@@ -1430,22 +1474,22 @@ impl TauGui {
             selected: self.agents.current_agent_id().is_none(),
             suspended: false,
             has_draft: if self.displayed_agent_id.is_none() {
-                !visible_draft_text.is_empty()
+                visible_has_draft
             } else {
                 self.no_agent_ui_state
                     .as_ref()
-                    .is_some_and(|state| !state.draft_text.is_empty())
+                    .is_some_and(|state| self.agent_ui_state_has_draft(state, cx))
             },
         });
         for agent_id in self.agents.known_agents_sorted() {
             let selected = self.agents.current_agent_id() == Some(agent_id.as_str());
             let suspended = self.agents.suspended(agent_id.as_str());
             let has_draft = if self.displayed_agent_id.as_deref() == Some(agent_id.as_str()) {
-                !visible_draft_text.is_empty()
+                visible_has_draft
             } else {
                 self.agent_ui_states
                     .get(agent_id.as_str())
-                    .is_some_and(|state| !state.draft_text.is_empty())
+                    .is_some_and(|state| self.agent_ui_state_has_draft(state, cx))
             };
             let mut label = format!("@{agent_id}");
             if suspended {
@@ -1473,22 +1517,22 @@ impl TauGui {
     ) {
         match agent_id {
             Some(agent_id) if self.agents.suspended(agent_id.as_str()) => {
-                self.resume_agent(Some(agent_id.as_str()), cx)
+                self.resume_agent(Some(agent_id.as_str()), window, cx)
             }
-            Some(agent_id) => self.switch_agent(Some(agent_id.as_str()), cx),
-            None => self.clear_selected_agent(cx),
+            Some(agent_id) => self.switch_agent(Some(agent_id.as_str()), window, cx),
+            None => self.clear_selected_agent(window, cx),
         }
         window.focus(&self.editor.focus_handle(cx), cx);
     }
 
-    fn clear_selected_agent(&mut self, cx: &mut Context<Self>) {
-        self.show_agent_transcript(None, cx);
+    fn clear_selected_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_agent_transcript(None, window, cx);
         self.agents.clear_current_agent();
         self.update_status_line(cx);
         self.update_prompt_inlay(cx);
     }
 
-    fn switch_agent(&mut self, target: Option<&str>, cx: &mut Context<Self>) {
+    fn switch_agent(&mut self, target: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(agent_id) = target
             .map(str::trim)
             .filter(|agent_id| !agent_id.is_empty())
@@ -1501,7 +1545,7 @@ impl TauGui {
             return;
         };
         if agent_id == "none" {
-            self.clear_selected_agent(cx);
+            self.clear_selected_agent(window, cx);
             return;
         }
         if !self.agents.known(agent_id) {
@@ -1520,14 +1564,14 @@ impl TauGui {
             );
             return;
         }
-        self.show_agent_transcript(Some(agent_id.to_owned()), cx);
+        self.show_agent_transcript(Some(agent_id.to_owned()), window, cx);
         self.agents.select(agent_id.to_owned());
         self.apply_selected_agent_context_usage();
         self.update_status_line(cx);
         self.update_prompt_inlay(cx);
     }
 
-    fn switch_agent_by_delta(&mut self, delta: isize, cx: &mut Context<Self>) {
+    fn switch_agent_by_delta(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(agent_id) = self.agents.next_active_agent(delta) else {
             self.insert_before_draft_styled(
                 "agent-switch: no active agents available yet\n",
@@ -1539,7 +1583,7 @@ impl TauGui {
         if self.agents.current_agent_id() == Some(agent_id.as_str()) {
             return;
         }
-        self.show_agent_transcript(Some(agent_id.clone()), cx);
+        self.show_agent_transcript(Some(agent_id.clone()), window, cx);
         self.agents.select(agent_id);
         self.apply_selected_agent_context_usage();
         self.update_status_line(cx);
@@ -1572,7 +1616,7 @@ impl TauGui {
         self.update_status_line(cx);
     }
 
-    fn resume_agent(&mut self, target: Option<&str>, cx: &mut Context<Self>) {
+    fn resume_agent(&mut self, target: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
         let target = target
             .map(str::trim)
             .filter(|target| !target.is_empty())
@@ -1598,7 +1642,7 @@ impl TauGui {
             );
             return;
         }
-        self.show_agent_transcript(Some(agent_id.clone()), cx);
+        self.show_agent_transcript(Some(agent_id.clone()), window, cx);
         self.agents.resume(agent_id);
         self.apply_selected_agent_context_usage();
         self.update_status_line(cx);
@@ -1660,8 +1704,9 @@ impl TauGui {
         }
         eprintln!("tau-gui: submitting prompt with {} bytes", text.len());
 
-        if self.handle_prompt_command(&text, cx) {
+        if Self::is_prompt_command(&text) {
             self.clear_prompt_draft(window, cx);
+            self.handle_prompt_command(&text, window, cx);
             return;
         }
 
