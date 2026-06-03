@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -50,7 +51,7 @@ use tool_state::ToolState;
 use transcript::buffer_range_starts_with;
 use transcript::{InsertedTranscript, Transcript};
 
-actions!(tau_gui, [SubmitPrompt]);
+actions!(tau_gui, [SubmitPrompt, AgentPrevious, AgentNext]);
 
 fn main() {
     if let Err(error) = run() {
@@ -71,12 +72,12 @@ fn run() -> Result<()> {
                 return;
             }
 
-            eprintln!("tau-gui: binding ctrl-enter to tau_gui::SubmitPrompt in TauGui > Editor");
-            cx.bind_keys([KeyBinding::new(
-                "ctrl-enter",
-                SubmitPrompt,
-                Some("TauGui > Editor"),
-            )]);
+            eprintln!("tau-gui: binding prompt actions in TauGui > Editor");
+            cx.bind_keys([
+                KeyBinding::new("ctrl-enter", SubmitPrompt, Some("TauGui > Editor")),
+                KeyBinding::new("ctrl-k", AgentPrevious, Some("TauGui > Editor")),
+                KeyBinding::new("ctrl-j", AgentNext, Some("TauGui > Editor")),
+            ]);
             cx.activate(true);
 
             let attach_target = attach_target.clone();
@@ -229,6 +230,18 @@ impl TranscriptStyle {
         }
     }
 }
+struct AgentUiState {
+    transcript: Transcript,
+    prompt_state: PromptState,
+    tool_state: ToolState,
+    shell_state: ShellState,
+    main_tool_activity: MainToolActivity,
+    previous_provider_usage: Option<tau_proto::ProviderTokenUsage>,
+    current_context_percent: Option<u8>,
+    current_context_input_tokens: Option<u64>,
+    current_context_window: Option<u64>,
+}
+
 struct TauGui {
     editor: Entity<Editor>,
     prompt_buffer: Entity<Buffer>,
@@ -258,6 +271,9 @@ struct TauGui {
     follow_tail: bool,
     agents: AgentState,
     completion_state: Arc<Mutex<TauCompletionState>>,
+    displayed_agent_id: Option<String>,
+    no_agent_ui_state: Option<AgentUiState>,
+    agent_ui_states: HashMap<String, AgentUiState>,
 }
 
 impl TauGui {
@@ -336,6 +352,22 @@ impl TauGui {
                 }
             })
         });
+        let agent_previous_subscription = editor.update(cx, |editor, _cx| {
+            let this = this.clone();
+            editor.register_action(move |_: &AgentPrevious, _window, cx| {
+                if let Err(error) = this.update(cx, |this, cx| this.switch_agent_by_delta(-1, cx)) {
+                    eprintln!("tau-gui: failed to switch to previous agent: {error:#}");
+                }
+            })
+        });
+        let agent_next_subscription = editor.update(cx, |editor, _cx| {
+            let this = this.clone();
+            editor.register_action(move |_: &AgentNext, _window, cx| {
+                if let Err(error) = this.update(cx, |this, cx| this.switch_agent_by_delta(1, cx)) {
+                    eprintln!("tau-gui: failed to switch to next agent: {error:#}");
+                }
+            })
+        });
         editor.update(cx, |editor, cx| {
             let this = this.clone();
             editor.set_prepare_for_insert(
@@ -411,7 +443,12 @@ impl TauGui {
             writer,
             rx,
             _poll_task: poll_task,
-            _subscriptions: vec![submit_subscription, prompt_buffer_subscription],
+            _subscriptions: vec![
+                submit_subscription,
+                agent_previous_subscription,
+                agent_next_subscription,
+                prompt_buffer_subscription,
+            ],
             session_id: attach_target.session_id,
             prompt_state: PromptState::default(),
             cli_theme: cli_theme::select_theme(tau_config::settings::CliTheme::Dark),
@@ -430,6 +467,9 @@ impl TauGui {
             follow_tail: true,
             agents: AgentState::default(),
             completion_state,
+            displayed_agent_id: None,
+            no_agent_ui_state: None,
+            agent_ui_states: HashMap::new(),
         };
         this.update_prompt_inlay(cx);
         this.update_status_line(cx);
@@ -490,6 +530,10 @@ impl TauGui {
         self.agents.observe_event(&event);
         self.refresh_agent_completions();
         if self.agents.current_agent_id() != previous_agent_id.as_deref() {
+            let current_agent_id = self.agents.current_agent_id_owned();
+            if self.displayed_agent_id != current_agent_id {
+                self.show_agent_transcript(current_agent_id, cx);
+            }
             self.apply_selected_agent_context_usage();
             self.update_status_line(cx);
             self.update_prompt_inlay(cx);
@@ -1275,7 +1319,97 @@ impl TauGui {
         }
     }
 
+    fn empty_transcript(&self, cx: &mut Context<Self>) -> Transcript {
+        let buffer = cx.new(|cx| {
+            let mut buffer = Buffer::local("", cx);
+            buffer.set_capability(Capability::Read, cx);
+            buffer
+        });
+        Transcript::new(buffer, self.editor.clone(), self.multi_buffer.clone(), cx)
+    }
+
+    fn take_visible_agent_ui_state(&mut self, cx: &mut Context<Self>) -> AgentUiState {
+        let replacement = self.empty_transcript(cx);
+        AgentUiState {
+            transcript: std::mem::replace(&mut self.transcript, replacement),
+            prompt_state: std::mem::take(&mut self.prompt_state),
+            tool_state: std::mem::take(&mut self.tool_state),
+            shell_state: std::mem::take(&mut self.shell_state),
+            main_tool_activity: std::mem::take(&mut self.main_tool_activity),
+            previous_provider_usage: self.previous_provider_usage.take(),
+            current_context_percent: self.current_context_percent.take(),
+            current_context_input_tokens: self.current_context_input_tokens.take(),
+            current_context_window: self.current_context_window.take(),
+        }
+    }
+
+    fn restore_visible_agent_ui_state(&mut self, state: AgentUiState, cx: &mut Context<Self>) {
+        self.transcript = state.transcript;
+        self.prompt_state = state.prompt_state;
+        self.tool_state = state.tool_state;
+        self.shell_state = state.shell_state;
+        self.main_tool_activity = state.main_tool_activity;
+        self.previous_provider_usage = state.previous_provider_usage;
+        self.current_context_percent = state.current_context_percent;
+        self.current_context_input_tokens = state.current_context_input_tokens;
+        self.current_context_window = state.current_context_window;
+        self.show_current_transcript_buffer(cx);
+    }
+
+    fn show_current_transcript_buffer(&mut self, cx: &mut Context<Self>) {
+        let transcript_buffer = self.transcript.buffer();
+        self.multi_buffer.update(cx, |multi_buffer, cx| {
+            multi_buffer.set_excerpts_for_path(
+                PathKey::sorted(0),
+                transcript_buffer.clone(),
+                [Point::zero()..transcript_buffer.read(cx).max_point()],
+                0,
+                cx,
+            );
+        });
+        self.transcript.refresh_highlights(cx);
+        cx.notify();
+    }
+
+    fn store_visible_agent_ui_state(&mut self, cx: &mut Context<Self>) {
+        let state = self.take_visible_agent_ui_state(cx);
+        if let Some(agent_id) = self.displayed_agent_id.clone() {
+            self.agent_ui_states.insert(agent_id, state);
+        } else {
+            self.no_agent_ui_state = Some(state);
+        }
+    }
+
+    fn empty_agent_ui_state(&self, cx: &mut Context<Self>) -> AgentUiState {
+        AgentUiState {
+            transcript: self.empty_transcript(cx),
+            prompt_state: PromptState::default(),
+            tool_state: ToolState::default(),
+            shell_state: ShellState::default(),
+            main_tool_activity: MainToolActivity::default(),
+            previous_provider_usage: None,
+            current_context_percent: None,
+            current_context_input_tokens: None,
+            current_context_window: None,
+        }
+    }
+
+    fn show_agent_transcript(&mut self, agent_id: Option<String>, cx: &mut Context<Self>) {
+        if self.displayed_agent_id == agent_id {
+            return;
+        }
+        self.store_visible_agent_ui_state(cx);
+        let state = match &agent_id {
+            Some(agent_id) => self.agent_ui_states.remove(agent_id),
+            None => self.no_agent_ui_state.take(),
+        }
+        .unwrap_or_else(|| self.empty_agent_ui_state(cx));
+        self.displayed_agent_id = agent_id;
+        self.restore_visible_agent_ui_state(state, cx);
+    }
+
     fn clear_selected_agent(&mut self, cx: &mut Context<Self>) {
+        self.show_agent_transcript(None, cx);
         self.agents.clear_current_agent();
         self.update_status_line(cx);
         self.update_prompt_inlay(cx);
@@ -1313,7 +1447,27 @@ impl TauGui {
             );
             return;
         }
+        self.show_agent_transcript(Some(agent_id.to_owned()), cx);
         self.agents.select(agent_id.to_owned());
+        self.apply_selected_agent_context_usage();
+        self.update_status_line(cx);
+        self.update_prompt_inlay(cx);
+    }
+
+    fn switch_agent_by_delta(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(agent_id) = self.agents.next_active_agent(delta) else {
+            self.insert_before_draft_styled(
+                "agent-switch: no active agents available yet\n",
+                TranscriptStyle::SystemInfo,
+                cx,
+            );
+            return;
+        };
+        if self.agents.current_agent_id() == Some(agent_id.as_str()) {
+            return;
+        }
+        self.show_agent_transcript(Some(agent_id.clone()), cx);
+        self.agents.select(agent_id);
         self.apply_selected_agent_context_usage();
         self.update_status_line(cx);
         self.update_prompt_inlay(cx);

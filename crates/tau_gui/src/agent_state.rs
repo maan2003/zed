@@ -95,6 +95,33 @@ impl AgentState {
         )
     }
 
+    pub(crate) fn next_active_agent(&self, delta: isize) -> Option<String> {
+        let active_agents = self
+            .known_agents_sorted()
+            .into_iter()
+            .filter(|agent| {
+                self.live_agents.contains(agent) && !self.suspended_agents.contains(agent)
+            })
+            .collect::<Vec<_>>();
+        if active_agents.is_empty() {
+            return None;
+        }
+        let len = active_agents.len() as isize;
+        let index = self
+            .current_agent_id
+            .as_deref()
+            .and_then(|current| active_agents.iter().position(|agent| agent == current))
+            .map(|index| (index as isize + delta).rem_euclid(len) as usize)
+            .unwrap_or_else(|| {
+                if delta < 0 {
+                    active_agents.len() - 1
+                } else {
+                    0
+                }
+            });
+        active_agents.get(index).cloned()
+    }
+
     pub(crate) fn suspend(&mut self, agent_id: String) {
         self.suspended_agents.insert(agent_id);
     }
@@ -448,5 +475,17 @@ mod tests {
             state.agent_id_for_event(&progress).as_deref(),
             Some("agent")
         );
+    }
+    #[test]
+    fn next_active_agent_wraps_and_skips_suspended_agents() {
+        let mut state = AgentState::default();
+        state.mark_live("helper");
+        state.mark_live("worker");
+        state.suspend("helper".to_owned());
+
+        assert_eq!(state.next_active_agent(1).as_deref(), Some("worker"));
+        state.select("worker");
+        assert_eq!(state.next_active_agent(1).as_deref(), Some("worker"));
+        assert_eq!(state.next_active_agent(-1).as_deref(), Some("worker"));
     }
 }

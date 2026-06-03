@@ -46,6 +46,14 @@ impl Transcript {
         }
     }
 
+    pub(crate) fn buffer(&self) -> Entity<Buffer> {
+        self.buffer.clone()
+    }
+
+    pub(crate) fn refresh_highlights<T>(&mut self, cx: &mut Context<T>) {
+        self.apply_highlights(cx);
+    }
+
     pub(crate) fn remove_range<T>(&mut self, range: std::ops::Range<Anchor>, cx: &mut Context<T>) {
         self.buffer.update(cx, |buffer, cx| {
             let start = range.start.to_offset(buffer);
