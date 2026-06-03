@@ -823,8 +823,16 @@ impl TauGui {
             Event::ActionResult(result) => {
                 let text = match result.output {
                     tau_proto::ActionOutput::Text { text } => text,
-                    tau_proto::ActionOutput::EditorBuffer { title, text, .. } => {
-                        format!("{title}\n{text}")
+                    tau_proto::ActionOutput::EditorBuffer {
+                        title,
+                        text,
+                        editable,
+                    } => {
+                        let mut rendered = format!("{title}\n{text}");
+                        if editable {
+                            rendered.push_str("\n[editable buffer]");
+                        }
+                        rendered
                     }
                 };
                 let block = tool_render::render_action_output_block(&self.cli_theme, &text);
