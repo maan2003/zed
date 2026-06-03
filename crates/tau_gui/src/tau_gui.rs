@@ -11,8 +11,8 @@ use editor::{
 };
 use gpui::{
     App, Context, Entity, Focusable as _, FontStyle, FontWeight, HighlightStyle, Hsla, KeyBinding,
-    Rgba, StyledText, Subscription, Task, TextStyle, Window, WindowOptions, actions, div,
-    prelude::*, px,
+    MouseButton, Rgba, StyledText, Subscription, Task, TextStyle, Window, WindowOptions, actions,
+    div, prelude::*, px,
 };
 use language::{Buffer, BufferEvent, Capability, Point};
 use multi_buffer::{MultiBuffer, PathKey};
@@ -232,6 +232,7 @@ impl TranscriptStyle {
 }
 struct AgentUiState {
     transcript: Transcript,
+    draft_text: String,
     prompt_state: PromptState,
     tool_state: ToolState,
     shell_state: ShellState,
@@ -240,6 +241,14 @@ struct AgentUiState {
     current_context_percent: Option<u8>,
     current_context_input_tokens: Option<u64>,
     current_context_window: Option<u64>,
+}
+
+struct AgentTab {
+    agent_id: Option<String>,
+    label: String,
+    selected: bool,
+    suspended: bool,
+    has_draft: bool,
 }
 
 struct TauGui {
@@ -1329,9 +1338,11 @@ impl TauGui {
     }
 
     fn take_visible_agent_ui_state(&mut self, cx: &mut Context<Self>) -> AgentUiState {
+        let draft_text = self.draft_text(cx);
         let replacement = self.empty_transcript(cx);
         AgentUiState {
             transcript: std::mem::replace(&mut self.transcript, replacement),
+            draft_text,
             prompt_state: std::mem::take(&mut self.prompt_state),
             tool_state: std::mem::take(&mut self.tool_state),
             shell_state: std::mem::take(&mut self.shell_state),
@@ -1354,6 +1365,7 @@ impl TauGui {
         self.current_context_input_tokens = state.current_context_input_tokens;
         self.current_context_window = state.current_context_window;
         self.show_current_transcript_buffer(cx);
+        self.replace_draft_text(&state.draft_text, cx);
     }
 
     fn show_current_transcript_buffer(&mut self, cx: &mut Context<Self>) {
@@ -1383,6 +1395,7 @@ impl TauGui {
     fn empty_agent_ui_state(&self, cx: &mut Context<Self>) -> AgentUiState {
         AgentUiState {
             transcript: self.empty_transcript(cx),
+            draft_text: String::new(),
             prompt_state: PromptState::default(),
             tool_state: ToolState::default(),
             shell_state: ShellState::default(),
@@ -1406,6 +1419,66 @@ impl TauGui {
         .unwrap_or_else(|| self.empty_agent_ui_state(cx));
         self.displayed_agent_id = agent_id;
         self.restore_visible_agent_ui_state(state, cx);
+    }
+
+    fn agent_tabs(&self, cx: &mut Context<Self>) -> Vec<AgentTab> {
+        let visible_draft_text = self.draft_text(cx);
+        let mut tabs = Vec::new();
+        tabs.push(AgentTab {
+            agent_id: None,
+            label: "+ new".to_owned(),
+            selected: self.agents.current_agent_id().is_none(),
+            suspended: false,
+            has_draft: if self.displayed_agent_id.is_none() {
+                !visible_draft_text.is_empty()
+            } else {
+                self.no_agent_ui_state
+                    .as_ref()
+                    .is_some_and(|state| !state.draft_text.is_empty())
+            },
+        });
+        for agent_id in self.agents.known_agents_sorted() {
+            let selected = self.agents.current_agent_id() == Some(agent_id.as_str());
+            let suspended = self.agents.suspended(agent_id.as_str());
+            let has_draft = if self.displayed_agent_id.as_deref() == Some(agent_id.as_str()) {
+                !visible_draft_text.is_empty()
+            } else {
+                self.agent_ui_states
+                    .get(agent_id.as_str())
+                    .is_some_and(|state| !state.draft_text.is_empty())
+            };
+            let mut label = format!("@{agent_id}");
+            if suspended {
+                label.push_str(" paused");
+            }
+            if has_draft {
+                label.push('*');
+            }
+            tabs.push(AgentTab {
+                agent_id: Some(agent_id),
+                label,
+                selected,
+                suspended,
+                has_draft,
+            });
+        }
+        tabs
+    }
+
+    fn switch_to_agent_tab(
+        &mut self,
+        agent_id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match agent_id {
+            Some(agent_id) if self.agents.suspended(agent_id.as_str()) => {
+                self.resume_agent(Some(agent_id.as_str()), cx)
+            }
+            Some(agent_id) => self.switch_agent(Some(agent_id.as_str()), cx),
+            None => self.clear_selected_agent(cx),
+        }
+        window.focus(&self.editor.focus_handle(cx), cx);
     }
 
     fn clear_selected_agent(&mut self, cx: &mut Context<Self>) {
@@ -1525,6 +1598,7 @@ impl TauGui {
             );
             return;
         }
+        self.show_agent_transcript(Some(agent_id.clone()), cx);
         self.agents.resume(agent_id);
         self.apply_selected_agent_context_usage();
         self.update_status_line(cx);
@@ -1702,9 +1776,15 @@ impl TauGui {
         )
     }
 
-    fn draft_is_empty(&self, cx: &mut Context<Self>) -> bool {
+    fn draft_text(&self, cx: &mut Context<Self>) -> String {
         let buffer = self.prompt_buffer.read(cx);
-        self.prompt_end.to_offset(buffer) == self.draft_end.to_offset(buffer)
+        let start = self.prompt_end.to_offset(buffer);
+        let end = self.draft_end.to_offset(buffer);
+        buffer.text_for_range(start..end).collect()
+    }
+
+    fn draft_is_empty(&self, cx: &mut Context<Self>) -> bool {
+        self.draft_text(cx).is_empty()
     }
 
     fn anchor_in_excerpt(
@@ -2152,6 +2232,12 @@ impl Render for TauGui {
             .update(cx, |editor, cx| editor.style(cx).text.clone());
         let status_left = styled_status_text(status_left, &text_style);
         let status_right = styled_status_text(status_right, &text_style);
+        let agent_tabs = self.agent_tabs(cx);
+        let border_color = cx.theme().colors().border_variant;
+        let active_tab_background = cx.theme().colors().element_selected;
+        let inactive_tab_background = cx.theme().colors().element_background;
+        let hover_tab_background = cx.theme().colors().element_hover;
+        let muted_color = cx.theme().colors().text_muted;
 
         div()
             .id("tau-gui")
@@ -2168,6 +2254,53 @@ impl Render for TauGui {
                     .flex_grow(1.0)
                     .overflow_hidden()
                     .child(self.editor.clone()),
+            )
+            .child(
+                div()
+                    .id("tau-gui-agent-tabs")
+                    .w_full()
+                    .flex_none()
+                    .flex()
+                    .gap_1()
+                    .overflow_x_scroll()
+                    .py_1()
+                    .font_family(text_style.font_family.clone())
+                    .text_size(text_style.font_size)
+                    .line_height(text_style.line_height)
+                    .children(agent_tabs.into_iter().map(|tab| {
+                        let agent_id = tab.agent_id.clone();
+                        div()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(border_color)
+                            .bg(if tab.selected {
+                                active_tab_background
+                            } else {
+                                inactive_tab_background
+                            })
+                            .text_color(if tab.suspended {
+                                muted_color
+                            } else {
+                                text_style.color
+                            })
+                            .font_weight(if tab.selected || tab.has_draft {
+                                FontWeight::BOLD
+                            } else {
+                                FontWeight::default()
+                            })
+                            .whitespace_nowrap()
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(hover_tab_background))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, window, cx| {
+                                    this.switch_to_agent_tab(agent_id.clone(), window, cx);
+                                }),
+                            )
+                            .child(tab.label)
+                    })),
             )
             .child(
                 div()
