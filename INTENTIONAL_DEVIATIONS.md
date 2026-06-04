@@ -28,6 +28,12 @@ Unlike `tau-cli`, `tau-gui` keeps the status bar focused on agent tabs. Per-agen
 
 This is intentional because those values are scoped to the selected agent and prompt, while the GUI status bar is used for agent navigation. Service tier is shown as `⚡` rather than the terminal-style `!fast` marker.
 
+## Agent suspend/resume is intentionally omitted
+
+`tau-gui` does not implement local `/agent suspend` or `/agent resume` commands. The previous GUI-only suspend state did not pause, cancel, unload, or otherwise affect backend agent execution; it only hid agents from navigation/completions and could be cleared by later activity.
+
+The GUI should instead keep agent availability tied to real agent lifecycle events and reserve status icons for actionable/runtime state such as active work.
+
 ## No session switching for now
 
 `tau-gui` intentionally does not support session switching yet. It attaches to the harness/session for the current project and should avoid building session-switch UI until that becomes a deliberate GUI feature.

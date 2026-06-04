@@ -2,17 +2,14 @@ pub(crate) struct AgentTab {
     pub(crate) agent_id: String,
     pub(crate) label: String,
     pub(crate) selected: bool,
-    pub(crate) suspended: bool,
 }
 
 impl AgentTab {
-    pub(crate) fn new(agent_id: String, selected: bool, suspended: bool) -> Self {
-        let status_suffix = if suspended { ":paused" } else { "" };
+    pub(crate) fn new(agent_id: String, selected: bool) -> Self {
         Self {
-            label: format!("@{agent_id}{status_suffix} "),
+            label: format!("@{agent_id} "),
             agent_id,
             selected,
-            suspended,
         }
     }
 }
@@ -170,22 +167,14 @@ mod tests {
 
     #[test]
     fn build_renders_role_identity_when_selected_agent_tab_exists() {
-        let status_line = build(input(vec![AgentTab::new(
-            "agent-a".to_owned(),
-            true,
-            false,
-        )]));
+        let status_line = build(input(vec![AgentTab::new("agent-a".to_owned(), true)]));
 
         assert_eq!(status_line.agent_tabs[0].label, "@agent-a ");
         assert_eq!(status_line.prompt_chips[0].text, "senior-engineer");
     }
     #[test]
     fn build_renders_role_identity_without_selected_agent_tab() {
-        let status_line = build(input(vec![AgentTab::new(
-            "agent-a".to_owned(),
-            false,
-            false,
-        )]));
+        let status_line = build(input(vec![AgentTab::new("agent-a".to_owned(), false)]));
 
         assert_eq!(status_line.prompt_chips[0].text, "senior-engineer");
         assert_eq!(

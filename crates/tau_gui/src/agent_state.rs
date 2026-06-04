@@ -12,7 +12,6 @@ pub(crate) struct AgentState {
     current_agent_id: Option<String>,
     known_agents: HashSet<String>,
     live_agents: HashSet<String>,
-    suspended_agents: HashSet<String>,
     context_usage: HashMap<String, AgentContextUsage>,
     query_agents: HashMap<String, String>,
     prompt_agents: HashMap<String, String>,
@@ -41,14 +40,12 @@ impl AgentState {
         let agent_id = agent_id.into();
         self.known_agents.insert(agent_id.clone());
         self.live_agents.insert(agent_id.clone());
-        self.suspended_agents.remove(&agent_id);
     }
 
     pub(crate) fn select(&mut self, agent_id: impl Into<String>) {
         let agent_id = agent_id.into();
         self.known_agents.insert(agent_id.clone());
         self.live_agents.insert(agent_id.clone());
-        self.suspended_agents.remove(&agent_id);
         if self.current_agent_id.as_deref() != Some(agent_id.as_str()) {
             self.current_agent_id = Some(agent_id);
         }
@@ -56,7 +53,6 @@ impl AgentState {
 
     pub(crate) fn unload(&mut self, agent_id: &str) {
         self.live_agents.remove(agent_id);
-        self.suspended_agents.remove(agent_id);
         if self.current_agent_id.as_deref() == Some(agent_id) {
             self.current_agent_id = None;
         }
@@ -66,15 +62,11 @@ impl AgentState {
         self.known_agents.contains(agent_id)
     }
 
-    pub(crate) fn suspended(&self, agent_id: &str) -> bool {
-        self.suspended_agents.contains(agent_id)
-    }
-
     pub(crate) fn selected_is_active(&self) -> bool {
         let Some(agent_id) = self.current_agent_id.as_deref() else {
             return true;
         };
-        self.live_agents.contains(agent_id) && !self.suspended_agents.contains(agent_id)
+        self.live_agents.contains(agent_id)
     }
 
     pub(crate) fn known_agents_sorted(&self) -> Vec<String> {
@@ -84,24 +76,18 @@ impl AgentState {
     }
 
     pub(crate) fn active_count(&self) -> usize {
-        self.live_agents.difference(&self.suspended_agents).count()
+        self.live_agents.len()
     }
 
-    pub(crate) fn completion_snapshot(&self) -> (Vec<String>, HashSet<String>, HashSet<String>) {
-        (
-            self.known_agents_sorted(),
-            self.live_agents.clone(),
-            self.suspended_agents.clone(),
-        )
+    pub(crate) fn completion_snapshot(&self) -> (Vec<String>, HashSet<String>) {
+        (self.known_agents_sorted(), self.live_agents.clone())
     }
 
     pub(crate) fn next_active_agent(&self, delta: isize) -> Option<String> {
         let active_agents = self
             .known_agents_sorted()
             .into_iter()
-            .filter(|agent| {
-                self.live_agents.contains(agent) && !self.suspended_agents.contains(agent)
-            })
+            .filter(|agent| self.live_agents.contains(agent))
             .collect::<Vec<_>>();
         if active_agents.is_empty() {
             return None;
@@ -120,16 +106,6 @@ impl AgentState {
                 }
             });
         active_agents.get(index).cloned()
-    }
-
-    pub(crate) fn suspend(&mut self, agent_id: String) {
-        self.suspended_agents.insert(agent_id);
-    }
-
-    pub(crate) fn resume(&mut self, agent_id: String) {
-        self.live_agents.insert(agent_id.clone());
-        self.suspended_agents.remove(&agent_id);
-        self.current_agent_id = Some(agent_id);
     }
 
     pub(crate) fn record_context_usage(&mut self, agent_id: String, usage: AgentContextUsage) {
@@ -477,11 +453,11 @@ mod tests {
         );
     }
     #[test]
-    fn next_active_agent_wraps_and_skips_suspended_agents() {
+    fn next_active_agent_wraps_live_agents() {
         let mut state = AgentState::default();
         state.mark_live("helper");
         state.mark_live("worker");
-        state.suspend("helper".to_owned());
+        state.unload("helper");
 
         assert_eq!(state.next_active_agent(1).as_deref(), Some("worker"));
         state.select("worker");

@@ -26,7 +26,6 @@ pub(crate) struct TauCompletionState {
     roles: Vec<CompletionCandidate>,
     known_agents: Vec<String>,
     live_agents: HashSet<String>,
-    suspended_agents: HashSet<String>,
 }
 
 impl TauCompletionState {
@@ -34,15 +33,9 @@ impl TauCompletionState {
         self.roles = roles;
     }
 
-    pub(crate) fn set_agents(
-        &mut self,
-        known_agents: Vec<String>,
-        live_agents: HashSet<String>,
-        suspended_agents: HashSet<String>,
-    ) {
+    pub(crate) fn set_agents(&mut self, known_agents: Vec<String>, live_agents: HashSet<String>) {
         self.known_agents = known_agents;
         self.live_agents = live_agents;
-        self.suspended_agents = suspended_agents;
     }
 
     fn completions_for(&self, text_before_cursor: &str) -> Vec<CompletionCandidate> {
@@ -70,7 +63,6 @@ impl TauCompletionState {
         self.known_agents
             .iter()
             .filter(|agent| self.live_agents.contains(*agent))
-            .filter(|agent| !self.suspended_agents.contains(*agent))
             .filter(|agent| completion_matches(agent, needle))
             .map(|agent| CompletionCandidate::new(agent, "agent"))
             .collect()
@@ -78,7 +70,7 @@ impl TauCompletionState {
 
     fn agent_command_completions(&self, args: &[&str]) -> Vec<CompletionCandidate> {
         match args.len() {
-            0 | 1 => ["new", "switch", "suspend", "resume"]
+            0 | 1 => ["new", "switch"]
                 .into_iter()
                 .filter(|subcommand| {
                     completion_matches(subcommand, args.first().copied().unwrap_or(""))
@@ -87,16 +79,11 @@ impl TauCompletionState {
                 .collect(),
             2 => {
                 let needle = args[1];
-                agent_completion_candidates(
-                    args[0],
-                    &self.known_agents,
-                    &self.live_agents,
-                    &self.suspended_agents,
-                )
-                .into_iter()
-                .filter(|agent| completion_matches(agent, needle))
-                .map(|agent| CompletionCandidate::new(agent, "agent"))
-                .collect()
+                agent_completion_candidates(args[0], &self.known_agents, &self.live_agents)
+                    .into_iter()
+                    .filter(|agent| completion_matches(agent, needle))
+                    .map(|agent| CompletionCandidate::new(agent, "agent"))
+                    .collect()
             }
             _ => Vec::new(),
         }
@@ -232,7 +219,7 @@ fn completion_replace_start(text_before_cursor: &str) -> usize {
 
 fn root_command_completions(needle: &str) -> Vec<CompletionCandidate> {
     [
-        CompletionCandidate::new("/agent", "Manage visible/suspended agent transcripts"),
+        CompletionCandidate::new("/agent", "Manage agent transcripts"),
         CompletionCandidate::new("/new", "Alias for /agent new"),
         CompletionCandidate::new("/model", "Select an agent role"),
         CompletionCandidate::new("/role", "Switch, create, edit, or delete an agent role"),
@@ -306,32 +293,17 @@ fn agent_completion_candidates(
     subcommand: &str,
     known_agents: &[String],
     live_agents: &HashSet<String>,
-    suspended_agents: &HashSet<String>,
 ) -> Vec<String> {
-    let active_agents = live_agents
-        .difference(suspended_agents)
-        .cloned()
-        .collect::<HashSet<_>>();
     match subcommand {
         "switch" => {
             let mut agents = known_agents
                 .iter()
-                .filter(|agent| active_agents.contains(*agent))
+                .filter(|agent| live_agents.contains(*agent))
                 .cloned()
                 .collect::<Vec<_>>();
             agents.insert(0, "none".to_owned());
             agents
         }
-        "suspend" => known_agents
-            .iter()
-            .filter(|agent| active_agents.contains(*agent))
-            .cloned()
-            .collect(),
-        "resume" => known_agents
-            .iter()
-            .filter(|agent| !active_agents.contains(*agent))
-            .cloned()
-            .collect(),
         _ => Vec::new(),
     }
 }
@@ -360,12 +332,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn agent_completions_match_cli_subcommands_and_filters() {
+    fn agent_completions_offer_gui_subcommands_and_live_agents() {
         let mut state = TauCompletionState::default();
         state.set_agents(
             vec!["helper".to_owned(), "worker".to_owned()],
             HashSet::from(["helper".to_owned(), "worker".to_owned()]),
-            HashSet::from(["helper".to_owned()]),
         );
 
         let subcommands = state
@@ -373,21 +344,14 @@ mod tests {
             .into_iter()
             .map(|candidate| candidate.value)
             .collect::<Vec<_>>();
-        assert_eq!(subcommands, vec!["new", "switch", "suspend", "resume"]);
+        assert_eq!(subcommands, vec!["new", "switch"]);
 
         let switch_agents = state
             .completions_for("/agent switch ")
             .into_iter()
             .map(|candidate| candidate.value)
             .collect::<Vec<_>>();
-        assert_eq!(switch_agents, vec!["none", "worker"]);
-
-        let resume_agents = state
-            .completions_for("/agent resume ")
-            .into_iter()
-            .map(|candidate| candidate.value)
-            .collect::<Vec<_>>();
-        assert_eq!(resume_agents, vec!["helper"]);
+        assert_eq!(switch_agents, vec!["none", "helper", "worker"]);
     }
 
     #[test]
@@ -417,7 +381,6 @@ mod tests {
         state.set_agents(
             vec!["helper".to_owned(), "worker".to_owned()],
             HashSet::from(["helper".to_owned(), "worker".to_owned()]),
-            HashSet::from(["helper".to_owned()]),
         );
 
         let mentions = state

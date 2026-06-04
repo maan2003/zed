@@ -1379,7 +1379,7 @@ impl TauGui {
             let active_count = self.agents.active_count();
             self.insert_before_draft_styled(
                 &format!(
-                    "/agent <new|switch|suspend|resume> [agent_id]; current: {current}; active: {active_count}; known: {}\n",
+                    "/agent <new|switch> [agent_id]; current: {current}; active: {active_count}; known: {}\n",
                     known_agents.join(", ")
                 ),
                 TranscriptStyle::SystemInfo,
@@ -1395,7 +1395,7 @@ impl TauGui {
         let target = parts.next();
         if parts.next().is_some() {
             self.insert_before_draft_styled(
-                "/agent: too many arguments (use /agent <new|switch|suspend|resume> [agent_id])\n",
+                "/agent: too many arguments (use /agent <new|switch> [agent_id])\n",
                 TranscriptStyle::SystemInfo,
                 cx,
             );
@@ -1414,10 +1414,8 @@ impl TauGui {
                 }
             }
             "switch" => self.switch_agent(target, window, cx),
-            "suspend" => self.suspend_agent(target, cx),
-            "resume" => self.resume_agent(target, window, cx),
             _ => self.insert_before_draft_styled(
-                "/agent <new|switch|suspend|resume> [agent_id]; use /agent switch <agent_id>\n",
+                "/agent <new|switch> [agent_id]; use /agent switch <agent_id>\n",
                 TranscriptStyle::SystemInfo,
                 cx,
             ),
@@ -1498,8 +1496,7 @@ impl TauGui {
             .into_iter()
             .map(|agent_id| {
                 let selected = self.agents.current_agent_id() == Some(agent_id.as_str());
-                let suspended = self.agents.suspended(agent_id.as_str());
-                status_line::AgentTab::new(agent_id, selected, suspended)
+                status_line::AgentTab::new(agent_id, selected)
             })
             .collect()
     }
@@ -1510,9 +1507,6 @@ impl TauGui {
         cx: &mut Context<Self>,
     ) {
         match agent_id {
-            Some(agent_id) if self.agents.suspended(agent_id.as_str()) => {
-                self.resume_agent(Some(agent_id.as_str()), window, cx)
-            }
             Some(agent_id) => self.switch_agent(Some(agent_id.as_str()), window, cx),
             None => self.clear_selected_agent(window, cx),
         }
@@ -1551,14 +1545,6 @@ impl TauGui {
             );
             return;
         }
-        if self.agents.suspended(agent_id) {
-            self.insert_before_draft_styled(
-                &format!("agent is suspended: {agent_id} (use /agent resume {agent_id})\n"),
-                TranscriptStyle::SystemInfo,
-                cx,
-            );
-            return;
-        }
         self.show_agent_transcript(Some(agent_id.to_owned()), window, cx);
         self.agents.select(agent_id.to_owned());
         self.apply_selected_agent_context_usage();
@@ -1581,66 +1567,6 @@ impl TauGui {
         }
         self.show_agent_transcript(Some(agent_id.clone()), window, cx);
         self.agents.select(agent_id);
-        self.apply_selected_agent_context_usage();
-        self.update_status_line(cx);
-        self.update_prompt_inlay(cx);
-        self.focus_editor(window, cx);
-    }
-
-    fn suspend_agent(&mut self, target: Option<&str>, cx: &mut Context<Self>) {
-        let target = target
-            .map(str::trim)
-            .filter(|target| !target.is_empty())
-            .map(ToOwned::to_owned)
-            .or_else(|| self.agents.current_agent_id_owned());
-        let Some(agent_id) = target else {
-            self.insert_before_draft_styled(
-                "/agent suspend <agent_id>\n",
-                TranscriptStyle::SystemInfo,
-                cx,
-            );
-            return;
-        };
-        if !self.agents.known(&agent_id) {
-            self.insert_before_draft_styled(
-                &format!("unknown agent: {agent_id}\n"),
-                TranscriptStyle::SystemInfo,
-                cx,
-            );
-            return;
-        }
-        self.agents.suspend(agent_id);
-        self.update_status_line(cx);
-    }
-
-    fn resume_agent(&mut self, target: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
-        let target = target
-            .map(str::trim)
-            .filter(|target| !target.is_empty())
-            .map(ToOwned::to_owned)
-            .or_else(|| {
-                self.agents
-                    .current_agent_id_owned()
-                    .filter(|agent_id| self.agents.suspended(agent_id))
-            });
-        let Some(agent_id) = target else {
-            self.insert_before_draft_styled(
-                "/agent resume <agent_id>\n",
-                TranscriptStyle::SystemInfo,
-                cx,
-            );
-            return;
-        };
-        if !self.agents.known(&agent_id) {
-            self.insert_before_draft_styled(
-                &format!("unknown agent: {agent_id}\n"),
-                TranscriptStyle::SystemInfo,
-                cx,
-            );
-            return;
-        }
-        self.show_agent_transcript(Some(agent_id.clone()), window, cx);
-        self.agents.resume(agent_id);
         self.apply_selected_agent_context_usage();
         self.update_status_line(cx);
         self.update_prompt_inlay(cx);
@@ -1709,7 +1635,7 @@ impl TauGui {
 
         if !self.selected_agent_is_active() {
             self.insert_before_draft_styled(
-                "selected agent is suspended; choose a different agent or start a new one\n",
+                "selected agent is unavailable; choose a different agent or start a new one\n",
                 TranscriptStyle::SystemImportant,
                 cx,
             );
@@ -2155,9 +2081,9 @@ impl TauGui {
     }
 
     fn refresh_agent_completions(&mut self) {
-        let (known_agents, live_agents, suspended_agents) = self.agents.completion_snapshot();
+        let (known_agents, live_agents) = self.agents.completion_snapshot();
         if let Ok(mut state) = self.completion_state.lock() {
-            state.set_agents(known_agents, live_agents, suspended_agents);
+            state.set_agents(known_agents, live_agents);
         }
     }
 
@@ -2340,7 +2266,6 @@ impl Render for TauGui {
             .update(cx, |editor, cx| editor.style(cx).text.clone());
         let status_left = styled_status_text(Vec::new(), &text_style);
         let status_right = styled_status_text(Vec::new(), &text_style);
-        let muted_color = cx.theme().colors().text_muted;
         let active_agent_color = self
             .highlight_style_for_name(tau_themes::names::STATUS_ROLE, cx)
             .color
@@ -2388,8 +2313,6 @@ impl Render for TauGui {
                                 div()
                                     .text_color(if tab.selected {
                                         active_agent_color
-                                    } else if tab.suspended {
-                                        muted_color
                                     } else {
                                         text_style.color
                                     })
