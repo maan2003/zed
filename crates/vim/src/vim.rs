@@ -1205,6 +1205,9 @@ impl Vim {
         let prior_tx = self.current_tx;
         self.last_mode = last_mode;
         self.mode = mode;
+        self.update_editor(cx, |_, editor, _| {
+            editor.set_restrict_navigation_to_editable_ranges(mode == Mode::Insert);
+        });
         self.operator_stack.clear();
         self.selected_register.take();
         self.cancel_running_command(window, cx);

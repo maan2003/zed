@@ -991,6 +991,13 @@ impl Editor {
                             cursor,
                             action.ignore_brackets,
                         );
+                        let old_head = selection.head().to_point(map);
+                        let cursor = Self::constrain_to_editable_range(
+                            map.buffer_snapshot(),
+                            old_head,
+                            cursor.to_point(map),
+                        )
+                        .to_display_point(map);
                         selection.set_head(cursor, SelectionGoal::None);
                     }
                 });
@@ -1024,6 +1031,13 @@ impl Editor {
                             cursor,
                             action.ignore_brackets,
                         );
+                        let old_head = selection.head().to_point(map);
+                        let cursor = Self::constrain_to_editable_range(
+                            map.buffer_snapshot(),
+                            old_head,
+                            cursor.to_point(map),
+                        )
+                        .to_display_point(map);
                         selection.set_head(cursor, SelectionGoal::None);
                     }
                 });
@@ -1056,6 +1070,13 @@ impl Editor {
                             cursor,
                             action.ignore_brackets,
                         );
+                        let old_head = selection.head().to_point(map);
+                        let cursor = Self::constrain_to_editable_range(
+                            map.buffer_snapshot(),
+                            old_head,
+                            cursor.to_point(map),
+                        )
+                        .to_display_point(map);
                         selection.set_head(cursor, SelectionGoal::None);
                     }
                 });
@@ -1088,6 +1109,13 @@ impl Editor {
                             cursor,
                             action.ignore_brackets,
                         );
+                        let old_head = selection.head().to_point(map);
+                        let cursor = Self::constrain_to_editable_range(
+                            map.buffer_snapshot(),
+                            old_head,
+                            cursor.to_point(map),
+                        )
+                        .to_display_point(map);
                         selection.set_head(cursor, SelectionGoal::None);
                     }
                 });
@@ -1957,21 +1985,35 @@ impl Editor {
             let selection_anchors = this.buffer.update(cx, |buffer, cx| {
                 let anchors = {
                     let snapshot = buffer.read(cx);
-                    old_selections
+                    let editable_selections = old_selections
                         .iter()
-                        .map(|s| {
-                            let anchor = snapshot.anchor_after(s.head());
-                            s.map(|_| anchor)
+                        .map(|selection| {
+                            Self::range_is_editable(&snapshot, selection.start..selection.end)
                         })
-                        .collect::<Vec<_>>()
-                };
-                buffer.edit(
-                    old_selections
+                        .collect::<Vec<_>>();
+                    let anchors = old_selections
                         .iter()
-                        .map(|s| (s.start..s.end, text.clone())),
-                    autoindent_mode,
-                    cx,
-                );
+                        .zip(&editable_selections)
+                        .map(|(selection, editable)| {
+                            if *editable {
+                                let anchor = snapshot.anchor_after(selection.head());
+                                selection.map(|_| anchor)
+                            } else {
+                                selection.map(|point| snapshot.anchor_at(point, Bias::Left))
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let edits = old_selections
+                        .iter()
+                        .zip(editable_selections)
+                        .filter_map(|(selection, editable)| {
+                            editable.then(|| (selection.start..selection.end, text.clone()))
+                        })
+                        .collect::<Vec<_>>();
+                    drop(snapshot);
+                    buffer.edit(edits, autoindent_mode, cx);
+                    anchors
+                };
                 anchors
             });
 

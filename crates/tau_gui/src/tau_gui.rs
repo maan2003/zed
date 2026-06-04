@@ -233,13 +233,6 @@ fn load_or_create_tau_gui_settings(path: &Path) -> Result<String> {
     }
 }
 
-fn selection_outside_prompt(
-    selection_offset: usize,
-    prompt_start: usize,
-    draft_end: usize,
-) -> bool {
-    selection_offset < prompt_start || selection_offset > draft_end
-}
 #[cfg(test)]
 fn buffer_text_ends_with(buffer: &Buffer, end: usize, character: char) -> bool {
     if end == 0 {
@@ -537,50 +530,6 @@ impl TauGui {
                     eprintln!("tau-gui: failed to start a new agent draft: {error:#}");
                 }
             })
-        });
-        editor.update(cx, |editor, cx| {
-            let this = this.clone();
-            editor.set_prepare_for_insert(
-                Some(
-                    move |editor: &mut Editor, window: &mut Window, cx: &mut Context<Editor>| {
-                        use multi_buffer::ToOffset as _;
-
-                        let selection_offset = editor
-                            .selections
-                            .newest_anchor()
-                            .head()
-                            .to_offset(editor.display_snapshot(cx).buffer_snapshot())
-                            .0;
-                        let target_anchor = match this.update(cx, |this, cx| {
-                            this.prompt_insert_anchor_for_selection(selection_offset, cx)
-                        }) {
-                            Ok(target_anchor) => target_anchor,
-                            Err(error) => {
-                                eprintln!(
-                                    "tau-gui: failed to prepare prompt for insert: {error:#}"
-                                );
-                                None
-                            }
-                        };
-                        if let Some(target_anchor) = target_anchor {
-                            editor.set_autoscroll_pin(
-                                target_anchor,
-                                AutoscrollStrategy::Bottom,
-                                cx,
-                            );
-                            editor.change_selections(
-                                SelectionEffects::no_scroll(),
-                                window,
-                                cx,
-                                |selections| {
-                                    selections.select_anchor_ranges([target_anchor..target_anchor]);
-                                },
-                            );
-                        }
-                    },
-                ),
-                cx,
-            );
         });
         let draft_anchor = multi_buffer
             .read(cx)
@@ -1821,21 +1770,6 @@ impl TauGui {
         self.select_anchor(anchor, window, cx);
     }
 
-    fn prompt_insert_anchor_for_selection(
-        &self,
-        selection_offset: usize,
-        cx: &mut Context<Self>,
-    ) -> Option<multi_buffer::Anchor> {
-        use multi_buffer::ToOffset as _;
-
-        let snapshot = self.multi_buffer.read(cx).snapshot(cx);
-        let prompt_start = snapshot.anchor_in_excerpt(self.prompt_end)?;
-        let draft_end = snapshot.anchor_in_excerpt(self.draft_end)?;
-        let prompt_start = prompt_start.to_offset(&snapshot);
-        let draft_end_offset = draft_end.to_offset(&snapshot);
-        selection_outside_prompt(selection_offset, prompt_start.0, draft_end_offset.0)
-            .then_some(draft_end)
-    }
     fn select_anchor(
         &self,
         anchor: multi_buffer::Anchor,
@@ -2957,14 +2891,6 @@ mod tests {
         buffer.text_for_range(0..buffer.len()).collect()
     }
 
-    #[test]
-    fn prompt_insert_action_moves_when_selection_is_outside_draft() {
-        assert!(selection_outside_prompt(4, 5, 10));
-        assert!(!selection_outside_prompt(5, 5, 10));
-        assert!(!selection_outside_prompt(8, 5, 10));
-        assert!(!selection_outside_prompt(10, 5, 10));
-        assert!(selection_outside_prompt(11, 5, 10));
-    }
     #[gpui::test]
     fn anchor_before_stays_before_insertions_at_same_offset(cx: &mut App) {
         let buffer = cx.new(|cx| Buffer::local("ab", cx));

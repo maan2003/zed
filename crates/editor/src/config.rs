@@ -82,6 +82,7 @@ impl Editor {
         if let Some(callback) = self.prepare_for_insert.clone() {
             callback(self, window, cx);
         }
+        self.move_to_nearest_editable_points(window, cx);
     }
 
     pub fn set_show_indent_guides(&mut self, show_indent_guides: bool, cx: &mut Context<Self>) {

@@ -622,10 +622,23 @@ impl Vim {
                 window,
                 cx,
                 |s| {
+                    let constrain_to_editable_range = vim.mode == Mode::Insert;
                     s.move_cursors_with(&mut |map, cursor, goal| {
-                        motion
+                        let (new_cursor, new_goal) = motion
                             .move_point(map, cursor, goal, times, &text_layout_details)
-                            .unwrap_or((cursor, goal))
+                            .unwrap_or((cursor, goal));
+                        if constrain_to_editable_range {
+                            let cursor = cursor.to_point(map);
+                            let new_cursor = Editor::constrain_to_editable_range(
+                                map.buffer_snapshot(),
+                                cursor,
+                                new_cursor.to_point(map),
+                            )
+                            .to_display_point(map);
+                            (new_cursor, new_goal)
+                        } else {
+                            (new_cursor, new_goal)
+                        }
                     })
                 },
             );

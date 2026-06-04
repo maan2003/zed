@@ -971,6 +971,7 @@ pub struct Editor {
     pub show_local_selections: bool,
     prepare_for_insert: Option<PrepareForInsert>,
     mouse_click_selection_enabled: bool,
+    restrict_navigation_to_editable_ranges: bool,
     mode: EditorMode,
     breadcrumbs_visibility: BreadcrumbsVisibility,
     show_gutter: bool,
@@ -1724,6 +1725,7 @@ impl Editor {
             .clone_state(&self.scroll_manager, &my_snapshot, &clone_snapshot, cx);
         clone.searchable = self.searchable;
         clone.read_only = self.read_only;
+        clone.restrict_navigation_to_editable_ranges = self.restrict_navigation_to_editable_ranges;
         clone.buffers_with_disabled_indent_guides =
             self.buffers_with_disabled_indent_guides.clone();
         clone.enable_mouse_wheel_zoom = self.enable_mouse_wheel_zoom;
@@ -2173,6 +2175,7 @@ impl Editor {
             show_local_selections: true,
             prepare_for_insert: None,
             mouse_click_selection_enabled: true,
+            restrict_navigation_to_editable_ranges: false,
             show_scrollbars: ScrollbarAxes {
                 horizontal: full_mode,
                 vertical: full_mode,
@@ -3063,6 +3066,101 @@ impl Editor {
 
     pub fn read_only(&self, cx: &App) -> bool {
         self.read_only || self.buffer.read(cx).read_only()
+    }
+
+    pub fn point_is_editable(snapshot: &MultiBufferSnapshot, point: Point) -> bool {
+        snapshot
+            .point_to_buffer_point(point)
+            .is_some_and(|(buffer, _)| buffer.capability.editable())
+    }
+
+    pub fn range_is_editable(snapshot: &MultiBufferSnapshot, range: Range<Point>) -> bool {
+        if range.end < range.start {
+            return false;
+        }
+
+        if range.start == range.end {
+            return Self::point_is_editable(snapshot, range.start);
+        }
+
+        let buffer_ranges = snapshot.range_to_buffer_ranges(range);
+        !buffer_ranges.is_empty()
+            && buffer_ranges
+                .into_iter()
+                .all(|(buffer, range, _)| buffer.capability.editable() && range.start < range.end)
+    }
+
+    pub fn constrain_to_editable_range(
+        snapshot: &MultiBufferSnapshot,
+        origin: Point,
+        proposed: Point,
+    ) -> Point {
+        let range = if origin <= proposed {
+            origin..proposed
+        } else {
+            proposed..origin
+        };
+
+        if Self::point_is_editable(snapshot, proposed) && Self::range_is_editable(snapshot, range) {
+            proposed
+        } else {
+            origin
+        }
+    }
+
+    pub fn set_restrict_navigation_to_editable_ranges(&mut self, restrict: bool) {
+        self.restrict_navigation_to_editable_ranges = restrict;
+    }
+
+    pub fn nearest_editable_point(snapshot: &DisplaySnapshot, point: Point) -> Option<Point> {
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        if Self::point_is_editable(buffer_snapshot, point) {
+            return Some(point);
+        }
+
+        let mut left = point.to_display_point(snapshot);
+        let mut right = left;
+        loop {
+            let next_left = movement::left(snapshot, left);
+            let next_right = movement::right(snapshot, right);
+            let left_changed = next_left != left;
+            let right_changed = next_right != right;
+
+            if left_changed {
+                left = next_left;
+                let point = left.to_point(snapshot);
+                if Self::point_is_editable(buffer_snapshot, point) {
+                    return Some(point);
+                }
+            }
+
+            if right_changed {
+                right = next_right;
+                let point = right.to_point(snapshot);
+                if Self::point_is_editable(buffer_snapshot, point) {
+                    return Some(point);
+                }
+            }
+
+            if !left_changed && !right_changed {
+                return None;
+            }
+        }
+    }
+
+    pub fn move_to_nearest_editable_points(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+            selections.move_cursors_with(&mut |map, cursor, goal| {
+                let point = cursor.to_point(map);
+                if Self::point_is_editable(map.buffer_snapshot(), point) {
+                    (cursor, goal)
+                } else if let Some(point) = Self::nearest_editable_point(map, point) {
+                    (point.to_display_point(map), SelectionGoal::None)
+                } else {
+                    (cursor, goal)
+                }
+            })
+        });
     }
 
     pub fn set_read_only(&mut self, read_only: bool) {
@@ -4809,6 +4907,7 @@ impl Editor {
             let linked_edits = this.linked_edits_for_selections(Arc::from(""), cx);
 
             let display_map = this.display_map.update(cx, |map, cx| map.snapshot(cx));
+            let buffer_snapshot = display_map.buffer_snapshot();
             let mut selections = this.selections.all::<MultiBufferPoint>(&display_map);
             for selection in &mut selections {
                 if selection.is_empty() {
@@ -4839,6 +4938,8 @@ impl Editor {
                         }
                     }
 
+                    new_head =
+                        Self::constrain_to_editable_range(buffer_snapshot, old_head, new_head);
                     selection.set_head(new_head, SelectionGoal::None);
                 }
             }
@@ -4865,7 +4966,14 @@ impl Editor {
             this.change_selections(Default::default(), window, cx, |s| {
                 s.move_with(&mut |map, selection| {
                     if selection.is_empty() {
-                        let cursor = movement::right(map, selection.head());
+                        let old_head = selection.head().to_point(map);
+                        let cursor = movement::right(map, selection.head()).to_point(map);
+                        let cursor = Self::constrain_to_editable_range(
+                            map.buffer_snapshot(),
+                            old_head,
+                            cursor,
+                        )
+                        .to_display_point(map);
                         selection.end = cursor;
                         selection.reversed = true;
                         selection.goal = SelectionGoal::None;

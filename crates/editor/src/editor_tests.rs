@@ -7150,6 +7150,83 @@ fn test_manipulate_text_handles_cross_excerpt_edit_that_applies_differently(
         editor
     });
 }
+#[gpui::test]
+fn test_editing_commands_do_not_cross_readonly_excerpt_boundary(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+
+    let transcript = cx.new(|cx| {
+        let mut buffer = Buffer::local("readonly\n", cx);
+        buffer.set_capability(language::Capability::Read, cx);
+        buffer
+    });
+    let prompt = cx.new(|cx| Buffer::local("draft", cx));
+    let multibuffer = cx.new(|cx| {
+        let mut multibuffer = MultiBuffer::without_headers(ReadWrite);
+        multibuffer.set_excerpts_for_path(
+            PathKey::sorted(0),
+            transcript.clone(),
+            [Point::new(0, 0)..Point::new(1, 0)],
+            0,
+            cx,
+        );
+        multibuffer.set_excerpts_for_path(
+            PathKey::sorted(1),
+            prompt.clone(),
+            [Point::new(0, 0)..Point::new(0, 5)],
+            0,
+            cx,
+        );
+        multibuffer
+    });
+
+    cx.add_window(|window, cx| {
+        let mut editor = build_editor(multibuffer, window, cx);
+
+        editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+            selections.select_ranges([Point::new(0, 4)..Point::new(0, 4)]);
+        });
+        editor.prepare_for_insert(window, cx);
+        let selections = editor.selections.all::<Point>(&editor.display_snapshot(cx));
+        assert_eq!(selections[0].range(), Point::new(2, 0)..Point::new(2, 0));
+        editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+            selections.select_ranges([Point::new(2, 0)..Point::new(2, 0)]);
+        });
+        editor.backspace(&Backspace, window, cx);
+        assert_eq!(transcript.read(cx).text(), "readonly\n");
+        assert_eq!(prompt.read(cx).text(), "draft");
+        let selections = editor.selections.all::<Point>(&editor.display_snapshot(cx));
+        assert_eq!(selections[0].range(), Point::new(2, 0)..Point::new(2, 0));
+        editor.set_restrict_navigation_to_editable_ranges(true);
+        editor.move_up(&MoveUp, window, cx);
+        let selections = editor.selections.all::<Point>(&editor.display_snapshot(cx));
+        assert_eq!(selections[0].range(), Point::new(2, 0)..Point::new(2, 0));
+
+        editor.set_restrict_navigation_to_editable_ranges(false);
+        editor.move_up(&MoveUp, window, cx);
+        let selections = editor.selections.all::<Point>(&editor.display_snapshot(cx));
+        assert_eq!(selections[0].range(), Point::new(1, 0)..Point::new(1, 0));
+
+        editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+            selections.select_ranges([Point::new(2, 0)..Point::new(2, 0)]);
+        });
+
+        editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+            selections.select_ranges([Point::new(0, 8)..Point::new(0, 8)]);
+        });
+        editor.delete(&Delete, window, cx);
+        assert_eq!(transcript.read(cx).text(), "readonly\n");
+        assert_eq!(prompt.read(cx).text(), "draft");
+
+        editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+            selections.select_ranges([Point::new(0, 4)..Point::new(2, 2)]);
+        });
+        editor.insert("", window, cx);
+        assert_eq!(transcript.read(cx).text(), "readonly\n");
+        assert_eq!(prompt.read(cx).text(), "draft");
+
+        editor
+    });
+}
 
 #[gpui::test]
 async fn test_manipulate_text(cx: &mut TestAppContext) {
