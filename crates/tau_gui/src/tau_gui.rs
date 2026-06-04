@@ -2294,7 +2294,7 @@ impl TauGui {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .px(px(4.))
+                    .pl(px(4.))
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .cursor_pointer()
@@ -2315,8 +2315,8 @@ impl TauGui {
                             .child(title)
                             .child(
                                 GradientFade::new(rail_bg, rail_bg, rail_bg)
-                                    .width(px(24.))
-                                    .gradient_stop(0.55),
+                                    .width(px(12.))
+                                    .gradient_stop(0.7),
                             ),
                     )
                     .when(is_running, |this| {
