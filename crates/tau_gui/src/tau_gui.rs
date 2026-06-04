@@ -25,7 +25,7 @@ use tau_proto::{
 };
 use text::ToOffset as _;
 use theme::ActiveTheme as _;
-use ui::{Color, CommonAnimationExt as _, Icon, IconName, IconSize};
+use ui::{Color, CommonAnimationExt as _, GradientFade, Icon, IconName, IconSize};
 
 mod activity_state;
 mod agent_state;
@@ -2287,7 +2287,9 @@ impl TauGui {
                 } else {
                     text_style.color
                 };
+                let rail_bg = colors.editor_background;
                 div()
+                    .relative()
                     .w_full()
                     .flex()
                     .items_center()
@@ -2304,28 +2306,27 @@ impl TauGui {
                     )
                     .child(
                         div()
+                            .relative()
                             .flex_grow(1.0)
+                            .min_w_0()
                             .overflow_hidden()
-                            .truncate()
+                            .whitespace_nowrap()
                             .text_color(text_color)
-                            .child(title),
+                            .child(title)
+                            .child(
+                                GradientFade::new(rail_bg, rail_bg, rail_bg)
+                                    .width(px(24.))
+                                    .gradient_stop(0.55),
+                            ),
                     )
-                    .child(
-                        div()
-                            .w(px(16.))
-                            .flex_none()
-                            .flex()
-                            .justify_end()
-                            .items_center()
-                            .when(is_running, |this| {
-                                this.child(
-                                    Icon::new(IconName::LoadCircle)
-                                        .size(IconSize::XSmall)
-                                        .color(Color::Custom(active_agent_color))
-                                        .with_rotate_animation(2),
-                                )
-                            }),
-                    )
+                    .when(is_running, |this| {
+                        this.child(
+                            Icon::new(IconName::LoadCircle)
+                                .size(IconSize::XSmall)
+                                .color(Color::Custom(active_agent_color))
+                                .with_rotate_animation(2),
+                        )
+                    })
             })
             .collect::<Vec<_>>();
 
