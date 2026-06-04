@@ -991,8 +991,14 @@ impl EditorElement {
                     }
 
                     let mut block_width = cell_width;
+                    let cursor_color = if selection.is_local {
+                        cursor_row_layout
+                            .color_for_index(cursor_column)
+                            .unwrap_or(player_color.cursor)
+                    } else {
+                        player_color.cursor
+                    };
                     let mut block_text = None;
-
                     let is_cursor_in_redacted_range = redacted_ranges
                         .iter()
                         .any(|range| range.start <= cursor_position && cursor_position < range.end);
@@ -1094,7 +1100,7 @@ impl EditorElement {
                     }
 
                     let mut cursor = CursorLayout {
-                        color: player_color.cursor,
+                        color: cursor_color,
                         block_width,
                         origin: point(x, y),
                         line_height,
@@ -7638,6 +7644,31 @@ impl LineWithInvisibles {
                     }
                     fragment_start_index += len;
                     fragment_start_x = fragment_end_x;
+                }
+            }
+        }
+
+        None
+    }
+
+    pub fn color_for_index(&self, index: usize) -> Option<Hsla> {
+        let mut fragment_start_index = 0;
+
+        for fragment in &self.fragments {
+            match fragment {
+                LineFragment::Text(shaped_line) => {
+                    let fragment_end_index = fragment_start_index + shaped_line.len;
+                    if index < fragment_end_index {
+                        return shaped_line.color_for_index(index - fragment_start_index);
+                    }
+                    fragment_start_index = fragment_end_index;
+                }
+                LineFragment::Element { len, .. } => {
+                    let fragment_end_index = fragment_start_index + len;
+                    if index < fragment_end_index {
+                        return None;
+                    }
+                    fragment_start_index = fragment_end_index;
                 }
             }
         }
