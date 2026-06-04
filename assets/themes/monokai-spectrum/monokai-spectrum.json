@@ -129,9 +129,9 @@
         "predictive.border": "#69676C",
         "players": [
           {
-            "cursor": "#5AD4E6",
-            "background": "#5AD4E6",
-            "selection": "#5AD4E63D"
+            "cursor": "#BBBBBB",
+            "background": "#BBBBBB",
+            "selection": "#BBBBBB40"
           },
           {
             "cursor": "#FC618D",
