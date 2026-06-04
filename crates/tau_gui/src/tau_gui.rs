@@ -2288,7 +2288,6 @@ impl TauGui {
                     text_style.color
                 };
                 div()
-                    .h(text_style.line_height)
                     .w_full()
                     .flex()
                     .items_center()
@@ -2413,6 +2412,7 @@ impl Render for TauGui {
             .id("tau-gui")
             .size_full()
             .flex()
+            .flex_row()
             .p(px(2.))
             .bg(cx.theme().colors().editor_background)
             .key_context("TauGui")
@@ -2421,6 +2421,7 @@ impl Render for TauGui {
                     .id("tau-gui-editor")
                     .h_full()
                     .flex_grow(1.0)
+                    .min_w_0()
                     .overflow_hidden()
                     .child(self.editor.clone()),
             )
