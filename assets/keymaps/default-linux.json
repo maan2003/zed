@@ -369,6 +369,25 @@
     },
   },
   {
+    "context": "TauGui > Editor && !showing_completions",
+    "use_key_equivalents": true,
+    "bindings": {
+      "shift-enter": "editor::Newline",
+      "enter": "tau_gui::SubmitPrompt",
+      "tab": "tau_gui::RoleCycle",
+      "shift-tab": "tau_gui::RoleCycleGroup",
+    },
+  },
+  {
+    "context": "TauGui > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-k": "tau_gui::AgentPrevious",
+      "ctrl-j": "tau_gui::AgentNext",
+      "ctrl-shift-n": "tau_gui::AgentNew",
+    },
+  },
+  {
     "context": "ThreadHistory",
     "bindings": {
       "backspace": "agent::RemoveSelectedThread",

@@ -11,9 +11,9 @@ use editor::{
     scroll::AutoscrollStrategy,
 };
 use gpui::{
-    App, Context, Entity, Focusable as _, FontStyle, FontWeight, HighlightStyle, Hsla, KeyBinding,
-    MouseButton, Rgba, StyledText, Subscription, Task, TextStyle, WeakEntity, Window,
-    WindowOptions, actions, div, prelude::*, px,
+    App, Context, Entity, Focusable as _, FontStyle, FontWeight, HighlightStyle, Hsla, MouseButton,
+    Rgba, StyledText, Subscription, Task, TextStyle, WeakEntity, Window, WindowOptions, actions,
+    div, prelude::*, px,
 };
 use language::{Buffer, BufferEvent, Capability, Point};
 use multi_buffer::{MultiBuffer, PathKey};
@@ -83,20 +83,6 @@ fn run() -> Result<()> {
                 return;
             }
 
-            eprintln!("tau-gui: binding prompt actions in TauGui > Editor");
-            cx.bind_keys([
-                KeyBinding::new(
-                    "shift-enter",
-                    editor::actions::Newline,
-                    Some("TauGui > Editor"),
-                ),
-                KeyBinding::new("enter", SubmitPrompt, Some("TauGui > Editor")),
-                KeyBinding::new("tab", RoleCycle, Some("TauGui > Editor")),
-                KeyBinding::new("shift-tab", RoleCycleGroup, Some("TauGui > Editor")),
-                KeyBinding::new("ctrl-k", AgentPrevious, Some("TauGui > Editor")),
-                KeyBinding::new("ctrl-j", AgentNext, Some("TauGui > Editor")),
-                KeyBinding::new("ctrl-shift-n", AgentNew, Some("TauGui > Editor")),
-            ]);
             cx.activate(true);
 
             let attach_target = attach_target.clone();
