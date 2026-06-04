@@ -25,7 +25,7 @@ use tau_proto::{
 };
 use text::ToOffset as _;
 use theme::ActiveTheme as _;
-use ui::{Color, CommonAnimationExt as _, GradientFade, Icon, IconName, IconSize};
+use ui::{Color, CommonAnimationExt as _, Icon, IconName, IconSize};
 
 mod activity_state;
 mod agent_state;
@@ -2287,7 +2287,6 @@ impl TauGui {
                 } else {
                     text_style.color
                 };
-                let rail_bg = colors.editor_background;
                 div()
                     .relative()
                     .w_full()
@@ -2306,18 +2305,12 @@ impl TauGui {
                     )
                     .child(
                         div()
-                            .relative()
                             .flex_grow(1.0)
                             .min_w_0()
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_color(text_color)
-                            .child(title)
-                            .child(
-                                GradientFade::new(rail_bg, rail_bg, rail_bg)
-                                    .width(px(12.))
-                                    .gradient_stop(0.7),
-                            ),
+                            .child(title),
                     )
                     .when(is_running, |this| {
                         this.child(
