@@ -9,7 +9,7 @@
   "theme": {
     "mode": "dark",
     "light": "One Light",
-    "dark": "Gruvbox Dark Hard",
+    "dark": "DPC Dark",
   },
   "icon_theme": "Zed (Default)",
   // The name of a base set of key bindings to use.
