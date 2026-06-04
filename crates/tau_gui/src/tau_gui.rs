@@ -7,7 +7,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow};
 use editor::{
-    Editor, EditorMode, Inlay, SelectionEffects, SizingBehavior, scroll::AutoscrollStrategy,
+    Editor, EditorMode, EditorRightPrompt, Inlay, SelectionEffects, SizingBehavior,
+    scroll::AutoscrollStrategy,
 };
 use gpui::{
     App, Context, Entity, Focusable as _, FontStyle, FontWeight, HighlightStyle, Hsla, KeyBinding,
@@ -114,6 +115,7 @@ fn run() -> Result<()> {
 struct AttachTarget {
     socket_path: PathBuf,
     session_id: tau_proto::SessionId,
+    project_root: PathBuf,
 }
 
 fn attach_target_for_current_dir() -> Result<AttachTarget> {
@@ -127,9 +129,9 @@ fn attach_target_for_current_dir() -> Result<AttachTarget> {
     Ok(AttachTarget {
         socket_path: tau_harness::runtime_dir::socket_path(&daemon_dir),
         session_id,
+        project_root,
     })
 }
-
 fn init_app(cx: &mut App) -> Result<()> {
     assets::Assets.load_fonts(cx)?;
     let settings_path = tau_gui_settings_path()?;
@@ -299,6 +301,7 @@ struct TauGui {
     _poll_task: Task<()>,
     _subscriptions: Vec<Subscription>,
     session_id: tau_proto::SessionId,
+    project_root: PathBuf,
     prompt_state: PromptState,
     cli_theme: tau_themes::Theme,
     tool_state: ToolState,
@@ -367,6 +370,7 @@ impl TauGui {
             _poll_task: poll_task,
             _subscriptions: ui_subscriptions,
             session_id: attach_target.session_id,
+            project_root: attach_target.project_root,
             prompt_state: PromptState::default(),
             cli_theme: cli_theme::select_theme(tau_config::settings::CliTheme::Dark),
             tool_state: ToolState::default(),
@@ -774,7 +778,6 @@ impl TauGui {
                 if let Some(agent_id) = &progress.agent_id {
                     self.agents.mark_live(agent_id.clone());
                 }
-                self.tool_state.record_delegate_progress(&progress);
                 let display = progress
                     .display
                     .clone()
@@ -1807,14 +1810,15 @@ impl TauGui {
     }
 
     fn prompt_placeholder_text(&self) -> String {
-        if let Some(agent_id) = self.agents.current_agent_id() {
-            return format!("Write a message to {agent_id}…");
-        }
+        "Write a message…".to_owned()
+    }
 
-        format!(
-            "Start new {} agent…",
-            self.current_role.as_deref().unwrap_or("Tau")
-        )
+    fn project_root_label(&self) -> String {
+        self.project_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.project_root.display().to_string())
     }
 
     fn draft_text(&self, cx: &mut Context<Self>) -> String {
@@ -2183,7 +2187,45 @@ impl TauGui {
     }
 
     fn update_status_line(&mut self, cx: &mut Context<Self>) {
+        self.update_right_prompt(cx);
         cx.notify();
+    }
+
+    fn update_right_prompt(&mut self, cx: &mut Context<Self>) {
+        let right_prompt = self.right_prompt(cx);
+        self.editor
+            .update(cx, |editor, cx| editor.set_right_prompt(right_prompt, cx));
+    }
+
+    fn right_prompt(&self, cx: &App) -> Option<EditorRightPrompt> {
+        let anchor = self
+            .multi_buffer
+            .read(cx)
+            .snapshot(cx)
+            .anchor_in_excerpt(self.draft_end)?;
+        let separator_style = self.highlight_style_for_name(tau_themes::names::MODEL_STATUS, cx);
+        let mut spans = Vec::new();
+        if let Some(context) = self.context_status_chip() {
+            spans.push((
+                format!("#{context}"),
+                self.highlight_style_for_name(tau_themes::names::STATUS_CONTEXT, cx),
+            ));
+        }
+        let status_spans = self.status_chip_spans(self.status_line().prompt_chips, cx);
+        if !status_spans.is_empty() {
+            if !spans.is_empty() {
+                spans.push((" ".to_owned(), separator_style));
+            }
+            spans.extend(status_spans);
+        }
+        if !spans.is_empty() {
+            spans.push((" ".to_owned(), separator_style));
+        }
+        spans.push((
+            self.project_root_label(),
+            self.highlight_style_for_name(tau_themes::names::STATUS_MODEL, cx),
+        ));
+        Some(EditorRightPrompt { anchor, spans })
     }
 
     fn status_line(&self) -> status_line::StatusLine {
@@ -2197,9 +2239,6 @@ impl TauGui {
             role_default_verbosity: self
                 .role_state
                 .default_verbosity(self.current_role.as_deref()),
-            main_tools_status: self.main_tools_status_chip(),
-            active_agents: self.agents.active_count(),
-            context_status: self.context_status_chip(),
         })
     }
 
@@ -2242,14 +2281,7 @@ impl TauGui {
     }
 
     fn record_main_tool_completed(&mut self, call_id: &str) {
-        self.tool_state.finish_call(call_id);
         self.main_tool_activity.record_completed(call_id);
-    }
-
-    fn main_tools_status_chip(&self) -> Option<String> {
-        self.tool_state
-            .live_delegate_tools_status_chip()
-            .or_else(|| self.main_tool_activity.status_chip())
     }
 
     fn context_status_chip(&self) -> Option<String> {
@@ -2295,14 +2327,12 @@ impl TauGui {
 impl Render for TauGui {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let status_line = self.status_line();
-        let status_left = self.status_chip_spans(status_line.left_chips, cx);
-        let status_right = self.status_chip_spans(status_line.right_chips, cx);
         let agent_tabs = status_line.agent_tabs;
         let text_style = self
             .editor
             .update(cx, |editor, cx| editor.style(cx).text.clone());
-        let status_left = styled_status_text(status_left, &text_style);
-        let status_right = styled_status_text(status_right, &text_style);
+        let status_left = styled_status_text(Vec::new(), &text_style);
+        let status_right = styled_status_text(Vec::new(), &text_style);
         let muted_color = cx.theme().colors().text_muted;
         let active_agent_color = self
             .highlight_style_for_name(tau_themes::names::STATUS_ROLE, cx)

@@ -120,6 +120,11 @@ struct InlineBlameLayout {
     entry: BlameEntry,
 }
 
+struct RightPromptLayout {
+    line: ShapedLine,
+    origin: gpui::Point<Pixels>,
+}
+
 impl SelectionLayout {
     fn new<T: ToPoint + ToDisplayPoint + Clone>(
         selection: Selection<T>,
@@ -2038,6 +2043,77 @@ impl EditorElement {
             bounds,
             buffer_id,
             entry,
+        })
+    }
+
+    fn layout_right_prompt(
+        &self,
+        editor_snapshot: &EditorSnapshot,
+        line_layouts: &[LineWithInvisibles],
+        start_row: DisplayRow,
+        end_row: DisplayRow,
+        content_origin: gpui::Point<Pixels>,
+        scroll_position: gpui::Point<ScrollOffset>,
+        scroll_pixel_position: gpui::Point<ScrollPixelOffset>,
+        line_height: Pixels,
+        gap: Pixels,
+        text_hitbox: &Hitbox,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<RightPromptLayout> {
+        let editor = self.editor.read(cx);
+        let right_prompt = editor.right_prompt.as_ref()?;
+        let display_point = right_prompt
+            .anchor
+            .to_display_point(&editor_snapshot.display_snapshot);
+        let display_row = display_point.row();
+        if !(start_row..end_row).contains(&display_row) {
+            return None;
+        }
+
+        let line_ix = display_row.minus(start_row) as usize;
+        let line_layout = line_layouts.get(line_ix)?;
+
+        let mut text = String::new();
+        let mut runs = Vec::new();
+        let font_size = self.style.text.font_size.to_pixels(window.rem_size());
+        for (span, highlight) in &right_prompt.spans {
+            if span.is_empty() {
+                continue;
+            }
+            let start = text.len();
+            text.push_str(span);
+            let style = self.style.text.clone().highlight(highlight.clone());
+            runs.push(TextRun {
+                len: text.len() - start,
+                font: style.font(),
+                color: style.color,
+                background_color: style.background_color,
+                underline: style.underline,
+                strikethrough: style.strikethrough,
+            });
+        }
+
+        if text.is_empty() {
+            return None;
+        }
+
+        let line = window
+            .text_system()
+            .shape_line(text.into(), font_size, &runs, None);
+        let prompt_x = text_hitbox.bounds.right() - line.width;
+        let line_end = Pixels::from(
+            ScrollPixelOffset::from(content_origin.x + line_layout.width) - scroll_pixel_position.x,
+        );
+        if line_end + gap > prompt_x {
+            return None;
+        }
+
+        let y =
+            content_origin.y + line_height * ((display_row.as_f64() - scroll_position.y) as f32);
+        Some(RightPromptLayout {
+            line,
+            origin: point(prompt_x, y),
         })
     }
 
@@ -5503,6 +5579,7 @@ impl EditorElement {
                 self.paint_inline_diagnostics(layout, window, cx);
                 self.paint_inline_blame(layout, window, cx);
                 self.paint_inline_code_actions(layout, window, cx);
+                self.paint_right_prompt(layout, window, cx);
                 self.paint_diff_hunk_controls(layout, window, cx);
                 window.with_element_namespace("crease_trailers", |window| {
                     for trailer in layout.crease_trailers.iter_mut().flatten() {
@@ -6212,6 +6289,24 @@ impl EditorElement {
         if let Some(mut blame_layout) = layout.inline_blame_layout.take() {
             window.paint_layer(layout.position_map.text_hitbox.bounds, |window| {
                 blame_layout.element.paint(window, cx);
+            })
+        }
+    }
+
+    fn paint_right_prompt(&mut self, layout: &mut EditorLayout, window: &mut Window, cx: &mut App) {
+        if let Some(right_prompt) = layout.right_prompt_layout.take() {
+            window.paint_layer(layout.position_map.text_hitbox.bounds, |window| {
+                right_prompt
+                    .line
+                    .paint(
+                        right_prompt.origin,
+                        layout.position_map.line_height,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    )
+                    .log_err();
             })
         }
     }
@@ -8816,6 +8911,21 @@ impl Element for EditorElement {
                         cx,
                     );
 
+                    let right_prompt_layout = self.layout_right_prompt(
+                        &snapshot,
+                        &line_layouts,
+                        start_row,
+                        end_row,
+                        content_origin,
+                        scroll_position,
+                        scroll_pixel_position,
+                        line_height,
+                        em_width,
+                        &text_hitbox,
+                        window,
+                        cx,
+                    );
+
                     let mut inline_blame_layout = None;
                     let mut inline_code_actions = None;
                     if let Some(newest_selection_head) = newest_selection_head {
@@ -9338,6 +9448,7 @@ impl Element for EditorElement {
                         inline_diagnostics,
                         inline_blame_layout,
                         inline_code_actions,
+                        right_prompt_layout,
                         blocks,
                         spacer_blocks,
                         cursors,
@@ -9553,6 +9664,7 @@ pub struct EditorLayout {
     inline_diagnostics: HashMap<DisplayRow, AnyElement>,
     inline_blame_layout: Option<InlineBlameLayout>,
     inline_code_actions: Option<AnyElement>,
+    right_prompt_layout: Option<RightPromptLayout>,
     blocks: Vec<BlockLayout>,
     spacer_blocks: Vec<BlockLayout>,
     highlighted_ranges: Vec<(Range<DisplayPoint>, Hsla)>,

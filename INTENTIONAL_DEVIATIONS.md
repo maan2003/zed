@@ -22,6 +22,12 @@ When the protocol sends `ActionOutput::EditorBuffer`, `tau-gui` should treat it 
 
 Unlike `tau-cli`, `tau-gui` intentionally omits the `&session` chip from the status line. The GUI attaches to the harness/session for the current project, does not support session switching yet, and uses the status line space for agent tabs and model/parameter status.
 
+## Status metadata lives in the editor prompt
+
+Unlike `tau-cli`, `tau-gui` keeps the status bar focused on agent tabs. Per-agent metadata such as cwd, context usage, and model/parameter override chips is rendered as a right-aligned prompt adornment in the active editor instead of as left/right terminal-style status chips.
+
+This is intentional because those values are scoped to the selected agent and prompt, while the GUI status bar is used for agent navigation. Service tier is shown as `⚡` rather than the terminal-style `!fast` marker.
+
 ## No session switching for now
 
 `tau-gui` intentionally does not support session switching yet. It attaches to the harness/session for the current project and should avoid building session-switch UI until that becomes a deliberate GUI feature.

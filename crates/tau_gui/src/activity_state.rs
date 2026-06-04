@@ -38,11 +38,6 @@ impl MainToolActivity {
         self.backgrounded_tools.contains(call_id)
     }
 
-    pub(crate) fn status_chip(&self) -> Option<String> {
-        ((self.visible || !self.backgrounded_tools.is_empty()) && self.total != 0)
-            .then(|| format!("{}/{}", self.completed, self.total))
-    }
-
     pub(crate) fn reset(&mut self) {
         *self = Self::default();
     }
@@ -53,20 +48,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn status_tracks_requested_backgrounded_and_completed_tools() {
+    fn tracks_requested_backgrounded_and_completed_tools() {
         let mut activity = MainToolActivity::default();
-        assert_eq!(activity.status_chip(), None);
 
         activity.add_requested_tools(2);
-        assert_eq!(activity.status_chip().as_deref(), Some("0/2"));
-
         activity.record_backgrounded("call-1");
         assert!(activity.is_backgrounded("call-1"));
-        assert_eq!(activity.status_chip().as_deref(), Some("0/2"));
 
         activity.record_completed("call-1");
         assert!(!activity.is_backgrounded("call-1"));
-        assert_eq!(activity.status_chip().as_deref(), Some("1/2"));
     }
 
     #[test]
@@ -77,7 +67,6 @@ mod tests {
 
         activity.reset();
 
-        assert_eq!(activity.status_chip(), None);
         assert!(!activity.is_backgrounded("call-1"));
     }
 }

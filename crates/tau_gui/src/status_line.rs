@@ -19,8 +19,7 @@ impl AgentTab {
 
 pub(crate) struct StatusLine {
     pub(crate) agent_tabs: Vec<AgentTab>,
-    pub(crate) left_chips: Vec<Chip>,
-    pub(crate) right_chips: Vec<Chip>,
+    pub(crate) prompt_chips: Vec<Chip>,
 }
 
 pub(crate) struct StatusLineInput<'a> {
@@ -31,29 +30,19 @@ pub(crate) struct StatusLineInput<'a> {
     pub(crate) current_params: tau_proto::ModelParams,
     pub(crate) role_default_effort: Option<tau_proto::Effort>,
     pub(crate) role_default_verbosity: Option<tau_proto::Verbosity>,
-    pub(crate) main_tools_status: Option<String>,
-    pub(crate) active_agents: usize,
-    pub(crate) context_status: Option<String>,
 }
 
 pub(crate) fn build(input: StatusLineInput<'_>) -> StatusLine {
-    let left_chips = left_chips(
+    let prompt_chips = prompt_chips(
         left_identity(&input),
         input.baseline_params,
         input.current_params,
         input.role_default_effort,
         input.role_default_verbosity,
     );
-    let right_chips = right_chips(
-        input.main_tools_status,
-        input.active_agents,
-        input.context_status,
-    );
-
     StatusLine {
         agent_tabs: input.agent_tabs,
-        left_chips,
-        right_chips,
+        prompt_chips,
     }
 }
 
@@ -78,9 +67,7 @@ enum LeftStatusIdentity<'a> {
 }
 
 fn left_identity<'a>(input: &'a StatusLineInput<'a>) -> Option<LeftStatusIdentity<'a>> {
-    if input.agent_tabs.iter().any(|agent| agent.selected) {
-        None
-    } else if let Some(role) = input.current_role {
+    if let Some(role) = input.current_role {
         Some(LeftStatusIdentity::Role(role))
     } else if let Some(model) = input.current_model {
         Some(LeftStatusIdentity::Model(model))
@@ -89,7 +76,7 @@ fn left_identity<'a>(input: &'a StatusLineInput<'a>) -> Option<LeftStatusIdentit
     }
 }
 
-fn left_chips(
+fn prompt_chips(
     identity: Option<LeftStatusIdentity<'_>>,
     baseline_params: Option<tau_proto::ModelParams>,
     current_params: tau_proto::ModelParams,
@@ -100,9 +87,7 @@ fn left_chips(
 
     let mut chips = Vec::new();
     match identity {
-        Some(LeftStatusIdentity::Role(role)) => {
-            chips.push(Chip::new(format!("+{role}"), names::STATUS_ROLE))
-        }
+        Some(LeftStatusIdentity::Role(role)) => chips.push(Chip::new(role, names::STATUS_ROLE)),
         Some(LeftStatusIdentity::Model(model)) => {
             chips.push(Chip::new(format!("={model}"), names::STATUS_MODEL))
         }
@@ -124,38 +109,10 @@ fn left_chips(
         ));
     }
     if show_service_tier_status(baseline_params, current_params) {
-        let service_tier = current_params
-            .service_tier
-            .map(|tier| tier.as_str())
-            .unwrap_or("off");
-        chips.push(Chip::new(
-            format!("!{service_tier}"),
-            names::STATUS_SERVICE_TIER,
-        ));
+        chips.push(Chip::new("⚡", names::STATUS_SERVICE_TIER));
     }
     chips
 }
-
-fn right_chips(
-    main_tools_status: Option<String>,
-    active_agents: usize,
-    context_status: Option<String>,
-) -> Vec<Chip> {
-    use tau_themes::names;
-
-    let mut chips = Vec::new();
-    if let Some(tools) = main_tools_status {
-        chips.push(Chip::new(format!("%{tools}"), names::STATUS_TOOLS));
-    }
-    if active_agents > 0 {
-        chips.push(Chip::new(format!("@{active_agents}"), names::STATUS_AGENTS));
-    }
-    if let Some(context) = context_status {
-        chips.push(Chip::new(format!("#{context}"), names::STATUS_CONTEXT));
-    }
-    chips
-}
-
 fn show_effort_status(
     baseline_params: Option<tau_proto::ModelParams>,
     current_params: tau_proto::ModelParams,
@@ -208,14 +165,11 @@ mod tests {
             current_params: tau_proto::ModelParams::default(),
             role_default_effort: None,
             role_default_verbosity: None,
-            main_tools_status: None,
-            active_agents: 0,
-            context_status: None,
         }
     }
 
     #[test]
-    fn build_hides_primary_identity_when_selected_agent_tab_exists() {
+    fn build_renders_role_identity_when_selected_agent_tab_exists() {
         let status_line = build(input(vec![AgentTab::new(
             "agent-a".to_owned(),
             true,
@@ -223,9 +177,8 @@ mod tests {
         )]));
 
         assert_eq!(status_line.agent_tabs[0].label, "@agent-a ");
-        assert!(status_line.left_chips.is_empty());
+        assert_eq!(status_line.prompt_chips[0].text, "senior-engineer");
     }
-
     #[test]
     fn build_renders_role_identity_without_selected_agent_tab() {
         let status_line = build(input(vec![AgentTab::new(
@@ -234,16 +187,16 @@ mod tests {
             false,
         )]));
 
-        assert_eq!(status_line.left_chips[0].text, "+senior-engineer");
+        assert_eq!(status_line.prompt_chips[0].text, "senior-engineer");
         assert_eq!(
-            status_line.left_chips[0].style_name,
+            status_line.prompt_chips[0].style_name,
             tau_themes::names::STATUS_ROLE
         );
     }
 
     #[test]
-    fn left_chips_can_omit_primary_identity() {
-        let chips = left_chips(None, None, tau_proto::ModelParams::default(), None, None);
+    fn prompt_chips_can_omit_primary_identity() {
+        let chips = prompt_chips(None, None, tau_proto::ModelParams::default(), None, None);
 
         assert!(
             chips.iter().all(|chip| chip.text != "no role selected"),
@@ -252,8 +205,8 @@ mod tests {
     }
 
     #[test]
-    fn left_chips_render_no_role_when_identity_says_so() {
-        let chips = left_chips(
+    fn prompt_chips_render_no_role_when_identity_says_so() {
+        let chips = prompt_chips(
             Some(LeftStatusIdentity::NoRoleSelected),
             None,
             tau_proto::ModelParams::default(),
@@ -263,25 +216,5 @@ mod tests {
 
         assert_eq!(chips[0].text, "no role selected");
         assert_eq!(chips[0].style_name, tau_themes::names::MODEL_STATUS);
-    }
-
-    #[test]
-    fn right_chips_render_tool_agent_and_context_status() {
-        let chips = right_chips(Some("1/2".to_owned()), 1, Some("50%".to_owned()));
-
-        assert_eq!(chips.len(), 3);
-        assert_eq!(chips[0].text, "%1/2");
-        assert_eq!(chips[0].style_name, tau_themes::names::STATUS_TOOLS);
-        assert_eq!(chips[1].text, "@1");
-        assert_eq!(chips[1].style_name, tau_themes::names::STATUS_AGENTS);
-        assert_eq!(chips[2].text, "#50%");
-        assert_eq!(chips[2].style_name, tau_themes::names::STATUS_CONTEXT);
-    }
-
-    #[test]
-    fn right_chips_hide_zero_active_agents() {
-        let chips = right_chips(None, 0, None);
-
-        assert!(chips.is_empty());
     }
 }

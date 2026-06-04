@@ -86,6 +86,12 @@ pub use display_map::{
     NavigationOverlayKey, SemanticTokenHighlight,
 };
 pub use edit_prediction::make_suggestion_styles;
+
+#[derive(Clone)]
+pub struct EditorRightPrompt {
+    pub anchor: Anchor,
+    pub spans: Vec<(String, HighlightStyle)>,
+}
 pub(crate) use edit_prediction::{
     EditDisplayMode, EditPrediction, EditPredictionPreview, EditPredictionSettings,
     EditPredictionState, MenuEditPredictionsPolicy, RegisteredEditPredictionDelegate,
@@ -972,6 +978,7 @@ pub struct Editor {
     prepare_for_insert: Option<PrepareForInsert>,
     mouse_click_selection_enabled: bool,
     restrict_navigation_to_editable_ranges: bool,
+    right_prompt: Option<EditorRightPrompt>,
     mode: EditorMode,
     breadcrumbs_visibility: BreadcrumbsVisibility,
     show_gutter: bool,
@@ -1726,6 +1733,7 @@ impl Editor {
         clone.searchable = self.searchable;
         clone.read_only = self.read_only;
         clone.restrict_navigation_to_editable_ranges = self.restrict_navigation_to_editable_ranges;
+        clone.right_prompt = self.right_prompt.clone();
         clone.buffers_with_disabled_indent_guides =
             self.buffers_with_disabled_indent_guides.clone();
         clone.enable_mouse_wheel_zoom = self.enable_mouse_wheel_zoom;
@@ -2176,6 +2184,7 @@ impl Editor {
             prepare_for_insert: None,
             mouse_click_selection_enabled: true,
             restrict_navigation_to_editable_ranges: false,
+            right_prompt: None,
             show_scrollbars: ScrollbarAxes {
                 horizontal: full_mode,
                 vertical: full_mode,
@@ -3110,6 +3119,15 @@ impl Editor {
 
     pub fn set_restrict_navigation_to_editable_ranges(&mut self, restrict: bool) {
         self.restrict_navigation_to_editable_ranges = restrict;
+    }
+
+    pub fn set_right_prompt(
+        &mut self,
+        right_prompt: Option<EditorRightPrompt>,
+        cx: &mut Context<Self>,
+    ) {
+        self.right_prompt = right_prompt;
+        cx.notify();
     }
 
     pub fn nearest_editable_point(snapshot: &DisplaySnapshot, point: Point) -> Option<Point> {
