@@ -2206,10 +2206,7 @@ impl TauGui {
         let separator_style = self.highlight_style_for_name(tau_themes::names::MODEL_STATUS, cx);
         let mut spans = Vec::new();
         if let Some(context) = self.context_status_chip() {
-            spans.push((
-                format!("#{context}"),
-                self.highlight_style_for_name(tau_themes::names::STATUS_CONTEXT, cx),
-            ));
+            spans.push((format!("#{context}"), self.context_status_style(cx)));
         }
         let status_spans = self.status_chip_spans(self.status_line().prompt_chips, cx);
         if !status_spans.is_empty() {
@@ -2221,10 +2218,7 @@ impl TauGui {
         if !spans.is_empty() {
             spans.push((" ".to_owned(), separator_style));
         }
-        spans.push((
-            self.project_root_label(),
-            self.highlight_style_for_name(tau_themes::names::STATUS_MODEL, cx),
-        ));
+        spans.push((self.project_root_label(), self.cwd_status_style(cx)));
         Some(EditorRightPrompt { anchor, spans })
     }
 
@@ -2285,26 +2279,53 @@ impl TauGui {
     }
 
     fn context_status_chip(&self) -> Option<String> {
-        match (
-            self.current_context_percent,
-            self.current_context_input_tokens,
-            self.current_context_window,
-        ) {
-            (_, Some(input), Some(window)) => Some(format!(
-                "{}/{}",
-                tool_render::format_token_count(input),
-                tool_render::format_token_count(window)
-            )),
-            (Some(percent), _, Some(window)) => Some(format!(
-                "{percent}%/{}",
-                tool_render::format_token_count(window)
-            )),
-            (Some(percent), _, None) => Some(format!("{percent}%")),
-            (None, Some(input), None) => Some(tool_render::format_token_count(input)),
-            (None, None, Some(window)) => {
-                Some(format!("?/{}", tool_render::format_token_count(window)))
-            }
-            (None, None, None) => None,
+        if let Some(input) = self.current_context_input_tokens {
+            Some(format_whole_token_count(input))
+        } else {
+            self.current_context_percent
+                .map(|percent| format!("{percent}%"))
+        }
+    }
+
+    fn context_status_style(&self, cx: &App) -> HighlightStyle {
+        let color = if self.current_context_fullness_percent() >= Some(70) {
+            cx.theme().colors().terminal_ansi_yellow
+        } else {
+            cx.theme().colors().terminal_ansi_blue
+        };
+        HighlightStyle {
+            color: Some(color),
+            background_color: None,
+            font_weight: None,
+            font_style: None,
+            underline: None,
+            strikethrough: None,
+            fade_out: None,
+        }
+    }
+
+    fn current_context_fullness_percent(&self) -> Option<u8> {
+        if let Some(percent) = self.current_context_percent {
+            return Some(percent);
+        }
+        let input = self.current_context_input_tokens?;
+        let window = self.current_context_window?;
+        if window == 0 {
+            return None;
+        }
+        let percent = input.saturating_mul(100) / window;
+        Some(percent.min(100) as u8)
+    }
+
+    fn cwd_status_style(&self, cx: &App) -> HighlightStyle {
+        HighlightStyle {
+            color: Some(cx.theme().colors().terminal_foreground),
+            background_color: None,
+            font_weight: Some(FontWeight::BOLD),
+            font_style: None,
+            underline: None,
+            strikethrough: None,
+            fade_out: None,
         }
     }
 
@@ -2792,6 +2813,21 @@ fn terminal_style_to_highlight(style: tau_cli_term::Style, cx: &App) -> Highligh
         strikethrough: None,
         fade_out: None,
     }
+}
+
+fn format_whole_token_count(tokens: u64) -> String {
+    if tokens < 1_000 {
+        return tokens.to_string();
+    }
+    if tokens < 1_000_000 {
+        let rounded = tokens.saturating_add(500) / 1_000;
+        if rounded >= 1_000 {
+            return "1m".to_owned();
+        }
+        return format!("{rounded}k");
+    }
+    let rounded = tokens.saturating_add(500_000) / 1_000_000;
+    format!("{rounded}m")
 }
 
 fn terminal_color_to_hsla(color: tau_cli_term::Color, cx: &App) -> Hsla {
