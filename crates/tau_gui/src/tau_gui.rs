@@ -2296,19 +2296,11 @@ impl TauGui {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .cursor_pointer()
-                    .when(tab.selected, |this| this.bg(colors.element_selected))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, window, cx| {
                             this.switch_to_agent_tab(Some(agent_id.clone()), window, cx);
                         }),
-                    )
-                    .child(
-                        div()
-                            .w(px(10.))
-                            .flex_none()
-                            .text_color(active_agent_color)
-                            .child(if tab.selected { ">" } else { "" }),
                     )
                     .child(
                         div()
@@ -2342,9 +2334,9 @@ impl TauGui {
             .h_full()
             .w(px(176.))
             .flex_none()
-            .border_l_1()
+            .border_r_1()
             .border_color(colors.border_variant.opacity(0.6))
-            .pl(px(6.))
+            .pr(px(6.))
             .py(px(2.))
             .overflow_hidden()
             .flex()
@@ -2416,6 +2408,7 @@ impl Render for TauGui {
             .p(px(2.))
             .bg(cx.theme().colors().editor_background)
             .key_context("TauGui")
+            .child(self.render_agent_rail(agent_tabs, &text_style, active_agent_color, cx))
             .child(
                 div()
                     .id("tau-gui-editor")
@@ -2425,7 +2418,6 @@ impl Render for TauGui {
                     .overflow_hidden()
                     .child(self.editor.clone()),
             )
-            .child(self.render_agent_rail(agent_tabs, &text_style, active_agent_color, cx))
     }
 }
 
