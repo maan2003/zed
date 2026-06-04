@@ -10844,7 +10844,6 @@ dependencies = [
 [[package]]
 name = "tau-actions"
 version = "0.1.0"
-source = "git+https://github.com/maan2003/tau?rev=8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41#8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41"
 dependencies = [
  "serde",
 ]
@@ -10852,12 +10851,10 @@ dependencies = [
 [[package]]
 name = "tau-blocking-notify-channel"
 version = "0.1.0"
-source = "git+https://github.com/maan2003/tau?rev=8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41#8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41"
 
 [[package]]
 name = "tau-cli-term"
 version = "0.1.0"
-source = "git+https://github.com/maan2003/tau?rev=8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41#8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41"
 dependencies = [
  "nucleo-matcher",
  "tau-cli-term-raw",
@@ -10871,7 +10868,6 @@ dependencies = [
 [[package]]
 name = "tau-cli-term-raw"
 version = "0.1.0"
-source = "git+https://github.com/maan2003/tau?rev=8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41#8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41"
 dependencies = [
  "bon",
  "crossterm",
@@ -10884,7 +10880,6 @@ dependencies = [
 [[package]]
 name = "tau-config"
 version = "0.1.0"
-source = "git+https://github.com/maan2003/tau?rev=8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41#8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41"
 dependencies = [
  "config",
  "dirs",
@@ -10899,7 +10894,6 @@ dependencies = [
 [[package]]
 name = "tau-core"
 version = "0.1.0"
-source = "git+https://github.com/maan2003/tau?rev=8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41#8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41"
 dependencies = [
  "ciborium",
  "fs2",
@@ -10912,7 +10906,6 @@ dependencies = [
 [[package]]
 name = "tau-harness"
 version = "0.1.0"
-source = "git+https://github.com/maan2003/tau?rev=8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41#8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41"
 dependencies = [
  "blake3",
  "bon",
@@ -10941,7 +10934,6 @@ dependencies = [
 [[package]]
 name = "tau-proto"
 version = "0.1.0"
-source = "git+https://github.com/maan2003/tau?rev=8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41#8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41"
 dependencies = [
  "ciborium",
  "indexmap",
@@ -10954,7 +10946,6 @@ dependencies = [
 [[package]]
 name = "tau-session-inspect"
 version = "0.1.0"
-source = "git+https://github.com/maan2003/tau?rev=8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41#8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41"
 dependencies = [
  "tau-config",
  "tau-core",
@@ -10964,7 +10955,6 @@ dependencies = [
 [[package]]
 name = "tau-skills"
 version = "0.1.0"
-source = "git+https://github.com/maan2003/tau?rev=8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41#8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41"
 dependencies = [
  "serde_yaml_ng",
 ]
@@ -10972,7 +10962,6 @@ dependencies = [
 [[package]]
 name = "tau-socket"
 version = "0.1.0"
-source = "git+https://github.com/maan2003/tau?rev=8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41#8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41"
 dependencies = [
  "tau-proto",
 ]
@@ -10980,7 +10969,6 @@ dependencies = [
 [[package]]
 name = "tau-supervisor"
 version = "0.1.0"
-source = "git+https://github.com/maan2003/tau?rev=8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41#8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41"
 dependencies = [
  "tau-core",
  "tau-proto",
@@ -10989,7 +10977,6 @@ dependencies = [
 [[package]]
 name = "tau-term-screen"
 version = "0.1.0"
-source = "git+https://github.com/maan2003/tau?rev=8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41#8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41"
 dependencies = [
  "bon",
  "crossterm",
@@ -11000,7 +10987,6 @@ dependencies = [
 [[package]]
 name = "tau-themes"
 version = "0.1.0"
-source = "git+https://github.com/maan2003/tau?rev=8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41#8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41"
 dependencies = [
  "json5",
  "serde",

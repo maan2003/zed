@@ -229,22 +229,17 @@ impl AgentState {
                     terminated.agent_prompt_id.to_string(),
                     terminated.agent_id.to_string(),
                 );
-                self.running_agents.remove(terminated.agent_id.as_str());
             }
-            tau_proto::Event::ProviderPromptSubmitted(submitted) => {
-                if let Some(agent_id) = self.agent_id_for_prompt_or_originator(
-                    submitted.agent_prompt_id.as_str(),
-                    &submitted.originator,
-                ) {
-                    self.running_agents.insert(agent_id);
-                }
-            }
-            tau_proto::Event::ProviderResponseUpdated(update) => {
-                if let Some(agent_id) = self.agent_id_for_prompt_or_originator(
-                    update.agent_prompt_id.as_str(),
-                    &update.originator,
-                ) {
-                    self.running_agents.insert(agent_id);
+            tau_proto::Event::AgentState(state) => {
+                let agent_id = state.agent_id.to_string();
+                self.remember(agent_id.clone());
+                match state.state {
+                    tau_proto::AgentRuntimeState::Idle => {
+                        self.running_agents.remove(agent_id.as_str());
+                    }
+                    tau_proto::AgentRuntimeState::Running => {
+                        self.running_agents.insert(agent_id);
+                    }
                 }
             }
             tau_proto::Event::ProviderResponseFinished(finished) => {
@@ -252,11 +247,6 @@ impl AgentState {
                 self.prompt_agents
                     .insert(finished.agent_prompt_id.to_string(), agent_id.clone());
                 let tool_calls = tool_calls_from_output_items(&finished.output_items);
-                if response_requests_tool_calls(finished, tool_calls.is_empty()) {
-                    self.running_agents.insert(agent_id.clone());
-                } else {
-                    self.running_agents.remove(agent_id.as_str());
-                }
                 for call in tool_calls {
                     self.tool_agents
                         .insert(call.call_id.to_string(), agent_id.clone());
@@ -336,6 +326,7 @@ impl AgentState {
             tau_proto::Event::ProviderResponseFinished(finished) => {
                 Some(finished.agent_id.to_string())
             }
+            tau_proto::Event::AgentState(state) => Some(state.agent_id.to_string()),
             tau_proto::Event::HarnessAgentContextUsageChanged(changed) => {
                 Some(changed.agent_id.to_string())
             }
@@ -393,30 +384,7 @@ impl AgentState {
         self.shell_agents.retain(|_, value| value != agent_id);
         self.running_agents.remove(agent_id);
     }
-
-    fn agent_id_for_prompt_or_originator(
-        &self,
-        prompt_id: &str,
-        originator: &tau_proto::PromptOriginator,
-    ) -> Option<String> {
-        self.prompt_agents
-            .get(prompt_id)
-            .cloned()
-            .or_else(|| self.agent_id_for_originator(originator))
-    }
 }
-
-fn response_requests_tool_calls(
-    response: &tau_proto::ProviderResponseFinished,
-    tool_calls_empty: bool,
-) -> bool {
-    if tool_calls_empty {
-        return false;
-    }
-    response.stop_reason.requests_tool_calls()
-        || response.stop_reason == tau_proto::ProviderStopReason::EndTurn
-}
-
 fn tool_calls_from_output_items(
     output_items: &[tau_proto::ContextItem],
 ) -> Vec<&tau_proto::ToolCallItem> {
@@ -439,15 +407,6 @@ fn agent_message_sent_recipient_agent_id(message: &tau_proto::AgentMessageSent) 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn tool_call_item(call_id: &str) -> tau_proto::ContextItem {
-        tau_proto::ContextItem::ToolCall(tau_proto::ToolCallItem {
-            call_id: tau_proto::ToolCallId::from(call_id),
-            name: tau_proto::ToolName::new("tool"),
-            tool_type: tau_proto::ToolType::Function,
-            arguments: tau_proto::CborValue::Null,
-        })
-    }
 
     #[test]
     fn routes_shell_progress_and_finished_by_command_id() {
@@ -520,84 +479,25 @@ mod tests {
         );
     }
     #[test]
-    fn tracks_running_agent_across_tool_call_follow_up_prompts() {
+    fn tracks_running_agents_from_agent_state_events() {
         let mut state = AgentState::default();
-        state
-            .prompt_agents
-            .insert("prompt-a".to_owned(), "agent".to_owned());
 
-        state.observe_event(&tau_proto::Event::ProviderPromptSubmitted(
-            tau_proto::ProviderPromptSubmitted {
-                agent_prompt_id: tau_proto::AgentPromptId::from("prompt-a"),
-                originator: tau_proto::PromptOriginator::User,
-            },
-        ));
-        assert!(state.running("agent"));
-
-        state.observe_event(&tau_proto::Event::ProviderResponseFinished(
-            tau_proto::ProviderResponseFinished {
-                agent_prompt_id: tau_proto::AgentPromptId::from("prompt-a"),
+        state.observe_event(&tau_proto::Event::AgentState(
+            tau_proto::AgentStateChanged {
                 agent_id: tau_proto::AgentId::from("agent"),
-                output_items: vec![tool_call_item("call")],
-                stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-                ..Default::default()
+                state: tau_proto::AgentRuntimeState::Running,
             },
         ));
         assert!(state.running("agent"));
+        assert!(state.known("agent"));
 
-        state
-            .prompt_agents
-            .insert("prompt-b".to_owned(), "agent".to_owned());
-        state.observe_event(&tau_proto::Event::ProviderPromptSubmitted(
-            tau_proto::ProviderPromptSubmitted {
-                agent_prompt_id: tau_proto::AgentPromptId::from("prompt-b"),
-                originator: tau_proto::PromptOriginator::User,
-            },
-        ));
-        assert!(state.running("agent"));
-
-        state.observe_event(&tau_proto::Event::ProviderResponseFinished(
-            tau_proto::ProviderResponseFinished {
-                agent_prompt_id: tau_proto::AgentPromptId::from("prompt-b"),
+        state.observe_event(&tau_proto::Event::AgentState(
+            tau_proto::AgentStateChanged {
                 agent_id: tau_proto::AgentId::from("agent"),
-                output_items: Vec::new(),
-                stop_reason: tau_proto::ProviderStopReason::EndTurn,
-                ..Default::default()
+                state: tau_proto::AgentRuntimeState::Idle,
             },
         ));
         assert!(!state.running("agent"));
-    }
-
-    #[test]
-    fn ignores_tool_call_stop_reason_without_tool_call_items() {
-        let mut state = AgentState::default();
-        state.running_agents.insert("agent".to_owned());
-
-        state.observe_event(&tau_proto::Event::ProviderResponseFinished(
-            tau_proto::ProviderResponseFinished {
-                agent_prompt_id: tau_proto::AgentPromptId::from("prompt"),
-                agent_id: tau_proto::AgentId::from("agent"),
-                output_items: Vec::new(),
-                stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-                ..Default::default()
-            },
-        ));
-        assert!(!state.running("agent"));
-    }
-
-    #[test]
-    fn treats_end_turn_with_tool_call_items_as_running_for_compatibility() {
-        let mut state = AgentState::default();
-        state.observe_event(&tau_proto::Event::ProviderResponseFinished(
-            tau_proto::ProviderResponseFinished {
-                agent_prompt_id: tau_proto::AgentPromptId::from("prompt"),
-                agent_id: tau_proto::AgentId::from("agent"),
-                output_items: vec![tool_call_item("call")],
-                stop_reason: tau_proto::ProviderStopReason::EndTurn,
-                ..Default::default()
-            },
-        ));
-        assert!(state.running("agent"));
     }
 
     #[test]
