@@ -2347,16 +2347,6 @@ impl TauGui {
             .text_color(text_style.color)
             .child(
                 div()
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .px(px(4.))
-                    .pb(px(2.))
-                    .text_color(colors.text_muted)
-                    .child("agents"),
-            )
-            .child(
-                div()
                     .id("tau-gui-agent-list")
                     .w_full()
                     .flex_grow(1.0)
@@ -2415,6 +2405,7 @@ impl Render for TauGui {
                     .h_full()
                     .flex_grow(1.0)
                     .min_w_0()
+                    .ml(px(6.))
                     .overflow_hidden()
                     .child(self.editor.clone()),
             )
@@ -2430,22 +2421,13 @@ fn startup_pun() -> &'static str {
 }
 
 fn agent_rail_title(agent_id: &str) -> String {
-    const MAX_CHARS: usize = 18;
-
-    let title = agent_id
+    agent_id
         .rsplit('/')
         .next()
         .unwrap_or(agent_id)
         .trim_start_matches('@')
         .replace([' ', '_'], "-")
-        .to_lowercase();
-    if title.chars().count() <= MAX_CHARS {
-        return title;
-    }
-
-    let mut truncated = title.chars().take(MAX_CHARS - 1).collect::<String>();
-    truncated.push('…');
-    truncated
+        .to_lowercase()
 }
 
 fn build_label_parts() -> (String, String) {
@@ -2940,11 +2922,11 @@ mod tests {
     }
 
     #[test]
-    fn agent_rail_titles_are_branch_like_and_compact() {
+    fn agent_rail_titles_are_branch_like() {
         assert_eq!(agent_rail_title("feature/Add Agent_Rail"), "add-agent-rail");
         assert_eq!(
             agent_rail_title("very-long-agent-identifier"),
-            "very-long-agent-i…"
+            "very-long-agent-identifier"
         );
     }
 
