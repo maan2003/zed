@@ -2321,7 +2321,7 @@ impl TauGui {
         HighlightStyle {
             color: Some(cx.theme().colors().terminal_foreground),
             background_color: None,
-            font_weight: Some(FontWeight::BOLD),
+            font_weight: None,
             font_style: None,
             underline: None,
             strikethrough: None,
