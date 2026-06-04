@@ -34,10 +34,6 @@ impl MainToolActivity {
         }
     }
 
-    pub(crate) fn has_pending(&self) -> bool {
-        self.completed < self.total || !self.backgrounded_tools.is_empty()
-    }
-
     pub(crate) fn is_backgrounded(&self, call_id: &str) -> bool {
         self.backgrounded_tools.contains(call_id)
     }

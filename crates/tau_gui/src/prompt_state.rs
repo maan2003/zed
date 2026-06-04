@@ -63,12 +63,6 @@ impl PromptState {
         self.live_compaction_ranges.insert(key, inserted);
     }
 
-    pub(crate) fn has_live_activity(&self) -> bool {
-        !self.streamed_responses.is_empty()
-            || !self.live_response_ranges.is_empty()
-            || !self.live_compaction_ranges.is_empty()
-    }
-
     pub(crate) fn remove_prompt(&mut self, key: &str) -> PromptCleanup {
         self.streamed_responses.remove(key);
         PromptCleanup {

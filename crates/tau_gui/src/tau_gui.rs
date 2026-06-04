@@ -2350,26 +2350,7 @@ impl TauGui {
     }
 
     fn agent_is_running(&self, agent_id: &str) -> bool {
-        if self.displayed_agent_id.as_deref() == Some(agent_id) {
-            return self.visible_agent_has_running_activity();
-        }
-        self.agent_ui_states
-            .get(agent_id)
-            .is_some_and(Self::agent_ui_state_has_running_activity)
-    }
-
-    fn visible_agent_has_running_activity(&self) -> bool {
-        self.prompt_state.has_live_activity()
-            || self.tool_state.has_pending()
-            || self.shell_state.has_running_commands()
-            || self.main_tool_activity.has_pending()
-    }
-
-    fn agent_ui_state_has_running_activity(state: &AgentUiState) -> bool {
-        state.prompt_state.has_live_activity()
-            || state.tool_state.has_pending()
-            || state.shell_state.has_running_commands()
-            || state.main_tool_activity.has_pending()
+        self.agents.running(agent_id)
     }
 }
 

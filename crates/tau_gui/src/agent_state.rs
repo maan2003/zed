@@ -17,6 +17,7 @@ pub(crate) struct AgentState {
     prompt_agents: HashMap<String, String>,
     tool_agents: HashMap<String, String>,
     shell_agents: HashMap<String, String>,
+    running_prompt_agents: HashMap<String, String>,
 }
 
 impl AgentState {
@@ -60,6 +61,12 @@ impl AgentState {
 
     pub(crate) fn known(&self, agent_id: &str) -> bool {
         self.known_agents.contains(agent_id)
+    }
+
+    pub(crate) fn running(&self, agent_id: &str) -> bool {
+        self.running_prompt_agents
+            .values()
+            .any(|running_agent_id| running_agent_id == agent_id)
     }
 
     pub(crate) fn selected_is_active(&self) -> bool {
@@ -127,6 +134,7 @@ impl AgentState {
         self.prompt_agents.clear();
         self.tool_agents.clear();
         self.shell_agents.clear();
+        self.running_prompt_agents.clear();
     }
 
     pub(crate) fn observe_event(&mut self, event: &tau_proto::Event) {
@@ -216,13 +224,27 @@ impl AgentState {
                 } else {
                     self.remember(agent_id.clone());
                 }
+                self.running_prompt_agents
+                    .insert(created.agent_prompt_id.to_string(), agent_id.clone());
                 self.record_originator_agent(&created.originator, agent_id);
+            }
+            tau_proto::Event::AgentPromptTerminated(terminated) => {
+                self.running_prompt_agents
+                    .remove(terminated.agent_prompt_id.as_str());
             }
             tau_proto::Event::ProviderResponseFinished(finished) => {
                 let agent_id = finished.agent_id.to_string();
                 self.prompt_agents
                     .insert(finished.agent_prompt_id.to_string(), agent_id.clone());
-                for call in tool_calls_from_output_items(&finished.output_items) {
+                let tool_calls = tool_calls_from_output_items(&finished.output_items);
+                if tool_calls.is_empty() {
+                    self.running_prompt_agents
+                        .remove(finished.agent_prompt_id.as_str());
+                } else {
+                    self.running_prompt_agents
+                        .insert(finished.agent_prompt_id.to_string(), agent_id.clone());
+                }
+                for call in tool_calls {
                     self.tool_agents
                         .insert(call.call_id.to_string(), agent_id.clone());
                 }
@@ -356,6 +378,8 @@ impl AgentState {
         self.prompt_agents.retain(|_, value| value != agent_id);
         self.tool_agents.retain(|_, value| value != agent_id);
         self.shell_agents.retain(|_, value| value != agent_id);
+        self.running_prompt_agents
+            .retain(|_, value| value != agent_id);
     }
 }
 
@@ -452,6 +476,36 @@ mod tests {
             Some("agent")
         );
     }
+    #[test]
+    fn tracks_running_prompts_until_final_provider_response() {
+        let mut state = AgentState::default();
+        state.observe_event(&tau_proto::Event::ProviderResponseFinished(
+            tau_proto::ProviderResponseFinished {
+                agent_prompt_id: tau_proto::AgentPromptId::from("prompt"),
+                agent_id: tau_proto::AgentId::from("agent"),
+                output_items: vec![tau_proto::ContextItem::ToolCall(tau_proto::ToolCallItem {
+                    call_id: tau_proto::ToolCallId::from("call"),
+                    name: tau_proto::ToolName::new("tool"),
+                    tool_type: tau_proto::ToolType::Function,
+                    arguments: tau_proto::CborValue::Null,
+                })],
+                stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+                ..Default::default()
+            },
+        ));
+        assert!(state.running("agent"));
+
+        state.observe_event(&tau_proto::Event::ProviderResponseFinished(
+            tau_proto::ProviderResponseFinished {
+                agent_prompt_id: tau_proto::AgentPromptId::from("prompt"),
+                agent_id: tau_proto::AgentId::from("agent"),
+                output_items: Vec::new(),
+                ..Default::default()
+            },
+        ));
+        assert!(!state.running("agent"));
+    }
+
     #[test]
     fn next_active_agent_wraps_live_agents() {
         let mut state = AgentState::default();
