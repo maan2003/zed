@@ -36,6 +36,7 @@ text.workspace = true
 tau-proto = { git = "https://github.com/maan2003/tau", rev = "8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41" }
 theme.workspace = true
 theme_settings.workspace = true
+ui.workspace = true
 vim.workspace = true
 
 [dev-dependencies]

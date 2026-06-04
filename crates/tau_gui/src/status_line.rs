@@ -1,26 +1,8 @@
-pub(crate) struct AgentTab {
-    pub(crate) agent_id: String,
-    pub(crate) label: String,
-    pub(crate) selected: bool,
-}
-
-impl AgentTab {
-    pub(crate) fn new(agent_id: String, selected: bool) -> Self {
-        Self {
-            label: format!("@{agent_id} "),
-            agent_id,
-            selected,
-        }
-    }
-}
-
 pub(crate) struct StatusLine {
-    pub(crate) agent_tabs: Vec<AgentTab>,
     pub(crate) prompt_chips: Vec<Chip>,
 }
 
 pub(crate) struct StatusLineInput<'a> {
-    pub(crate) agent_tabs: Vec<AgentTab>,
     pub(crate) current_role: Option<&'a str>,
     pub(crate) current_model: Option<&'a tau_proto::ModelId>,
     pub(crate) baseline_params: Option<tau_proto::ModelParams>,
@@ -37,10 +19,7 @@ pub(crate) fn build(input: StatusLineInput<'_>) -> StatusLine {
         input.role_default_effort,
         input.role_default_verbosity,
     );
-    StatusLine {
-        agent_tabs: input.agent_tabs,
-        prompt_chips,
-    }
+    StatusLine { prompt_chips }
 }
 
 pub(crate) struct Chip {
@@ -153,9 +132,8 @@ fn show_service_tier_status(
 mod tests {
     use super::*;
 
-    fn input(agent_tabs: Vec<AgentTab>) -> StatusLineInput<'static> {
+    fn input() -> StatusLineInput<'static> {
         StatusLineInput {
-            agent_tabs,
             current_role: Some("senior-engineer"),
             current_model: None,
             baseline_params: None,
@@ -166,15 +144,8 @@ mod tests {
     }
 
     #[test]
-    fn build_renders_role_identity_when_selected_agent_tab_exists() {
-        let status_line = build(input(vec![AgentTab::new("agent-a".to_owned(), true)]));
-
-        assert_eq!(status_line.agent_tabs[0].label, "@agent-a ");
-        assert_eq!(status_line.prompt_chips[0].text, "senior-engineer");
-    }
-    #[test]
-    fn build_renders_role_identity_without_selected_agent_tab() {
-        let status_line = build(input(vec![AgentTab::new("agent-a".to_owned(), false)]));
+    fn build_renders_role_identity() {
+        let status_line = build(input());
 
         assert_eq!(status_line.prompt_chips[0].text, "senior-engineer");
         assert_eq!(

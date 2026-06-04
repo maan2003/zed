@@ -12,8 +12,8 @@ use editor::{
 };
 use gpui::{
     App, Context, Entity, Focusable as _, FontStyle, FontWeight, HighlightStyle, Hsla, MouseButton,
-    Rgba, StyledText, Subscription, Task, TextStyle, WeakEntity, Window, WindowOptions, actions,
-    div, prelude::*, px,
+    Rgba, Subscription, Task, TextStyle, WeakEntity, Window, WindowOptions, actions, div,
+    prelude::*, px,
 };
 use language::{Buffer, BufferEvent, Capability, Point};
 use multi_buffer::{MultiBuffer, PathKey};
@@ -25,6 +25,7 @@ use tau_proto::{
 };
 use text::ToOffset as _;
 use theme::ActiveTheme as _;
+use ui::{Color, CommonAnimationExt as _, Icon, IconName, IconSize};
 
 mod activity_state;
 mod agent_state;
@@ -257,6 +258,18 @@ impl TranscriptStyle {
         }
     }
 }
+
+struct AgentRailItem {
+    agent_id: String,
+    selected: bool,
+}
+
+impl AgentRailItem {
+    fn new(agent_id: String, selected: bool) -> Self {
+        Self { agent_id, selected }
+    }
+}
+
 struct AgentUiState {
     editor: Entity<Editor>,
     prompt_buffer: Entity<Buffer>,
@@ -1490,13 +1503,13 @@ impl TauGui {
         self.show_current_transcript_buffer(cx);
     }
 
-    fn agent_tabs(&self) -> Vec<status_line::AgentTab> {
+    fn agent_tabs(&self) -> Vec<AgentRailItem> {
         self.agents
             .known_agents_sorted()
             .into_iter()
             .map(|agent_id| {
                 let selected = self.agents.current_agent_id() == Some(agent_id.as_str());
-                status_line::AgentTab::new(agent_id, selected)
+                AgentRailItem::new(agent_id, selected)
             })
             .collect()
     }
@@ -2136,7 +2149,6 @@ impl TauGui {
 
     fn status_line(&self) -> status_line::StatusLine {
         status_line::build(status_line::StatusLineInput {
-            agent_tabs: self.agent_tabs(),
             current_role: self.current_role.as_deref(),
             current_model: self.current_model.as_ref(),
             baseline_params: self.baseline_params,
@@ -2255,17 +2267,143 @@ impl TauGui {
             fade_out: None,
         }
     }
+
+    fn render_agent_rail(
+        &self,
+        agent_tabs: Vec<AgentRailItem>,
+        text_style: &TextStyle,
+        active_agent_color: Hsla,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let rows = agent_tabs
+            .into_iter()
+            .map(|tab| {
+                let agent_id = tab.agent_id.clone();
+                let title = agent_rail_title(&tab.agent_id);
+                let is_running = self.agent_is_running(&tab.agent_id);
+                let text_color = if tab.selected {
+                    active_agent_color
+                } else {
+                    text_style.color
+                };
+                div()
+                    .h(text_style.line_height)
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px(px(4.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .cursor_pointer()
+                    .when(tab.selected, |this| this.bg(colors.element_selected))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            this.switch_to_agent_tab(Some(agent_id.clone()), window, cx);
+                        }),
+                    )
+                    .child(
+                        div()
+                            .w(px(10.))
+                            .flex_none()
+                            .text_color(active_agent_color)
+                            .child(if tab.selected { ">" } else { "" }),
+                    )
+                    .child(
+                        div()
+                            .flex_grow(1.0)
+                            .overflow_hidden()
+                            .truncate()
+                            .text_color(text_color)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .w(px(16.))
+                            .flex_none()
+                            .flex()
+                            .justify_end()
+                            .items_center()
+                            .when(is_running, |this| {
+                                this.child(
+                                    Icon::new(IconName::LoadCircle)
+                                        .size(IconSize::XSmall)
+                                        .color(Color::Custom(active_agent_color))
+                                        .with_rotate_animation(2),
+                                )
+                            }),
+                    )
+            })
+            .collect::<Vec<_>>();
+
+        div()
+            .id("tau-gui-agent-rail")
+            .h_full()
+            .w(px(176.))
+            .flex_none()
+            .border_l_1()
+            .border_color(colors.border_variant.opacity(0.6))
+            .pl(px(6.))
+            .py(px(2.))
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .font_family(text_style.font_family.clone())
+            .text_size(text_style.font_size)
+            .line_height(text_style.line_height)
+            .text_color(text_style.color)
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .px(px(4.))
+                    .pb(px(2.))
+                    .text_color(colors.text_muted)
+                    .child("agents"),
+            )
+            .child(
+                div()
+                    .id("tau-gui-agent-list")
+                    .w_full()
+                    .flex_grow(1.0)
+                    .overflow_y_scroll()
+                    .children(rows),
+            )
+    }
+
+    fn agent_is_running(&self, agent_id: &str) -> bool {
+        if self.displayed_agent_id.as_deref() == Some(agent_id) {
+            return self.visible_agent_has_running_activity();
+        }
+        self.agent_ui_states
+            .get(agent_id)
+            .is_some_and(Self::agent_ui_state_has_running_activity)
+    }
+
+    fn visible_agent_has_running_activity(&self) -> bool {
+        self.prompt_state.has_live_activity()
+            || self.tool_state.has_pending()
+            || self.shell_state.has_running_commands()
+            || self.main_tool_activity.has_pending()
+    }
+
+    fn agent_ui_state_has_running_activity(state: &AgentUiState) -> bool {
+        state.prompt_state.has_live_activity()
+            || state.tool_state.has_pending()
+            || state.shell_state.has_running_commands()
+            || state.main_tool_activity.has_pending()
+    }
 }
 
 impl Render for TauGui {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let status_line = self.status_line();
-        let agent_tabs = status_line.agent_tabs;
+        let agent_tabs = self.agent_tabs();
         let text_style = self
             .editor
             .update(cx, |editor, cx| editor.style(cx).text.clone());
-        let status_left = styled_status_text(Vec::new(), &text_style);
-        let status_right = styled_status_text(Vec::new(), &text_style);
         let active_agent_color = self
             .highlight_style_for_name(tau_themes::names::STATUS_ROLE, cx)
             .color
@@ -2275,78 +2413,18 @@ impl Render for TauGui {
             .id("tau-gui")
             .size_full()
             .flex()
-            .flex_col()
             .p(px(2.))
             .bg(cx.theme().colors().editor_background)
             .key_context("TauGui")
             .child(
                 div()
                     .id("tau-gui-editor")
-                    .w_full()
+                    .h_full()
                     .flex_grow(1.0)
                     .overflow_hidden()
                     .child(self.editor.clone()),
             )
-            .child(
-                div()
-                    .id("tau-gui-status")
-                    .w_full()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .font_family(text_style.font_family.clone())
-                    .text_size(text_style.font_size)
-                    .line_height(text_style.line_height)
-                    .text_color(text_style.color)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .children(agent_tabs.into_iter().map(|tab| {
-                                let agent_id = tab.agent_id.clone();
-                                div()
-                                    .text_color(if tab.selected {
-                                        active_agent_color
-                                    } else {
-                                        text_style.color
-                                    })
-                                    .whitespace_nowrap()
-                                    .cursor_pointer()
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(move |this, _, window, cx| {
-                                            this.switch_to_agent_tab(
-                                                Some(agent_id.clone()),
-                                                window,
-                                                cx,
-                                            );
-                                        }),
-                                    )
-                                    .child(tab.label)
-                            }))
-                            .child(
-                                div()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .truncate()
-                                    .child(status_left),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .truncate()
-                            .child(status_right),
-                    ),
-            )
+            .child(self.render_agent_rail(agent_tabs, &text_style, active_agent_color, cx))
     }
 }
 
@@ -2356,6 +2434,25 @@ fn startup_pun() -> &'static str {
         .map(|duration| duration.as_nanos() as usize % STARTUP_PUNS.len())
         .unwrap_or(0);
     STARTUP_PUNS[index]
+}
+
+fn agent_rail_title(agent_id: &str) -> String {
+    const MAX_CHARS: usize = 18;
+
+    let title = agent_id
+        .rsplit('/')
+        .next()
+        .unwrap_or(agent_id)
+        .trim_start_matches('@')
+        .replace([' ', '_'], "-")
+        .to_lowercase();
+    if title.chars().count() <= MAX_CHARS {
+        return title;
+    }
+
+    let mut truncated = title.chars().take(MAX_CHARS - 1).collect::<String>();
+    truncated.push('…');
+    truncated
 }
 
 fn build_label_parts() -> (String, String) {
@@ -2387,23 +2484,6 @@ fn build_banner(theme: &tau_themes::Theme) -> tau_cli_term::StyledText {
         tau_cli_term::Span::new(" ▐▙▖ ", logo),
         tau_cli_term::Span::new(pun, pun_style),
     ])
-}
-
-fn styled_status_text(
-    spans: Vec<(String, HighlightStyle)>,
-    default_style: &TextStyle,
-) -> StyledText {
-    let mut text = String::new();
-    let mut highlights = Vec::new();
-    for (span_text, style) in spans {
-        let start = text.len();
-        text.push_str(&span_text);
-        let end = text.len();
-        if start != end {
-            highlights.push((start..end, style));
-        }
-    }
-    StyledText::new(text).with_default_highlights(default_style, highlights)
 }
 
 fn tool_calls_from_output_items(output_items: &[ContextItem]) -> Vec<ToolCallItem> {
@@ -2864,6 +2944,15 @@ mod tests {
 
     fn buffer_text(buffer: &Buffer) -> String {
         buffer.text_for_range(0..buffer.len()).collect()
+    }
+
+    #[test]
+    fn agent_rail_titles_are_branch_like_and_compact() {
+        assert_eq!(agent_rail_title("feature/Add Agent_Rail"), "add-agent-rail");
+        assert_eq!(
+            agent_rail_title("very-long-agent-identifier"),
+            "very-long-agent-i…"
+        );
     }
 
     #[gpui::test]

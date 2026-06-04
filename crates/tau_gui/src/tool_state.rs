@@ -8,6 +8,10 @@ pub(crate) struct ToolState {
 }
 
 impl ToolState {
+    pub(crate) fn has_pending(&self) -> bool {
+        !self.pending_calls.is_empty()
+    }
+
     pub(crate) fn contains_pending(&self, call_id: &str) -> bool {
         self.pending_calls.contains_key(call_id)
     }

@@ -15,6 +15,10 @@ pub(crate) struct ShellState {
 }
 
 impl ShellState {
+    pub(crate) fn has_running_commands(&self) -> bool {
+        !self.commands.is_empty()
+    }
+
     pub(crate) fn insert(&mut self, command_id: String, state: ShellCommandState) {
         self.commands.insert(command_id, state);
     }

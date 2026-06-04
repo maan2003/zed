@@ -11033,6 +11033,7 @@ dependencies = [
  "text",
  "theme",
  "theme_settings",
+ "ui",
  "vim",
 ]
 
