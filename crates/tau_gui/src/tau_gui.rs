@@ -2326,7 +2326,7 @@ impl TauGui {
         div()
             .id("tau-gui-agent-rail")
             .h_full()
-            .w(px(176.))
+            .w(px(224.))
             .flex_none()
             .border_r_1()
             .border_color(colors.border_variant.opacity(0.6))
