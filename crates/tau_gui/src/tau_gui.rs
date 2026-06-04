@@ -463,7 +463,6 @@ impl TauGui {
             editor.set_show_wrap_guides(false, cx);
             editor.set_show_indent_guides(false, cx);
             editor.set_autoindent(false);
-            editor.set_use_autoclose(false);
             editor.set_show_edit_predictions(Some(false), window, cx);
             editor.set_use_selection_highlight(false);
             editor.disable_header_for_buffer(transcript_buffer.read(cx).remote_id(), cx);
