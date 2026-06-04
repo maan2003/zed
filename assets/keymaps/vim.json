@@ -1225,4 +1225,12 @@
       "shift-tab": "skill_creator::FocusPreviousField",
     },
   },
+  {
+    "context": "TauGui > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-k": "tau_gui::AgentPrevious",
+      "ctrl-j": "tau_gui::AgentNext",
+    },
+  },
 ]
