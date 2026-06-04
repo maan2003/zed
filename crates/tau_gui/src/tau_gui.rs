@@ -460,6 +460,7 @@ impl TauGui {
             editor.set_offset_content(false, cx);
             editor.set_mouse_click_selection_enabled(false, cx);
             editor.set_soft_wrap_mode(language::language_settings::SoftWrap::EditorWidth, cx);
+            editor.set_use_selection_highlight(false);
             editor.disable_header_for_buffer(transcript_buffer.read(cx).remote_id(), cx);
             editor.disable_header_for_buffer(prompt_buffer.read(cx).remote_id(), cx);
             editor.disable_expand_excerpt_buttons(cx);
