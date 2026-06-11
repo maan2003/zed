@@ -2083,7 +2083,7 @@ impl EditorElement {
             }
             let start = text.len();
             text.push_str(span);
-            let style = self.style.text.clone().highlight(highlight.clone());
+            let style = self.style.text.clone().highlight(*highlight);
             runs.push(TextRun {
                 len: text.len() - start,
                 font: style.font(),

@@ -20,8 +20,9 @@ use multi_buffer::{MultiBuffer, PathKey};
 use project::InlayId;
 use settings::SettingsStore;
 use tau_proto::{
-    CborValue, ContentPart, ContextItem, ContextRole, Event, Frame, Message, ModelParams,
-    PromptMessageClass, PromptOriginator, ToolCallItem, UiPromptSubmitted,
+    AgentShellEnvironment, CborValue, ContentPart, ContextItem, ContextRole, Event,
+    HarnessInputMessage, ModelParams, PeerInputMessage, PromptMessageClass, PromptOriginator,
+    ToolCallItem, UiPromptSubmitted,
 };
 use text::ToOffset as _;
 use theme::ActiveTheme as _;
@@ -86,7 +87,6 @@ fn run() -> Result<()> {
 
             cx.activate(true);
 
-            let attach_target = attach_target.clone();
             if let Err(error) = cx.open_window(WindowOptions::default(), move |window, cx| {
                 cx.new(|cx| TauGui::new(attach_target.clone(), window, cx))
             }) {
@@ -320,6 +320,7 @@ struct TauGui {
     displayed_agent_id: Option<String>,
     no_agent_ui_state: Option<AgentUiState>,
     agent_ui_states: HashMap<String, AgentUiState>,
+    shell_working_directories: Vec<AgentShellEnvironment>,
 }
 
 impl TauGui {
@@ -389,6 +390,7 @@ impl TauGui {
             displayed_agent_id: None,
             no_agent_ui_state: None,
             agent_ui_states: HashMap::new(),
+            shell_working_directories: Vec::new(),
         };
         this.update_prompt_inlay(cx);
         this.update_status_line(cx);
@@ -578,7 +580,7 @@ impl TauGui {
     fn drain_socket_events(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         while let Ok(event) = self.rx.try_recv() {
             match event {
-                SocketEvent::Frame(frame) => self.handle_frame(frame, window, cx),
+                SocketEvent::Message(message) => self.handle_message(message, window, cx),
                 SocketEvent::Disconnected(reason) => {
                     self.insert_before_draft_styled(
                         &format!("\n[disconnected: {reason}]\n"),
@@ -590,11 +592,17 @@ impl TauGui {
         }
     }
 
-    fn handle_frame(&mut self, frame: Frame, window: &mut Window, cx: &mut Context<Self>) {
-        let (_log_id, frame) = frame.peel_log();
-        match frame {
-            Frame::Event(event) => self.handle_event(event, window, cx),
-            Frame::Message(Message::Disconnect(disconnect)) => {
+    fn handle_message(
+        &mut self,
+        message: PeerInputMessage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match message {
+            PeerInputMessage::Deliver(delivery) => {
+                self.handle_event(delivery.into_event(), window, cx)
+            }
+            PeerInputMessage::Disconnect(disconnect) => {
                 self.insert_before_draft_styled(
                     &format!(
                         "\n[daemon disconnected: {}]\n",
@@ -604,7 +612,7 @@ impl TauGui {
                     cx,
                 );
             }
-            Frame::Message(_) => {}
+            _ => {}
         }
     }
 
@@ -1089,6 +1097,15 @@ impl TauGui {
                 self.refresh_role_completions(&roles);
                 self.update_status_line(cx);
             }
+            Event::ShellWorkingDirectoriesAvailable(available) => {
+                self.shell_working_directories = available
+                    .directories
+                    .iter()
+                    .map(|directory| AgentShellEnvironment {
+                        working_directory: directory.working_directory.clone(),
+                    })
+                    .collect();
+            }
             Event::HarnessRoleSelected(selected) => {
                 self.current_model = selected.model.clone();
                 self.current_role = Some(selected.role);
@@ -1146,7 +1163,14 @@ impl TauGui {
     }
 
     fn selected_agent_proto_id(&self) -> Option<tau_proto::AgentId> {
-        self.agents.current_agent_id_owned().map(Into::into)
+        let agent_id = self.agents.current_agent_id_owned()?;
+        match tau_proto::AgentId::parse(&agent_id) {
+            Ok(agent_id) => Some(agent_id),
+            Err(error) => {
+                eprintln!("tau-gui: invalid selected agent id {agent_id:?}: {error}");
+                None
+            }
+        }
     }
 
     fn send_event(&mut self, event: Event, cx: &mut Context<Self>) -> bool {
@@ -1154,8 +1178,8 @@ impl TauGui {
             eprintln!("tau-gui: command ignored because socket writer is unavailable");
             return false;
         };
-        let frame = Frame::Event(event);
-        if let Err(error) = socket_client::send_frame(writer, &frame) {
+        let message = HarnessInputMessage::emit(event);
+        if let Err(error) = socket_client::send_message(writer, &message) {
             eprintln!("tau-gui: send failed: {error:#}");
             self.insert_before_draft_styled(
                 &format!("\n[send failed: {error}]\n"),
@@ -1655,11 +1679,19 @@ impl TauGui {
             return;
         }
 
-        let event = if let Some(agent_id) = self.agents.current_agent_id_owned() {
+        let event = if self.agents.current_agent_id_owned().is_some() {
+            let Some(agent_id) = self.selected_agent_proto_id() else {
+                self.insert_before_draft_styled(
+                    "selected agent id is invalid; choose a different agent or start a new one\n",
+                    TranscriptStyle::SystemImportant,
+                    cx,
+                );
+                return;
+            };
             Event::UiPromptSubmitted(UiPromptSubmitted {
                 session_id: self.session_id.clone(),
                 text: text.clone(),
-                agent_id: agent_id.into(),
+                agent_id,
                 message_class: PromptMessageClass::User,
                 originator: PromptOriginator::User,
                 ctx_id: None,
@@ -1671,7 +1703,7 @@ impl TauGui {
                     .current_role
                     .clone()
                     .unwrap_or_else(|| "engineer".to_owned()),
-                cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                shell_environment: self.shell_working_directories.first().cloned(),
                 initial_prompt: Some(text.clone()),
                 message_class: PromptMessageClass::User,
                 originator: PromptOriginator::User,
@@ -2550,7 +2582,7 @@ fn tool_display_from_call(call: &ToolCallItem) -> tau_proto::ToolUseState {
         "read" | "write" | "edit" | "ls" => cbor_text_field(&call.arguments, "path"),
         "grep" | "glob" => cbor_text_field(&call.arguments, "pattern"),
         "shell" => cbor_text_field(&call.arguments, "command"),
-        "delegate" => cbor_text_field(&call.arguments, "task_name"),
+        "agent_start" => cbor_text_field(&call.arguments, "task_name"),
         _ => cbor_text_field(&call.arguments, "path")
             .or_else(|| cbor_text_field(&call.arguments, "pattern"))
             .or_else(|| cbor_text_field(&call.arguments, "query")),

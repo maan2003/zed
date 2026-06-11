@@ -1,18 +1,18 @@
-use std::io::{BufReader, BufWriter};
+use std::io::BufWriter;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 
 use anyhow::{Context as _, Result, anyhow};
 use tau_proto::{
-    ClientKind, EventSelector, Frame, FrameReader, FrameWriter, Hello, Message, PROTOCOL_VERSION,
-    Subscribe,
+    ClientKind, EventSelector, HarnessInputMessage, Hello, PROTOCOL_VERSION, PeerInputMessage,
+    PeerInputReader, PeerOutputWriter, Subscribe,
 };
 
-pub(crate) type Writer = Arc<Mutex<FrameWriter<BufWriter<UnixStream>>>>;
+pub(crate) type Writer = Arc<Mutex<PeerOutputWriter<BufWriter<UnixStream>>>>;
 
 pub(crate) enum SocketEvent {
-    Frame(Frame),
+    Message(PeerInputMessage),
     Disconnected(String),
 }
 
@@ -20,19 +20,19 @@ pub(crate) fn spawn(socket_path: PathBuf, tx: mpsc::Sender<SocketEvent>) -> Resu
     let stream = UnixStream::connect(&socket_path)
         .with_context(|| format!("failed to connect to {}", socket_path.display()))?;
     let read_stream = stream.try_clone().context("failed to clone socket")?;
-    let writer = Arc::new(Mutex::new(FrameWriter::new(BufWriter::new(stream))));
+    let writer = Arc::new(Mutex::new(PeerOutputWriter::new(BufWriter::new(stream))));
 
-    send_frame(
+    send_message(
         &writer,
-        &Frame::Message(Message::Hello(Hello {
+        &HarnessInputMessage::Hello(Hello {
             protocol_version: PROTOCOL_VERSION,
             client_name: "tau-gui".into(),
             client_kind: ClientKind::Ui,
-        })),
+        }),
     )?;
-    send_frame(
+    send_message(
         &writer,
-        &Frame::Message(Message::Subscribe(Subscribe {
+        &HarnessInputMessage::Subscribe(Subscribe {
             selectors: vec![
                 EventSelector::Prefix("ui.".to_owned()),
                 EventSelector::Prefix("session.".to_owned()),
@@ -44,15 +44,15 @@ pub(crate) fn spawn(socket_path: PathBuf, tx: mpsc::Sender<SocketEvent>) -> Resu
                 EventSelector::Prefix("shell.".to_owned()),
                 EventSelector::Prefix("term.".to_owned()),
             ],
-        })),
+        }),
     )?;
 
     std::thread::spawn(move || {
-        let mut reader = FrameReader::new(BufReader::new(read_stream));
+        let mut reader = PeerInputReader::new(read_stream);
         loop {
-            match reader.read_frame() {
-                Ok(Some(frame)) => {
-                    if tx.send(SocketEvent::Frame(frame)).is_err() {
+            match reader.read_message() {
+                Ok(Some(message)) => {
+                    if tx.send(SocketEvent::Message(message)).is_err() {
                         return;
                     }
                 }
@@ -81,10 +81,12 @@ pub(crate) fn spawn(socket_path: PathBuf, tx: mpsc::Sender<SocketEvent>) -> Resu
     Ok(writer)
 }
 
-pub(crate) fn send_frame(writer: &Writer, frame: &Frame) -> Result<()> {
+pub(crate) fn send_message(writer: &Writer, message: &HarnessInputMessage) -> Result<()> {
     let mut writer = writer
         .lock()
         .map_err(|_| anyhow!("socket writer mutex poisoned"))?;
-    writer.write_frame(frame).map_err(|error| anyhow!(error))?;
-    writer.flush().context("failed to flush socket frame")
+    writer
+        .write_message(message)
+        .map_err(|error| anyhow!(error))?;
+    writer.flush().context("failed to flush socket message")
 }

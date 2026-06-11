@@ -184,6 +184,7 @@ mod tests {
                     name: (*name).to_owned(),
                     description: "model=test/model".to_owned(),
                     role_description: None,
+                    details: None,
                 })
                 .collect(),
             groups,

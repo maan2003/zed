@@ -464,7 +464,7 @@ pub(crate) fn render_delegate_display(
     agent_id: Option<&str>,
     legacy_role: Option<&str>,
 ) -> ToolCallDisplay {
-    let mut rendered = render_tool_use_state("delegate", display);
+    let mut rendered = render_tool_use_state("agent_start", display);
     let stats_chip = format_tool_use_state_stats(&display.stats);
     if !stats_chip.is_empty() {
         let marker = match display.status {

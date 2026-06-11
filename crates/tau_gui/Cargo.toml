@@ -28,12 +28,12 @@ release_channel.workspace = true
 search.workspace = true
 semver.workspace = true
 settings.workspace = true
-tau-cli-term = { git = "https://github.com/maan2003/tau", rev = "8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41" }
-tau-config = { git = "https://github.com/maan2003/tau", rev = "8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41" }
-tau-harness = { git = "https://github.com/maan2003/tau", rev = "8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41" }
-tau-themes = { git = "https://github.com/maan2003/tau", rev = "8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41" }
+tau-cli-term = { path = "../../../tau/crates/tau-cli-term" }
+tau-config = { path = "../../../tau/crates/tau-config" }
+tau-harness = { path = "../../../tau/crates/tau-harness" }
+tau-themes = { path = "../../../tau/crates/tau-themes" }
 text.workspace = true
-tau-proto = { git = "https://github.com/maan2003/tau", rev = "8a459d125e9d0bd4bc3fd1c6fa2f987f0f357d41" }
+tau-proto = { path = "../../../tau/crates/tau-proto" }
 theme.workspace = true
 theme_settings.workspace = true
 ui.workspace = true

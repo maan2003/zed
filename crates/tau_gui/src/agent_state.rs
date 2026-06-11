@@ -40,7 +40,7 @@ impl AgentState {
     pub(crate) fn mark_live(&mut self, agent_id: impl Into<String>) {
         let agent_id = agent_id.into();
         self.known_agents.insert(agent_id.clone());
-        self.live_agents.insert(agent_id.clone());
+        self.live_agents.insert(agent_id);
     }
 
     pub(crate) fn select(&mut self, agent_id: impl Into<String>) {
@@ -408,6 +408,10 @@ fn agent_message_sent_recipient_agent_id(message: &tau_proto::AgentMessageSent) 
 mod tests {
     use super::*;
 
+    fn agent_id(value: &str) -> tau_proto::AgentId {
+        tau_proto::AgentId::parse(value).expect("valid agent id")
+    }
+
     #[test]
     fn routes_shell_progress_and_finished_by_command_id() {
         let mut state = AgentState::default();
@@ -417,7 +421,7 @@ mod tests {
                 session_id: tau_proto::SessionId::from("session"),
                 command: "echo hi".to_owned(),
                 include_in_context: true,
-                target_agent_id: Some(tau_proto::AgentId::from("agent")),
+                target_agent_id: Some(agent_id("agent")),
             },
         ));
 
@@ -454,7 +458,7 @@ mod tests {
         state.observe_event(&tau_proto::Event::ProviderResponseFinished(
             tau_proto::ProviderResponseFinished {
                 agent_prompt_id: tau_proto::AgentPromptId::from("prompt"),
-                agent_id: tau_proto::AgentId::from("agent"),
+                agent_id: agent_id("agent"),
                 output_items: vec![tau_proto::ContextItem::ToolCall(tau_proto::ToolCallItem {
                     call_id: tau_proto::ToolCallId::from("call"),
                     name: tau_proto::ToolName::new("tool"),
@@ -462,7 +466,14 @@ mod tests {
                     arguments: tau_proto::CborValue::Null,
                 })],
                 stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-                ..Default::default()
+                error: None,
+                originator: tau_proto::PromptOriginator::User,
+                usage: None,
+                compaction_original_input_tokens: None,
+                compaction_compacted_input_tokens: None,
+                backend: None,
+                provider_response_id: None,
+                ws_pool_delta: None,
             },
         ));
 
@@ -484,7 +495,7 @@ mod tests {
 
         state.observe_event(&tau_proto::Event::AgentState(
             tau_proto::AgentStateChanged {
-                agent_id: tau_proto::AgentId::from("agent"),
+                agent_id: agent_id("agent"),
                 state: tau_proto::AgentRuntimeState::Running,
             },
         ));
@@ -493,7 +504,7 @@ mod tests {
 
         state.observe_event(&tau_proto::Event::AgentState(
             tau_proto::AgentStateChanged {
-                agent_id: tau_proto::AgentId::from("agent"),
+                agent_id: agent_id("agent"),
                 state: tau_proto::AgentRuntimeState::Idle,
             },
         ));
