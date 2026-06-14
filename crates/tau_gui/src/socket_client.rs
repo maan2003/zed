@@ -43,6 +43,7 @@ pub(crate) fn spawn(socket_path: PathBuf, tx: mpsc::Sender<SocketEvent>) -> Resu
                 EventSelector::Prefix("harness.".to_owned()),
                 EventSelector::Prefix("shell.".to_owned()),
                 EventSelector::Prefix("term.".to_owned()),
+                EventSelector::Prefix("factory.".to_owned()),
             ],
         }),
     )?;

@@ -86,7 +86,9 @@ members = [
     "crates/sqlez_macros",
     "crates/sum_tree",
     "crates/syntax_theme",
+    "crates/tau_factory",
     "crates/tau_gui",
+    "crates/tau_task",
     "crates/task",
     "crates/telemetry",
     "crates/telemetry_events",
@@ -443,6 +445,7 @@ quick-xml = "0.38"
 quote = "1.0.9"
 rand = "0.9"
 rayon = "1.8"
+redb = "4.1.0"
 regex = "1.5"
 # WARNING: If you change this, you must also publish a new version of zed-reqwest to crates.io
 reqwest = { git = "https://github.com/zed-industries/reqwest.git", rev = "c15662463bda39148ba154100dd44d3fba5873a4", default-features = false, features = [

@@ -20,7 +20,7 @@ use multi_buffer::{MultiBuffer, PathKey};
 use project::InlayId;
 use settings::SettingsStore;
 use tau_proto::{
-    AgentShellEnvironment, CborValue, ContentPart, ContextItem, ContextRole, Event,
+    CborValue, ContentPart, ContextItem, ContextRole, Event,
     HarnessInputMessage, ModelParams, PeerInputMessage, PromptMessageClass, PromptOriginator,
     ToolCallItem, UiPromptSubmitted,
 };
@@ -38,6 +38,7 @@ mod role_state;
 mod shell_state;
 mod socket_client;
 mod status_line;
+mod task_state;
 mod tool_render;
 mod tool_state;
 mod transcript;
@@ -49,6 +50,7 @@ use prompt_state::{PromptState, QueuedPrompt};
 use role_state::{RoleCycleKind, RoleCycleOutcome, RoleState};
 use shell_state::{ShellCommandState, ShellState};
 use socket_client::{SocketEvent, Writer};
+use task_state::TaskState;
 use tool_state::ToolState;
 #[cfg(test)]
 use transcript::buffer_range_starts_with;
@@ -62,7 +64,8 @@ actions!(
         AgentNext,
         AgentNew,
         RoleCycle,
-        RoleCycleGroup
+        RoleCycleGroup,
+        TaskBoard
     ]
 );
 
@@ -316,11 +319,11 @@ struct TauGui {
     main_tool_activity: MainToolActivity,
     previous_provider_usage: Option<tau_proto::ProviderTokenUsage>,
     agents: AgentState,
+    tasks: TaskState,
     completion_state: Arc<Mutex<TauCompletionState>>,
     displayed_agent_id: Option<String>,
     no_agent_ui_state: Option<AgentUiState>,
     agent_ui_states: HashMap<String, AgentUiState>,
-    shell_working_directories: Vec<AgentShellEnvironment>,
 }
 
 impl TauGui {
@@ -372,7 +375,7 @@ impl TauGui {
             session_id: attach_target.session_id,
             project_root: attach_target.project_root,
             prompt_state: PromptState::default(),
-            cli_theme: cli_theme::select_theme(tau_config::settings::CliTheme::Dark),
+            cli_theme: cli_theme::select_theme(tau_config::settings::CliTheme::default()),
             tool_state: ToolState::default(),
             shell_state: ShellState::default(),
             current_model: None,
@@ -386,11 +389,11 @@ impl TauGui {
             main_tool_activity: MainToolActivity::default(),
             previous_provider_usage: None,
             agents: AgentState::default(),
+            tasks: TaskState::default(),
             completion_state,
             displayed_agent_id: None,
             no_agent_ui_state: None,
             agent_ui_states: HashMap::new(),
-            shell_working_directories: Vec::new(),
         };
         this.update_prompt_inlay(cx);
         this.update_status_line(cx);
@@ -398,8 +401,26 @@ impl TauGui {
             tau_cli_term::StyledBlock::new(build_banner(&this.cli_theme)),
             cx,
         );
+        this.request_task_sync();
         this.focus_editor(window, cx);
         this
+    }
+
+    /// Ask the factory for the current board. Custom events are not replayed, so
+    /// a freshly connected UI has to request the existing tasks explicitly; the
+    /// factory answers with a `factory.tasks_update` we fold in `handle_event`.
+    fn request_task_sync(&self) {
+        let Some(writer) = &self.writer else {
+            return;
+        };
+        if let Err(error) = socket_client::send_message(writer, &task_state::sync_request()) {
+            eprintln!("tau-gui: failed to request task board sync: {error:#}");
+        }
+    }
+
+    fn show_task_board(&mut self, cx: &mut Context<Self>) {
+        let board = self.tasks.render_board();
+        self.insert_before_draft_styled(&board, TranscriptStyle::SystemInfo, cx);
     }
 
     fn new_agent_ui_state(
@@ -536,6 +557,14 @@ impl TauGui {
                 }
             })
         });
+        let task_board_subscription = editor.update(cx, |editor, _cx| {
+            let this = this.clone();
+            editor.register_action(move |_: &TaskBoard, _window, cx| {
+                if let Err(error) = this.update(cx, |this, cx| this.show_task_board(cx)) {
+                    eprintln!("tau-gui: failed to show task board: {error:#}");
+                }
+            })
+        });
         let draft_anchor = multi_buffer
             .read(cx)
             .snapshot(cx)
@@ -564,6 +593,7 @@ impl TauGui {
                 agent_previous_subscription,
                 agent_next_subscription,
                 agent_new_subscription,
+                task_board_subscription,
                 prompt_buffer_subscription,
             ],
             prompt_state: PromptState::default(),
@@ -622,6 +652,7 @@ impl TauGui {
             self.agents.remember(agent_id);
         }
         self.agents.observe_event(&event);
+        self.tasks.observe_event(&event);
         self.refresh_agent_completions();
         if self.agents.current_agent_id() != previous_agent_id.as_deref() {
             let current_agent_id = self.agents.current_agent_id_owned();
@@ -1088,23 +1119,14 @@ impl TauGui {
                 let block = tool_render::ui_dir_block(&self.cli_theme, &ui_dir.path);
                 self.insert_before_draft_block(block, cx);
             }
-            Event::HarnessInfo(info) => {
-                let block = tool_render::render_harness_info(&self.cli_theme, &info);
+            Event::HarnessNotice(notice) => {
+                let block = tool_render::render_harness_notice(&self.cli_theme, &notice);
                 self.insert_before_draft_block(block, cx);
             }
             Event::HarnessRolesAvailable(roles) => {
                 self.role_state.update_available(&roles);
                 self.refresh_role_completions(&roles);
                 self.update_status_line(cx);
-            }
-            Event::ShellWorkingDirectoriesAvailable(available) => {
-                self.shell_working_directories = available
-                    .directories
-                    .iter()
-                    .map(|directory| AgentShellEnvironment {
-                        working_directory: directory.working_directory.clone(),
-                    })
-                    .collect();
             }
             Event::HarnessRoleSelected(selected) => {
                 self.current_model = selected.model.clone();
@@ -1703,11 +1725,12 @@ impl TauGui {
                     .current_role
                     .clone()
                     .unwrap_or_else(|| "engineer".to_owned()),
-                shell_environment: self.shell_working_directories.first().cloned(),
+                metadata: Vec::new(),
                 initial_prompt: Some(text.clone()),
                 message_class: PromptMessageClass::User,
                 originator: PromptOriginator::User,
                 ctx_id: None,
+                parent_agent: None,
             })
         };
         if !self.send_event(event, cx) {

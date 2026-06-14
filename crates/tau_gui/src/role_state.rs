@@ -188,6 +188,7 @@ mod tests {
                 })
                 .collect(),
             groups,
+            custom_prompts: Vec::new(),
         }
     }
 

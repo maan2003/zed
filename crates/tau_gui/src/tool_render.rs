@@ -398,6 +398,7 @@ pub(crate) fn streaming_block(
         bold: body_ts.bold,
         underline: body_ts.underline,
         italic: body_ts.italic,
+        strikethrough: body_ts.strikethrough,
     };
     let progress_style = resolve(theme, names::PROGRESS_INDICATOR);
 
@@ -1007,6 +1008,7 @@ fn overlay_style(base: tau_cli_term::Style, overlay: tau_cli_term::Style) -> tau
         bold: base.bold || overlay.bold,
         underline: base.underline || overlay.underline,
         italic: base.italic || overlay.italic,
+        strikethrough: base.strikethrough || overlay.strikethrough,
     }
 }
 
@@ -1221,15 +1223,20 @@ fn is_action_id_token(token: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-pub(crate) fn render_harness_info(
+pub(crate) fn render_harness_notice(
     theme: &tau_themes::Theme,
-    info: &tau_proto::HarnessInfo,
+    notice: &tau_proto::HarnessNotice,
 ) -> tau_cli_term::StyledBlock {
     use tau_cli_term::resolve::themed_block;
     use tau_themes::names;
 
-    if info.level == tau_proto::HarnessInfoLevel::Normal
-        && let Some(path) = info
+    let important = matches!(
+        notice.level,
+        tau_proto::NoticeLevel::Critical | tau_proto::NoticeLevel::Warning
+    );
+
+    if !important
+        && let Some(path) = notice
             .message
             .strip_prefix("session dir: ")
             .and_then(|path| path.strip_suffix('/'))
@@ -1237,11 +1244,12 @@ pub(crate) fn render_harness_info(
         return system_path_block(theme, "session dir: ", Path::new(path), "/");
     }
 
-    let style_name = match info.level {
-        tau_proto::HarnessInfoLevel::Normal => names::SYSTEM_INFO,
-        tau_proto::HarnessInfoLevel::Important => names::SYSTEM_INFO_IMPORTANT,
+    let style_name = if important {
+        names::SYSTEM_INFO_IMPORTANT
+    } else {
+        names::SYSTEM_INFO
     };
-    themed_block(theme, style_name, &info.message)
+    themed_block(theme, style_name, &notice.message)
 }
 
 pub(crate) fn ui_dir_block(theme: &tau_themes::Theme, path: &Path) -> tau_cli_term::StyledBlock {

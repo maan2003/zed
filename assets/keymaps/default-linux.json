@@ -385,6 +385,7 @@
       "ctrl-k": "tau_gui::AgentPrevious",
       "ctrl-j": "tau_gui::AgentNext",
       "ctrl-shift-n": "tau_gui::AgentNew",
+      "ctrl-t": "tau_gui::TaskBoard",
     },
   },
   {
