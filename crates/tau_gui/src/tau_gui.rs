@@ -20,13 +20,12 @@ use multi_buffer::{MultiBuffer, PathKey};
 use project::InlayId;
 use settings::SettingsStore;
 use tau_proto::{
-    CborValue, ContentPart, ContextItem, ContextRole, Event,
-    HarnessInputMessage, ModelParams, PeerInputMessage, PromptMessageClass, PromptOriginator,
-    ToolCallItem, UiPromptSubmitted,
+    CborValue, ContentPart, ContextItem, ContextRole, Event, HarnessInputMessage, ModelParams,
+    PeerInputMessage, PromptMessageClass, PromptOriginator, ToolCallItem, UiPromptSubmitted,
 };
 use text::ToOffset as _;
 use theme::ActiveTheme as _;
-use ui::{Color, CommonAnimationExt as _, Icon, IconName, IconSize};
+use ui::{Color, Icon, IconName, IconSize};
 
 mod activity_state;
 mod agent_state;
@@ -50,7 +49,7 @@ use prompt_state::{PromptState, QueuedPrompt};
 use role_state::{RoleCycleKind, RoleCycleOutcome, RoleState};
 use shell_state::{ShellCommandState, ShellState};
 use socket_client::{SocketEvent, Writer};
-use task_state::TaskState;
+use task_state::{TaskState, TaskVisualKind};
 use tool_state::ToolState;
 #[cfg(test)]
 use transcript::buffer_range_starts_with;
@@ -65,7 +64,8 @@ actions!(
         AgentNew,
         RoleCycle,
         RoleCycleGroup,
-        TaskBoard
+        TaskBoard,
+        TaskOpen
     ]
 );
 
@@ -104,7 +104,6 @@ fn run() -> Result<()> {
 #[derive(Clone)]
 struct AttachTarget {
     socket_path: PathBuf,
-    session_id: tau_proto::SessionId,
     project_root: PathBuf,
 }
 
@@ -112,13 +111,8 @@ fn attach_target_for_current_dir() -> Result<AttachTarget> {
     let project_root = std::env::current_dir().context("failed to read current directory")?;
     let daemon_dir = tau_harness::runtime_dir::find_harness_for_dir(&project_root)
         .ok_or_else(|| anyhow!("no running Tau harness for {}", project_root.display()))?;
-    let session_id = tau_harness::runtime_dir::read_session_id(&daemon_dir)
-        .ok_or_else(|| anyhow!("running Tau harness did not publish a session id"))?
-        .into();
-
     Ok(AttachTarget {
         socket_path: tau_harness::runtime_dir::socket_path(&daemon_dir),
-        session_id,
         project_root,
     })
 }
@@ -262,15 +256,24 @@ impl TranscriptStyle {
     }
 }
 
-struct AgentRailItem {
-    agent_id: String,
-    selected: bool,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MainView {
+    Agent,
+    Tasks,
 }
 
-impl AgentRailItem {
-    fn new(agent_id: String, selected: bool) -> Self {
-        Self { agent_id, selected }
-    }
+struct TaskBoardUiState {
+    editor: Entity<Editor>,
+    buffer: Entity<Buffer>,
+    multi_buffer: Entity<MultiBuffer>,
+    rows: Vec<TaskRowAnchor>,
+    _subscriptions: Vec<Subscription>,
+}
+
+struct TaskRowAnchor {
+    task_id: tau_task::TaskId,
+    start: text::Anchor,
+    end: text::Anchor,
 }
 
 struct AgentUiState {
@@ -302,7 +305,6 @@ struct TauGui {
     rx: mpsc::Receiver<SocketEvent>,
     _poll_task: Task<()>,
     _subscriptions: Vec<Subscription>,
-    session_id: tau_proto::SessionId,
     project_root: PathBuf,
     prompt_state: PromptState,
     cli_theme: tau_themes::Theme,
@@ -320,6 +322,8 @@ struct TauGui {
     previous_provider_usage: Option<tau_proto::ProviderTokenUsage>,
     agents: AgentState,
     tasks: TaskState,
+    task_board: TaskBoardUiState,
+    main_view: MainView,
     completion_state: Arc<Mutex<TauCompletionState>>,
     displayed_agent_id: Option<String>,
     no_agent_ui_state: Option<AgentUiState>,
@@ -331,6 +335,7 @@ impl TauGui {
         let completion_state = Arc::new(Mutex::new(TauCompletionState::default()));
         let this = cx.entity().downgrade();
         let ui_state = Self::new_agent_ui_state(this, completion_state.clone(), window, cx);
+        let task_board = Self::new_task_board_ui_state(cx.entity().downgrade(), window, cx);
         let editor = ui_state.editor.clone();
         let prompt_buffer = ui_state.prompt_buffer.clone();
         let multi_buffer = ui_state.multi_buffer.clone();
@@ -372,7 +377,6 @@ impl TauGui {
             rx,
             _poll_task: poll_task,
             _subscriptions: ui_subscriptions,
-            session_id: attach_target.session_id,
             project_root: attach_target.project_root,
             prompt_state: PromptState::default(),
             cli_theme: cli_theme::select_theme(tau_config::settings::CliTheme::default()),
@@ -390,6 +394,8 @@ impl TauGui {
             previous_provider_usage: None,
             agents: AgentState::default(),
             tasks: TaskState::default(),
+            task_board,
+            main_view: MainView::Agent,
             completion_state,
             displayed_agent_id: None,
             no_agent_ui_state: None,
@@ -418,9 +424,162 @@ impl TauGui {
         }
     }
 
-    fn show_task_board(&mut self, cx: &mut Context<Self>) {
-        let board = self.tasks.render_board();
-        self.insert_before_draft_styled(&board, TranscriptStyle::SystemInfo, cx);
+    fn show_task_board(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.refresh_task_board(cx);
+        self.main_view = MainView::Tasks;
+        window.focus(&self.task_board.editor.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    fn refresh_task_board(&mut self, cx: &mut Context<Self>) {
+        let render = self.tasks.render_full_board();
+        self.task_board.buffer.update(cx, |buffer, cx| {
+            buffer.set_text(render.text.as_str(), cx);
+            self.task_board.rows = render
+                .rows
+                .into_iter()
+                .map(|row| TaskRowAnchor {
+                    task_id: row.task_id,
+                    start: buffer.anchor_before(row.range.start),
+                    end: buffer.anchor_after(row.range.end),
+                })
+                .collect();
+        });
+        self.task_board.multi_buffer.update(cx, |multi_buffer, cx| {
+            multi_buffer.set_excerpts_for_path(
+                PathKey::sorted(0),
+                self.task_board.buffer.clone(),
+                [Point::zero()..self.task_board.buffer.read(cx).max_point()],
+                0,
+                cx,
+            );
+        });
+    }
+
+    fn open_task_under_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(task_id) = self.task_under_task_cursor(cx) else {
+            return;
+        };
+        let Some(agent_id) = self.tasks.task_agent(task_id) else {
+            return;
+        };
+        self.main_view = MainView::Agent;
+        self.switch_to_agent_tab(Some(agent_id), window, cx);
+        cx.notify();
+    }
+
+    fn task_under_task_cursor(&self, cx: &mut Context<Self>) -> Option<tau_task::TaskId> {
+        let cursor = self.task_board.editor.update(cx, |editor, cx| {
+            let snapshot = editor.buffer().read(cx).snapshot(cx);
+            snapshot
+                .anchor_to_buffer_anchor(editor.selections.newest_anchor().head())
+                .map(|(anchor, _)| anchor)
+        })?;
+        let buffer = self.task_board.buffer.read(cx);
+        let cursor = cursor.to_offset(buffer);
+        self.task_board.rows.iter().find_map(|row| {
+            let start = row.start.to_offset(buffer);
+            let end = row.end.to_offset(buffer);
+            (start <= cursor && cursor <= end).then_some(row.task_id)
+        })
+    }
+
+    fn new_task_board_ui_state(
+        this: WeakEntity<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> TaskBoardUiState {
+        let buffer = cx.new(|cx| {
+            let mut buffer = Buffer::local("", cx);
+            buffer.set_capability(Capability::Read, cx);
+            buffer
+        });
+        let multi_buffer = cx.new(|cx| {
+            let mut multi_buffer = MultiBuffer::without_headers(Capability::Read);
+            multi_buffer.set_excerpts_for_path(
+                PathKey::sorted(0),
+                buffer.clone(),
+                [Point::zero()..buffer.read(cx).max_point()],
+                0,
+                cx,
+            );
+            multi_buffer
+        });
+        let editor = cx.new(|cx| {
+            let mut editor = Editor::new(
+                EditorMode::Full {
+                    scale_ui_elements_with_buffer_font_size: true,
+                    show_active_line_background: true,
+                    sizing_behavior: SizingBehavior::ExcludeOverscrollMargin,
+                },
+                multi_buffer.clone(),
+                None,
+                window,
+                cx,
+            );
+            editor.set_show_gutter(false, cx);
+            editor.set_show_line_numbers(false, cx);
+            editor.set_show_git_diff_gutter(false, cx);
+            editor.set_show_code_actions(false, cx);
+            editor.set_show_runnables(false, cx);
+            editor.set_show_breakpoints(false, cx);
+            editor.set_show_vertical_scrollbar(false, cx);
+            editor.set_show_horizontal_scrollbar(false, cx);
+            editor.set_offset_content(false, cx);
+            editor.set_mouse_click_selection_enabled(true, cx);
+            editor.set_soft_wrap_mode(language::language_settings::SoftWrap::EditorWidth, cx);
+            editor.set_show_wrap_guides(false, cx);
+            editor.set_show_indent_guides(false, cx);
+            editor.set_autoindent(false);
+            editor.set_show_edit_predictions(Some(false), window, cx);
+            editor.set_use_selection_highlight(false);
+            editor.disable_header_for_buffer(buffer.read(cx).remote_id(), cx);
+            editor.disable_expand_excerpt_buttons(cx);
+            editor
+        });
+        let task_board_subscription = editor.update(cx, |editor, _cx| {
+            let this = this.clone();
+            editor.register_action(move |_: &TaskBoard, window, cx| {
+                if let Err(error) = this.update(cx, |this, cx| {
+                    this.main_view = MainView::Agent;
+                    this.focus_editor(window, cx);
+                    cx.notify();
+                }) {
+                    eprintln!("tau-gui: failed to leave task board: {error:#}");
+                }
+            })
+        });
+        let task_open_subscription = editor.update(cx, |editor, _cx| {
+            let this = this.clone();
+            editor.register_action(move |_: &TaskOpen, window, cx| {
+                if let Err(error) =
+                    this.update(cx, |this, cx| this.open_task_under_cursor(window, cx))
+                {
+                    eprintln!("tau-gui: failed to open selected task: {error:#}");
+                }
+            })
+        });
+        let submit_subscription = editor.update(cx, |editor, _cx| {
+            let this = this.clone();
+            editor.register_action(move |_: &SubmitPrompt, window, cx| {
+                if let Err(error) =
+                    this.update(cx, |this, cx| this.open_task_under_cursor(window, cx))
+                {
+                    eprintln!("tau-gui: failed to open selected task: {error:#}");
+                }
+            })
+        });
+        TaskBoardUiState {
+            editor,
+            buffer,
+            multi_buffer,
+            rows: Vec::new(),
+            _subscriptions: vec![
+                task_board_subscription,
+                task_open_subscription,
+                submit_subscription,
+            ],
+        }
     }
 
     fn new_agent_ui_state(
@@ -559,8 +718,8 @@ impl TauGui {
         });
         let task_board_subscription = editor.update(cx, |editor, _cx| {
             let this = this.clone();
-            editor.register_action(move |_: &TaskBoard, _window, cx| {
-                if let Err(error) = this.update(cx, |this, cx| this.show_task_board(cx)) {
+            editor.register_action(move |_: &TaskBoard, window, cx| {
+                if let Err(error) = this.update(cx, |this, cx| this.show_task_board(window, cx)) {
                     eprintln!("tau-gui: failed to show task board: {error:#}");
                 }
             })
@@ -653,6 +812,7 @@ impl TauGui {
         }
         self.agents.observe_event(&event);
         self.tasks.observe_event(&event);
+        self.refresh_task_board(cx);
         self.refresh_agent_completions();
         if self.agents.current_agent_id() != previous_agent_id.as_deref() {
             let current_agent_id = self.agents.current_agent_id_owned();
@@ -702,9 +862,10 @@ impl TauGui {
                     provider_update_compaction_status(&update),
                     cx,
                 );
-                let text = assistant_text_from_update(&update.items).unwrap_or_default();
-                self.prompt_state
-                    .record_streamed_response(key.clone(), text.clone());
+                let text = assistant_text_from_update(&update).unwrap_or_default();
+                let text = self
+                    .prompt_state
+                    .append_streamed_response(key.clone(), text);
                 self.upsert_live_response(key, text.as_str(), cx);
             }
             Event::ProviderResponseFinished(finished) if finished.originator.is_user() => {
@@ -1106,15 +1267,6 @@ impl TauGui {
                     tool_render::agent_context_ready_block(&self.cli_theme, &ready.agent_id);
                 self.insert_before_draft_block(block, cx);
             }
-            Event::HarnessSessionDir(session_dir) => {
-                let block = tool_render::session_status_block(
-                    &self.cli_theme,
-                    &session_dir.path,
-                    "/",
-                    session_dir.status.as_str(),
-                );
-                self.insert_before_draft_block(block, cx);
-            }
             Event::HarnessUiDir(ui_dir) => {
                 let block = tool_render::ui_dir_block(&self.cli_theme, &ui_dir.path);
                 self.insert_before_draft_block(block, cx);
@@ -1157,8 +1309,7 @@ impl TauGui {
                     self.update_status_line(cx);
                 }
             }
-            Event::SessionStarted(started) => {
-                self.session_id = started.session_id;
+            Event::HarnessStarted(_) => {
                 self.main_tool_activity.reset();
                 self.previous_provider_usage = None;
                 self.agents.clear_context_usage();
@@ -1243,7 +1394,6 @@ impl TauGui {
         if text == "/cancel" {
             return self.send_command_event(
                 Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
-                    session_id: self.session_id.clone(),
                     target_agent_id: self.selected_agent_proto_id(),
                     agent_prompt_id: None,
                 }),
@@ -1253,7 +1403,6 @@ impl TauGui {
         if text == "/tree" {
             return self.send_command_event(
                 Event::UiTreeRequest(tau_proto::UiTreeRequest {
-                    session_id: self.session_id.clone(),
                     target_agent_id: self.selected_agent_proto_id(),
                 }),
                 cx,
@@ -1270,7 +1419,6 @@ impl TauGui {
             };
             return self.send_command_event(
                 Event::UiNavigateTree(tau_proto::UiNavigateTree {
-                    session_id: self.session_id.clone(),
                     target_agent_id: self.selected_agent_proto_id(),
                     node_id,
                 }),
@@ -1280,7 +1428,6 @@ impl TauGui {
         if text == "/compact" {
             return self.send_command_event(
                 Event::UiCompactRequest(tau_proto::UiCompactRequest {
-                    session_id: self.session_id.clone(),
                     target_agent_id: self.selected_agent_proto_id(),
                 }),
                 cx,
@@ -1549,16 +1696,6 @@ impl TauGui {
         self.show_current_transcript_buffer(cx);
     }
 
-    fn agent_tabs(&self) -> Vec<AgentRailItem> {
-        self.agents
-            .known_agents_sorted()
-            .into_iter()
-            .map(|agent_id| {
-                let selected = self.agents.current_agent_id() == Some(agent_id.as_str());
-                AgentRailItem::new(agent_id, selected)
-            })
-            .collect()
-    }
     fn switch_to_agent_tab(
         &mut self,
         agent_id: Option<String>,
@@ -1648,7 +1785,6 @@ impl TauGui {
             .unwrap_or_else(|_| "ui-sh-0".to_owned());
         self.send_command_event(
             Event::UiShellCommand(tau_proto::UiShellCommand {
-                session_id: self.session_id.clone(),
                 command_id: command_id.into(),
                 command: command.to_owned(),
                 include_in_context,
@@ -1711,7 +1847,6 @@ impl TauGui {
                 return;
             };
             Event::UiPromptSubmitted(UiPromptSubmitted {
-                session_id: self.session_id.clone(),
                 text: text.clone(),
                 agent_id,
                 message_class: PromptMessageClass::User,
@@ -1720,11 +1855,11 @@ impl TauGui {
             })
         } else {
             Event::UiCreateAgent(tau_proto::UiCreateAgent {
-                session_id: self.session_id.clone(),
                 role: self
                     .current_role
                     .clone()
                     .unwrap_or_else(|| "engineer".to_owned()),
+                model_override: None,
                 metadata: Vec::new(),
                 initial_prompt: Some(text.clone()),
                 message_class: PromptMessageClass::User,
@@ -2323,25 +2458,27 @@ impl TauGui {
         }
     }
 
-    fn render_agent_rail(
+    fn render_task_rail(
         &self,
-        agent_tabs: Vec<AgentRailItem>,
         text_style: &TextStyle,
-        active_agent_color: Hsla,
+        active_task_color: Hsla,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let colors = cx.theme().colors();
-        let rows = agent_tabs
+        let current_agent = self.agents.current_agent_id();
+        let rows = self
+            .tasks
+            .mini_rows()
             .into_iter()
-            .map(|tab| {
-                let agent_id = tab.agent_id.clone();
-                let title = agent_rail_title(&tab.agent_id);
-                let is_running = self.agent_is_running(&tab.agent_id);
-                let text_color = if tab.selected {
-                    active_agent_color
+            .map(|row| {
+                let agent_id = self.tasks.task_agent(row.id);
+                let selected = agent_id.as_deref() == current_agent;
+                let text_color = if selected {
+                    active_task_color
                 } else {
                     text_style.color
                 };
+                let task_id = row.id;
                 div()
                     .relative()
                     .w_full()
@@ -2355,9 +2492,19 @@ impl TauGui {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, window, cx| {
-                            this.switch_to_agent_tab(Some(agent_id.clone()), window, cx);
+                            if let Some(agent_id) = this.tasks.task_agent(task_id) {
+                                this.main_view = MainView::Agent;
+                                this.switch_to_agent_tab(Some(agent_id), window, cx);
+                            }
                         }),
                     )
+                    .child(Icon::new(task_icon(row.kind)).size(IconSize::XSmall).color(
+                        Color::Custom(task_icon_color(
+                            row.kind,
+                            active_task_color,
+                            text_style.color,
+                        )),
+                    ))
                     .child(
                         div()
                             .flex_grow(1.0)
@@ -2365,21 +2512,13 @@ impl TauGui {
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_color(text_color)
-                            .child(title),
+                            .child(row.title),
                     )
-                    .when(is_running, |this| {
-                        this.child(
-                            Icon::new(IconName::LoadCircle)
-                                .size(IconSize::XSmall)
-                                .color(Color::Custom(active_agent_color))
-                                .with_rotate_animation(2),
-                        )
-                    })
             })
             .collect::<Vec<_>>();
 
         div()
-            .id("tau-gui-agent-rail")
+            .id("tau-gui-task-rail")
             .h_full()
             .w(px(224.))
             .flex_none()
@@ -2396,22 +2535,17 @@ impl TauGui {
             .text_color(text_style.color)
             .child(
                 div()
-                    .id("tau-gui-agent-list")
+                    .id("tau-gui-task-list")
                     .w_full()
                     .flex_grow(1.0)
                     .overflow_y_scroll()
                     .children(rows),
             )
     }
-
-    fn agent_is_running(&self, agent_id: &str) -> bool {
-        self.agents.running(agent_id)
-    }
 }
 
 impl Render for TauGui {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let agent_tabs = self.agent_tabs();
         let text_style = self
             .editor
             .update(cx, |editor, cx| editor.style(cx).text.clone());
@@ -2419,6 +2553,11 @@ impl Render for TauGui {
             .highlight_style_for_name(tau_themes::names::STATUS_ROLE, cx)
             .color
             .unwrap_or(text_style.color);
+
+        let editor = match self.main_view {
+            MainView::Agent => self.editor.clone(),
+            MainView::Tasks => self.task_board.editor.clone(),
+        };
 
         div()
             .id("tau-gui")
@@ -2428,7 +2567,9 @@ impl Render for TauGui {
             .p(px(2.))
             .bg(cx.theme().colors().editor_background)
             .key_context("TauGui")
-            .child(self.render_agent_rail(agent_tabs, &text_style, active_agent_color, cx))
+            .when(self.main_view == MainView::Agent, |this| {
+                this.child(self.render_task_rail(&text_style, active_agent_color, cx))
+            })
             .child(
                 div()
                     .id("tau-gui-editor")
@@ -2437,8 +2578,26 @@ impl Render for TauGui {
                     .min_w_0()
                     .ml(px(6.))
                     .overflow_hidden()
-                    .child(self.editor.clone()),
+                    .child(editor),
             )
+    }
+}
+
+fn task_icon(kind: TaskVisualKind) -> IconName {
+    match kind {
+        TaskVisualKind::Decision => IconName::BellDot,
+        TaskVisualKind::Question => IconName::CircleHelp,
+        TaskVisualKind::Review => IconName::Diff,
+        TaskVisualKind::Active => IconName::PlayFilled,
+        TaskVisualKind::Open => IconName::Circle,
+    }
+}
+
+fn task_icon_color(kind: TaskVisualKind, active: Hsla, normal: Hsla) -> Hsla {
+    match kind {
+        TaskVisualKind::Decision | TaskVisualKind::Question | TaskVisualKind::Review => active,
+        TaskVisualKind::Active => active,
+        TaskVisualKind::Open => normal.opacity(0.6),
     }
 }
 
@@ -2448,16 +2607,6 @@ fn startup_pun() -> &'static str {
         .map(|duration| duration.as_nanos() as usize % STARTUP_PUNS.len())
         .unwrap_or(0);
     STARTUP_PUNS[index]
-}
-
-fn agent_rail_title(agent_id: &str) -> String {
-    agent_id
-        .rsplit('/')
-        .next()
-        .unwrap_or(agent_id)
-        .trim_start_matches('@')
-        .replace([' ', '_'], "-")
-        .to_lowercase()
 }
 
 fn build_label_parts() -> (String, String) {
@@ -2679,30 +2828,20 @@ fn shell_finished_suffix(
 fn provider_update_compaction_status(
     update: &tau_proto::ProviderResponseUpdated,
 ) -> Option<(tool_render::CompactionStatus, String)> {
-    if update.items.iter().any(|item| {
-        matches!(
-            item,
-            tau_proto::ProviderResponseItem::Completed(ContextItem::Compaction(_))
-        )
-    }) {
-        return Some((
+    let compaction = update.compaction.as_ref()?;
+    match compaction.status {
+        tau_proto::ProviderResponseCompactionStatus::Completed => Some((
             tool_render::CompactionStatus::Success,
             compaction_success_status(
-                update.compaction_original_input_tokens,
-                update.compaction_compacted_input_tokens,
+                compaction.original_input_tokens,
+                compaction.compacted_input_tokens,
             ),
-        ));
-    }
-
-    update.items.iter().find_map(|item| match item {
-        tau_proto::ProviderResponseItem::InProgress(
-            tau_proto::InProgressOutputItem::Compaction { .. },
-        ) => Some((
-            tool_render::CompactionStatus::Progress,
-            compaction_progress_status(update.compaction_original_input_tokens),
         )),
-        _ => None,
-    })
+        tau_proto::ProviderResponseCompactionStatus::Started => Some((
+            tool_render::CompactionStatus::Progress,
+            compaction_progress_status(compaction.original_input_tokens),
+        )),
+    }
 }
 
 fn compaction_token_chip(tokens: u64) -> String {
@@ -2741,22 +2880,15 @@ fn agent_prompt_termination_reason(
     }
 }
 
-fn assistant_text_from_update(items: &[tau_proto::ProviderResponseItem]) -> Option<String> {
-    let text = items
+fn assistant_text_from_update(update: &tau_proto::ProviderResponseUpdated) -> Option<String> {
+    let text = update
+        .deltas
         .iter()
-        .filter_map(|item| match item {
-            tau_proto::ProviderResponseItem::Completed(ContextItem::Message(message))
-                if message.role == ContextRole::Assistant =>
-            {
-                Some(message.content.iter().map(content_text).collect::<String>())
-            }
-            tau_proto::ProviderResponseItem::InProgress(
-                tau_proto::InProgressOutputItem::Message { text, .. },
-            ) => Some(text.clone()),
-            _ => None,
+        .filter_map(|delta| match delta {
+            tau_proto::ProviderResponseTextDelta::Message { text, .. } => Some(text.as_str()),
+            tau_proto::ProviderResponseTextDelta::ReasoningText { .. } => None,
         })
-        .collect::<Vec<_>>()
-        .join("\n");
+        .collect::<String>();
     (!text.is_empty()).then_some(text)
 }
 
@@ -2951,15 +3083,6 @@ mod tests {
         buffer.text_for_range(0..buffer.len()).collect()
     }
 
-    #[test]
-    fn agent_rail_titles_are_branch_like() {
-        assert_eq!(agent_rail_title("feature/Add Agent_Rail"), "add-agent-rail");
-        assert_eq!(
-            agent_rail_title("very-long-agent-identifier"),
-            "very-long-agent-identifier"
-        );
-    }
-
     #[gpui::test]
     fn anchor_before_stays_before_insertions_at_same_offset(cx: &mut App) {
         let buffer = cx.new(|cx| Buffer::local("ab", cx));
@@ -3082,7 +3205,6 @@ mod tests {
     fn shell_finished_suffix_matches_cli_labels() {
         let mut finished = tau_proto::ShellCommandFinished {
             command_id: tau_proto::ShellCommandId::from("command"),
-            session_id: tau_proto::SessionId::from("session"),
             command: "echo hi".to_owned(),
             include_in_context: true,
             target_agent_id: None,

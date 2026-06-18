@@ -63,15 +63,16 @@ impl AgentState {
         self.known_agents.contains(agent_id)
     }
 
-    pub(crate) fn running(&self, agent_id: &str) -> bool {
-        self.running_agents.contains(agent_id)
-    }
-
     pub(crate) fn selected_is_active(&self) -> bool {
         let Some(agent_id) = self.current_agent_id.as_deref() else {
             return true;
         };
         self.live_agents.contains(agent_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn running(&self, agent_id: &str) -> bool {
+        self.running_agents.contains(agent_id)
     }
 
     pub(crate) fn known_agents_sorted(&self) -> Vec<String> {
@@ -144,10 +145,8 @@ impl AgentState {
                 self.remember(agent_id);
             }
             tau_proto::Event::AgentStarted(started) => self.remember(started.agent_id.to_string()),
-            tau_proto::Event::SessionAgentLoaded(loaded) => {
-                self.remember(loaded.agent_id.to_string())
-            }
-            tau_proto::Event::SessionAgentUnloaded(unloaded) => {
+            tau_proto::Event::AgentLoaded(loaded) => self.remember(loaded.agent_id.to_string()),
+            tau_proto::Event::AgentUnloaded(unloaded) => {
                 self.unload(unloaded.agent_id.as_str());
                 self.remove_agent_routes(unloaded.agent_id.as_str());
             }
@@ -418,7 +417,6 @@ mod tests {
         state.observe_event(&tau_proto::Event::UiShellCommand(
             tau_proto::UiShellCommand {
                 command_id: tau_proto::ShellCommandId::from("command"),
-                session_id: tau_proto::SessionId::from("session"),
                 command: "echo hi".to_owned(),
                 include_in_context: true,
                 target_agent_id: Some(agent_id("agent")),
@@ -438,7 +436,6 @@ mod tests {
 
         let finished = tau_proto::Event::ShellCommandFinished(tau_proto::ShellCommandFinished {
             command_id: tau_proto::ShellCommandId::from("command"),
-            session_id: tau_proto::SessionId::from("session"),
             command: "echo hi".to_owned(),
             include_in_context: true,
             target_agent_id: None,

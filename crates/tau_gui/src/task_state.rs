@@ -6,12 +6,9 @@
 //! just the changed task on a mutation, the whole list in response to the
 //! `factory.sync` the UI emits on connect. Tasks are never removed (closing is a
 //! status), so the fold is a pure upsert with no tombstones.
-//!
-//! Ordering is a render concern, not a wire concern: the factory imposes none,
-//! so the board groups by attention first (what needs the human) and then by
-//! status here.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 use tau_proto::{CborValue, CustomEvent, Event, EventCategory, EventName, HarnessInputMessage};
 use tau_task::{Attention, Status, Task, TaskId, wire};
@@ -43,12 +40,14 @@ impl TaskState {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.tasks.len()
     }
 
-    /// How many tasks are waiting on the human right now — the number the board
-    /// exists to keep visible.
+    /// How many tasks are waiting on the human right now — useful internally and
+    /// in tests, even though the board intentionally does not print the count.
+    #[cfg(test)]
     pub(crate) fn attention_count(&self) -> usize {
         self.tasks
             .values()
@@ -56,44 +55,185 @@ impl TaskState {
             .count()
     }
 
-    /// The board as text: an attention-first, then status-grouped listing.
-    pub(crate) fn render_board(&self) -> String {
+    pub(crate) fn task_agent(&self, id: TaskId) -> Option<String> {
+        self.tasks.get(&id).and_then(|task| match &task.status {
+            Status::Active { agent, .. } | Status::Done { agent } => Some(agent.to_string()),
+            Status::Closed { agent } => agent.as_ref().map(ToString::to_string),
+            Status::Open => None,
+        })
+    }
+
+    pub(crate) fn mini_rows(&self) -> Vec<TaskMiniRow> {
+        self.ordered_rows()
+            .into_iter()
+            .filter(|task| !matches!(task.status, Status::Done { .. } | Status::Closed { .. }))
+            .take(12)
+            .map(TaskMiniRow::from)
+            .collect()
+    }
+
+    /// The full task board as generated text, plus task anchor ranges expressed
+    /// as byte offsets in that text. The UI turns these offsets into buffer
+    /// anchors after inserting the text.
+    pub(crate) fn render_full_board(&self) -> BoardRender {
         if self.tasks.is_empty() {
-            return "Tasks\n\n  No tasks yet. Create one with /factory new <title>.\n".to_owned();
+            return BoardRender {
+                text: "Tasks\n\n  No tasks yet. Create one with /factory new <title>.\n".to_owned(),
+                rows: Vec::new(),
+            };
         }
 
-        let mut out = format!(
-            "Tasks — {} of {} need you\n",
-            self.attention_count(),
-            self.len()
+        let mut render = BoardRender {
+            text: "Tasks\n".to_owned(),
+            rows: Vec::new(),
+        };
+
+        self.push_section(
+            &mut render,
+            "Needs you",
+            self.tasks
+                .values()
+                .filter(|task| task.attention.is_some())
+                .collect(),
+            None,
+        );
+        self.push_section(
+            &mut render,
+            "Active",
+            self.tasks
+                .values()
+                .filter(|task| {
+                    task.attention.is_none() && matches!(task.status, Status::Active { .. })
+                })
+                .collect(),
+            None,
+        );
+        self.push_section(
+            &mut render,
+            "Open",
+            self.tasks
+                .values()
+                .filter(|task| task.attention.is_none() && matches!(task.status, Status::Open))
+                .collect(),
+            Some(3),
         );
 
-        // Anything waiting on the human, regardless of status, most urgent
-        // first. This is the board's reason to exist, so it leads.
-        let mut needs_you: Vec<&Task> = self
+        if self
             .tasks
             .values()
-            .filter(|task| task.attention.is_some())
-            .collect();
-        needs_you.sort_by_key(|task| (attention_priority(task.attention), task.id));
-        push_section(
-            &mut out,
-            "Needs you",
-            needs_you.iter().map(|task| task_line(task, true)).collect(),
-        );
-
-        // The rest, grouped by where they are in their lifecycle. A task only
-        // appears here when it is not already under "Needs you".
-        for (heading, matches) in STATUS_SECTIONS {
-            let lines = self
-                .tasks
-                .values()
-                .filter(|task| task.attention.is_none() && matches(&task.status))
-                .map(|task| task_line(task, false))
-                .collect();
-            push_section(&mut out, heading, lines);
+            .any(|task| task.attention.is_none() && matches!(task.status, Status::Done { .. }))
+        {
+            render.text.push_str("\n[+] Done\n");
         }
-        out
+        if self
+            .tasks
+            .values()
+            .any(|task| task.attention.is_none() && matches!(task.status, Status::Closed { .. }))
+        {
+            render.text.push_str("\n[+] Closed\n");
+        }
+
+        render
+    }
+
+    fn ordered_rows(&self) -> Vec<&Task> {
+        let mut tasks = self.tasks.values().collect::<Vec<_>>();
+        tasks.sort_by_key(|task| {
+            (
+                section_priority(task),
+                attention_priority(task.attention),
+                std::cmp::Reverse(task.updated_at),
+                task.id,
+            )
+        });
+        tasks
+    }
+
+    fn push_section(
+        &self,
+        render: &mut BoardRender,
+        heading: &str,
+        mut tasks: Vec<&Task>,
+        limit: Option<usize>,
+    ) {
+        if tasks.is_empty() {
+            return;
+        }
+        tasks.sort_by_key(|task| {
+            (
+                attention_priority(task.attention),
+                std::cmp::Reverse(task.updated_at),
+                task.id,
+            )
+        });
+
+        render.text.push_str(&format!("\n{heading}\n"));
+        let shown = limit.unwrap_or(tasks.len()).min(tasks.len());
+        for task in tasks.iter().take(shown) {
+            let start = render.text.len();
+            render.text.push_str("  ");
+            render.text.push_str(&task.title);
+            render.text.push('\n');
+            let end = render.text.len();
+            render.rows.push(BoardRowRange {
+                task_id: task.id,
+                range: start..end,
+            });
+        }
+        if shown < tasks.len() {
+            render.text.push_str("  … more\n");
+        }
+    }
+}
+
+pub(crate) struct BoardRender {
+    pub(crate) text: String,
+    pub(crate) rows: Vec<BoardRowRange>,
+}
+
+pub(crate) struct BoardRowRange {
+    pub(crate) task_id: TaskId,
+    pub(crate) range: Range<usize>,
+}
+
+#[derive(Clone)]
+pub(crate) struct TaskMiniRow {
+    pub(crate) id: TaskId,
+    pub(crate) title: String,
+    pub(crate) kind: TaskVisualKind,
+}
+
+impl From<&Task> for TaskMiniRow {
+    fn from(task: &Task) -> Self {
+        Self {
+            id: task.id,
+            title: task.title.clone(),
+            kind: TaskVisualKind::from_task(task),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TaskVisualKind {
+    Decision,
+    Question,
+    Review,
+    Active,
+    Open,
+}
+
+impl TaskVisualKind {
+    fn from_task(task: &Task) -> Self {
+        match task.attention {
+            Some(Attention::Decision) => Self::Decision,
+            Some(Attention::Question) => Self::Question,
+            Some(Attention::Review) => Self::Review,
+            None => match task.status {
+                Status::Active { .. } => Self::Active,
+                Status::Open => Self::Open,
+                Status::Done { .. } | Status::Closed { .. } => Self::Open,
+            },
+        }
     }
 }
 
@@ -102,47 +242,13 @@ impl TaskState {
 /// connected UI learns the tasks that already exist.
 pub(crate) fn sync_request() -> HarnessInputMessage {
     let name = EventName::new(EventCategory::Other(wire::CATEGORY.to_owned()), wire::SYNC);
-    let event = CustomEvent::try_new(name, None, CborValue::Null)
+    let event = CustomEvent::try_new(name, CborValue::Null)
         .expect("factory.sync is a valid extension-owned event name");
     HarnessInputMessage::emit(Event::ExtensionEvent(event))
 }
 
-const STATUS_SECTIONS: [(&str, fn(&Status) -> bool); 4] = [
-    ("Active", |status| matches!(status, Status::Active { .. })),
-    ("Open", |status| matches!(status, Status::Open)),
-    ("Done", |status| matches!(status, Status::Done { .. })),
-    ("Closed", |status| matches!(status, Status::Closed { .. })),
-];
-
 fn is_tasks_update(name: &EventName) -> bool {
     name.category().as_str() == wire::CATEGORY && name.call().as_str() == wire::TASKS_UPDATE
-}
-
-fn push_section(out: &mut String, heading: &str, lines: Vec<String>) {
-    if lines.is_empty() {
-        return;
-    }
-    out.push_str(&format!("\n  {heading}\n"));
-    for line in lines {
-        out.push_str(&line);
-    }
-}
-
-fn task_line(task: &Task, show_attention: bool) -> String {
-    let marker = if show_attention {
-        attention_label(task.attention)
-    } else {
-        ""
-    };
-    let agent = status_agent(&task.status).unwrap_or_default();
-    let line = format!(
-        "    {id:<8}  {marker:<9}  {title:<46}  {agent}",
-        id = task.id.to_string(),
-        title = truncate(&task.title, 46),
-    );
-    let mut line = line.trim_end().to_owned();
-    line.push('\n');
-    line
 }
 
 fn attention_priority(attention: Option<Attention>) -> u8 {
@@ -154,32 +260,16 @@ fn attention_priority(attention: Option<Attention>) -> u8 {
     }
 }
 
-fn attention_label(attention: Option<Attention>) -> &'static str {
-    match attention {
-        Some(Attention::Decision) => "decision",
-        Some(Attention::Question) => "question",
-        Some(Attention::Review) => "review",
-        None => "",
+fn section_priority(task: &Task) -> u8 {
+    if task.attention.is_some() {
+        return 0;
     }
-}
-
-fn status_agent(status: &Status) -> Option<String> {
-    match status {
-        Status::Open => None,
-        Status::Active { agent, .. } | Status::Done { agent } => Some(agent.to_string()),
-        Status::Closed { agent } => agent.as_ref().map(ToString::to_string),
+    match task.status {
+        Status::Active { .. } => 1,
+        Status::Open => 2,
+        Status::Done { .. } => 3,
+        Status::Closed { .. } => 4,
     }
-}
-
-/// Truncate to at most `max` characters (not bytes, so multi-byte titles never
-/// panic), marking elision with `…`.
-fn truncate(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_owned();
-    }
-    let mut truncated: String = text.chars().take(max.saturating_sub(1)).collect();
-    truncated.push('…');
-    truncated
 }
 
 #[cfg(test)]
@@ -223,9 +313,14 @@ mod tests {
         assert_eq!(state.len(), 2);
 
         // A later delta for an existing id replaces, not appends.
-        state.observe_event(&tasks_update(&[task(1, "First renamed", Status::Open, None)]));
+        state.observe_event(&tasks_update(&[task(
+            1,
+            "First renamed",
+            Status::Open,
+            None,
+        )]));
         assert_eq!(state.len(), 2);
-        assert!(state.render_board().contains("First renamed"));
+        assert!(state.render_full_board().text.contains("First renamed"));
     }
 
     #[test]
@@ -245,21 +340,35 @@ mod tests {
         ]));
 
         assert_eq!(state.attention_count(), 1);
-        let board = state.render_board();
+        let board = state.render_full_board().text;
         let needs_you = board.find("Needs you").expect("needs-you section");
-        // The plain open task is the only one without attention, so it forms the
-        // single status section; the active+review task is pulled up into
-        // "Needs you" instead of appearing under an "Active" section.
-        let open = board.find("\n  Open").expect("open section");
+        let open = board.find("\nOpen").expect("open section");
         assert!(needs_you < open, "needs-you section must come first");
         assert!(
-            !board.contains("\n  Active"),
+            !board.contains("\nActive"),
             "the active task has attention, so it belongs under Needs you, not Active"
         );
-        // The active+review task shows under Needs you with its attention label.
-        assert!(board.contains("review"));
         assert!(board.contains("Patch ready"));
-        assert!(board.contains("impl-2"));
+        assert!(!board.contains("impl-2"));
+    }
+
+    #[test]
+    fn open_tasks_are_limited_by_default() {
+        let mut state = TaskState::default();
+        state.observe_event(&tasks_update(&[
+            task(1, "One", Status::Open, None),
+            task(2, "Two", Status::Open, None),
+            task(3, "Three", Status::Open, None),
+            task(4, "Four", Status::Open, None),
+        ]));
+
+        let board = state.render_full_board().text;
+        assert!(board.contains("… more"));
+        assert_eq!(
+            board.matches("\n  ").count(),
+            4,
+            "three tasks plus more row"
+        );
     }
 
     #[test]

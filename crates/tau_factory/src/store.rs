@@ -99,7 +99,9 @@ impl TaskStore {
     pub fn open(path: &Path) -> Self {
         let database = Database::create(path)
             .unwrap_or_else(|error| panic!("opening task store at {}: {error}", path.display()));
-        let write = database.begin_write().expect("begin table-creation transaction");
+        let write = database
+            .begin_write()
+            .expect("begin table-creation transaction");
         write.open_table(TASKS).expect("create tasks table");
         write.open_table(META).expect("create meta table");
         write.commit().expect("commit table creation");
@@ -111,7 +113,10 @@ impl TaskStore {
     /// id out twice or leave a gap with no task.
     pub fn create(&mut self, title: String, issue: String) -> Task {
         let now = Utc::now();
-        let write = self.database.begin_write().expect("begin write transaction");
+        let write = self
+            .database
+            .begin_write()
+            .expect("begin write transaction");
         let task = {
             let mut meta = write.open_table(META).expect("open meta table");
             let id = meta
@@ -174,7 +179,10 @@ impl TaskStore {
     /// compile-time guarantee, so the `get`-mutate-`put` round trip cannot race
     /// another writer.
     pub fn put(&mut self, task: Task) {
-        let write = self.database.begin_write().expect("begin write transaction");
+        let write = self
+            .database
+            .begin_write()
+            .expect("begin write transaction");
         {
             let mut tasks = write.open_table(TASKS).expect("open tasks table");
             tasks.insert(task.id.0, &task).expect("write task");

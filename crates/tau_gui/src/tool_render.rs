@@ -1266,7 +1266,7 @@ pub(crate) fn session_status_block(
 
     let mut text = ThemedText::new();
     let lifecycle = text.add_style(names::EXTENSION_LIFECYCLE);
-    let status_style = text.add_style(names::SESSION_STATUS);
+    let status_style = text.add_style(names::EXTENSION_STATUS);
     let path_style = text.add_style(names::SYSTEM_PATH);
     text.push(lifecycle, "session dir: ");
     text.push(path_style, format!("{}{}", display_path(path), suffix));

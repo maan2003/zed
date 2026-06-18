@@ -39,8 +39,10 @@ impl PromptState {
     pub(crate) fn pop_back_queued_prompt(&mut self) -> Option<QueuedPrompt> {
         self.queued_prompts.pop_back()
     }
-    pub(crate) fn record_streamed_response(&mut self, key: String, text: String) {
-        self.streamed_responses.insert(key, text);
+    pub(crate) fn append_streamed_response(&mut self, key: String, text: String) -> String {
+        let response = self.streamed_responses.entry(key).or_default();
+        response.push_str(&text);
+        response.clone()
     }
 
     pub(crate) fn remove_streamed_response(&mut self, key: &str) -> Option<String> {
@@ -84,7 +86,7 @@ mod tests {
     fn streamed_responses_are_recorded_and_removed() {
         let mut state = PromptState::default();
 
-        state.record_streamed_response("prompt".to_owned(), "text".to_owned());
+        let _ = state.append_streamed_response("prompt".to_owned(), "text".to_owned());
 
         assert_eq!(
             state.remove_streamed_response("prompt").as_deref(),
@@ -96,7 +98,7 @@ mod tests {
     #[test]
     fn remove_prompt_clears_streamed_response_even_when_no_live_ranges_exist() {
         let mut state = PromptState::default();
-        state.record_streamed_response("prompt".to_owned(), "text".to_owned());
+        let _ = state.append_streamed_response("prompt".to_owned(), "text".to_owned());
 
         let cleanup = state.remove_prompt("prompt");
 

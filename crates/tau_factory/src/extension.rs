@@ -21,12 +21,14 @@ use std::path::PathBuf;
 use tau_actions::{ActionArg, ActionArgKind, ActionCommand, ActionSchema};
 use tau_proto::{
     ActionError, ActionInvoke, ActionOutput, ActionResult, AgentInitialMetadata, AgentMetadataKey,
-    AgentStarted, CborValue, Configure, ConfigError, CustomEvent, Event, EventCategory, EventName,
+    AgentStarted, CborValue, ConfigError, Configure, CustomEvent, Event, EventCategory, EventName,
     HarnessInputMessage, HarnessOutputMessage, PeerInputReader, PeerOutputWriter, UiCreateAgent,
 };
 
 use crate::store::TaskStore;
-use crate::task::wire::{CATEGORY as FACTORY_CATEGORY, SYNC as SYNC_CALL, TASKS_UPDATE as TASKS_UPDATE_CALL};
+use crate::task::wire::{
+    CATEGORY as FACTORY_CATEGORY, SYNC as SYNC_CALL, TASKS_UPDATE as TASKS_UPDATE_CALL,
+};
 use crate::task::{Status, Task, TaskId};
 
 /// Role bound to agents the factory spawns. Matches the role the CLI uses for
@@ -206,7 +208,7 @@ impl Factory {
         writer: &mut PeerOutputWriter<O>,
     ) -> Result<(), Box<dyn Error>> {
         let payload = CborValue::serialized(&tasks)?;
-        let event = CustomEvent::try_new(factory_event(TASKS_UPDATE_CALL), None, payload)?;
+        let event = CustomEvent::try_new(factory_event(TASKS_UPDATE_CALL), payload)?;
         writer.write_message(&HarnessInputMessage::emit(Event::ExtensionEvent(event)))?;
         writer.flush()?;
         Ok(())
@@ -244,8 +246,8 @@ impl Factory {
         .map_err(|error| format!("creating workspace for {id}: {error}"))?;
 
         let create_agent = Event::UiCreateAgent(UiCreateAgent {
-            session_id: invoke.session_id.clone(),
             role: ROLE.to_owned(),
+            model_override: None,
             metadata: vec![
                 AgentInitialMetadata {
                     key: AgentMetadataKey::new(SHELL_CWD_KEY),
@@ -264,7 +266,10 @@ impl Factory {
             ctx_id: None,
             parent_agent: None,
         });
-        Ok((create_agent, format!("starting {id} in {}", workspace.display())))
+        Ok((
+            create_agent,
+            format!("starting {id} in {}", workspace.display()),
+        ))
     }
 
     /// Binds a spawned agent to its task, flipping it to `Active`. Returns the
@@ -277,7 +282,10 @@ impl Factory {
         if !matches!(task.status, Status::Open) {
             return None;
         }
-        if task.start(self.workspace_path(id), started.agent_id).is_ok() {
+        if task
+            .start(self.workspace_path(id), started.agent_id)
+            .is_ok()
+        {
             task.updated_at = chrono::Utc::now();
             self.store.put(task.clone());
             return Some(task);
@@ -337,10 +345,7 @@ fn factory_task_id(metadata: &[AgentInitialMetadata]) -> Option<TaskId> {
 }
 
 fn parse_task_id(invoke: &ActionInvoke) -> Result<TaskId, String> {
-    let raw = invoke
-        .argv
-        .first()
-        .ok_or("usage: /factory start <id>")?;
+    let raw = invoke.argv.first().ok_or("usage: /factory start <id>")?;
     raw.parse::<u64>()
         .map(TaskId)
         .map_err(|_| format!("invalid task id `{raw}`"))
@@ -439,7 +444,6 @@ mod tests {
     fn invoke(action_id: &str, args: &[&str]) -> HarnessOutputMessage {
         HarnessOutputMessage::deliver(Event::ActionInvoke(ActionInvoke {
             invocation_id: format!("inv-{action_id}").as_str().into(),
-            session_id: "session-1".into(),
             extension_name: "tau-factory".into(),
             instance_id: 0.into(),
             action_id: action_id.to_owned(),
@@ -548,7 +552,6 @@ mod tests {
             })
             .expect("start emits a UiCreateAgent");
         assert_eq!(create.role, ROLE);
-        assert_eq!(create.session_id.as_str(), "session-1");
         let cwd = create
             .metadata
             .iter()
@@ -614,10 +617,7 @@ mod tests {
         let state_dir = temp.path().join("state");
         init_jj_repo(&repo_root);
 
-        let messages = drive(&[
-            configure(&state_dir, &repo_root),
-            invoke("start", &["99"]),
-        ]);
+        let messages = drive(&[configure(&state_dir, &repo_root), invoke("start", &["99"])]);
 
         let error = messages
             .iter()
@@ -654,13 +654,19 @@ mod tests {
         use std::process::{Command, Stdio};
         use std::time::{Duration, Instant};
         use tau_proto::{
-            ClientKind, EventSelector, ExtensionName, Hello, Subscribe, PROTOCOL_VERSION,
+            ClientKind, EventSelector, ExtensionName, Hello, PROTOCOL_VERSION, Subscribe,
         };
 
         let tau_bin = "/home/maan2003/src/tau/target/debug/tau";
-        let factory_bin = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/debug/tau-factory");
+        let factory_bin = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../target/debug/tau-factory"
+        );
         assert!(Path::new(tau_bin).exists(), "prebuilt tau binary missing");
-        assert!(Path::new(factory_bin).exists(), "build the factory bin first");
+        assert!(
+            Path::new(factory_bin).exists(),
+            "build the factory bin first"
+        );
 
         let temp = tempfile::tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
@@ -674,7 +680,9 @@ mod tests {
         let dropin = dropin_dir.join("zz-factory-live.yaml");
         std::fs::write(
             &dropin,
-            format!("extensions:\n  factory:\n    command: [\"{factory_bin}\"]\n    enable: true\n"),
+            format!(
+                "extensions:\n  factory:\n    command: [\"{factory_bin}\"]\n    enable: true\n"
+            ),
         )
         .expect("write drop-in");
         struct Cleanup {
