@@ -35,7 +35,7 @@ pub(crate) fn spawn(socket_path: PathBuf, tx: mpsc::Sender<SocketEvent>) -> Resu
         &HarnessInputMessage::Subscribe(Subscribe {
             selectors: vec![
                 EventSelector::Prefix("ui.".to_owned()),
-                EventSelector::Prefix("session.".to_owned()),
+                EventSelector::Prefix("action.".to_owned()),
                 EventSelector::Prefix("provider.".to_owned()),
                 EventSelector::Prefix("tool.".to_owned()),
                 EventSelector::Prefix("extension.".to_owned()),

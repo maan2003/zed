@@ -21,21 +21,25 @@ pub(crate) struct TaskState {
 impl TaskState {
     /// Folds a `factory.tasks_update` into the mirror. Any other event is
     /// ignored, so this can be called for every delivered event.
-    pub(crate) fn observe_event(&mut self, event: &Event) {
+    pub(crate) fn observe_event(&mut self, event: &Event) -> bool {
         let Event::ExtensionEvent(custom) = event else {
-            return;
+            return false;
         };
         if !is_tasks_update(custom.name()) {
-            return;
+            return false;
         }
         match custom.payload().deserialized::<Vec<Task>>() {
             Ok(tasks) => {
+                let mut changed = false;
                 for task in tasks {
+                    changed |= self.tasks.get(&task.id) != Some(&task);
                     self.tasks.insert(task.id, task);
                 }
+                changed
             }
             Err(error) => {
                 eprintln!("tau-gui: ignoring malformed factory.tasks_update: {error}");
+                false
             }
         }
     }
@@ -300,7 +304,7 @@ mod tests {
             wire::TASKS_UPDATE,
         );
         let payload = CborValue::serialized(&tasks.to_vec()).expect("serialize tasks");
-        Event::ExtensionEvent(CustomEvent::try_new(name, None, payload).expect("valid event"))
+        Event::ExtensionEvent(CustomEvent::try_new(name, payload).expect("valid event"))
     }
 
     #[test]
@@ -377,7 +381,6 @@ mod tests {
         state.observe_event(&Event::ExtensionEvent(
             CustomEvent::try_new(
                 EventName::new(EventCategory::Other("other".to_owned()), "thing"),
-                None,
                 CborValue::Null,
             )
             .expect("valid event"),

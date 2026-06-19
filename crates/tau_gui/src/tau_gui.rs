@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow};
+use clap::Parser;
 use editor::{
     Editor, EditorMode, EditorRightPrompt, Inlay, SelectionEffects, SizingBehavior,
     scroll::AutoscrollStrategy,
@@ -77,7 +78,7 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let attach_target = attach_target_for_current_dir()?;
+    let attach_target = attach_target_from_args(Args::parse())?;
 
     gpui_platform::application()
         .with_assets(assets::Assets)
@@ -105,6 +106,32 @@ fn run() -> Result<()> {
 struct AttachTarget {
     socket_path: PathBuf,
     project_root: PathBuf,
+}
+
+#[derive(Parser)]
+#[command(
+    name = "tau-gui",
+    about = "Attach a native GUI to a running Tau harness"
+)]
+struct Args {
+    /// Connect directly to this Tau harness Unix socket.
+    #[arg(long)]
+    socket: Option<PathBuf>,
+}
+
+fn attach_target_from_args(args: Args) -> Result<AttachTarget> {
+    match args.socket {
+        Some(socket_path) => attach_target_for_socket(socket_path),
+        None => attach_target_for_current_dir(),
+    }
+}
+
+fn attach_target_for_socket(socket_path: PathBuf) -> Result<AttachTarget> {
+    let project_root = std::env::current_dir().context("failed to read current directory")?;
+    Ok(AttachTarget {
+        socket_path,
+        project_root,
+    })
 }
 
 fn attach_target_for_current_dir() -> Result<AttachTarget> {
@@ -811,8 +838,10 @@ impl TauGui {
             self.agents.remember(agent_id);
         }
         self.agents.observe_event(&event);
-        self.tasks.observe_event(&event);
-        self.refresh_task_board(cx);
+        if self.tasks.observe_event(&event) {
+            self.refresh_task_board(cx);
+            cx.notify();
+        }
         self.refresh_agent_completions();
         if self.agents.current_agent_id() != previous_agent_id.as_deref() {
             let current_agent_id = self.agents.current_agent_id_owned();
