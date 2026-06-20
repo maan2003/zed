@@ -130,6 +130,7 @@ edition = "2024"
 agent_settings = { path = "crates/agent_settings" }
 askpass = { path = "crates/askpass" }
 assets = { path = "crates/assets" }
+audio = { path = "crates/audio" }
 breadcrumbs = { path = "crates/breadcrumbs" }
 buffer_diff = { path = "crates/buffer_diff" }
 client = { path = "crates/client" }

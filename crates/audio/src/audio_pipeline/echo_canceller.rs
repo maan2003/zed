@@ -16,7 +16,7 @@ mod real_implementation {
             // for AEC reference; gain/HPF/NS would be no-ops here, so we keep the
             // original (echo only) configuration via the legacy flag form.
             Self(Arc::new(Mutex::new(
-                apm::AudioProcessingModule::from_flags(true, false, false, false),
+                apm::AudioProcessingModule::new(true, false, false, false),
             )))
         }
     }

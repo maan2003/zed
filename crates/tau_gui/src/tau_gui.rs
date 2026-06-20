@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow};
+use audio::{Audio, Sound};
 use clap::Parser;
 use editor::{
     Editor, EditorMode, EditorRightPrompt, Inlay, SelectionEffects, SizingBehavior,
@@ -854,6 +855,9 @@ impl TauGui {
             self.focus_editor(window, cx);
         }
         match event {
+            Event::TermBell(_) => {
+                Audio::play_sound(Sound::AgentDone, cx);
+            }
             Event::UiPromptSubmitted(_) => {}
             Event::AgentPromptSubmitted(prompt)
                 if prompt.originator.is_user() && !prompt.message_class.is_internal() =>
