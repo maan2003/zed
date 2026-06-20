@@ -1239,6 +1239,11 @@ impl TauGui {
                 );
                 self.insert_before_draft_block(block, cx);
             }
+            Event::ActionSchemaPublished(published) => {
+                if let Ok(mut state) = self.completion_state.lock() {
+                    state.apply_action_schema(&published);
+                }
+            }
             Event::ExtensionStarting(starting) => {
                 let status = starting.pid.map_or_else(
                     || "starting".to_owned(),
@@ -1263,6 +1268,9 @@ impl TauGui {
                 self.insert_before_draft_block(block, cx);
             }
             Event::ExtensionExited(exited) => {
+                if let Ok(mut state) = self.completion_state.lock() {
+                    state.remove_extension(&exited.extension_name, exited.instance_id);
+                }
                 let status = match (exited.exit_code, exited.signal) {
                     (Some(code), _) => format!("exited {code}"),
                     (_, Some(signal)) => format!("signal {signal}"),
@@ -1497,6 +1505,11 @@ impl TauGui {
             self.handle_role_command(text, cx);
             return true;
         }
+        if text.starts_with('/') {
+            if let Some(handled) = self.handle_dynamic_action(text, cx) {
+                return handled;
+            }
+        }
         if let Some(command) = text.strip_prefix("!!") {
             return self.send_shell_command(command, false, cx);
         }
@@ -1504,6 +1517,37 @@ impl TauGui {
             return self.send_shell_command(command, true, cx);
         }
         false
+    }
+
+    fn handle_dynamic_action(&mut self, text: &str, cx: &mut Context<Self>) -> Option<bool> {
+        let dispatch = {
+            let state = self.completion_state.lock().ok()?;
+            state.parse_action_line(text)?
+        };
+        let dispatch = match dispatch {
+            Ok(dispatch) => dispatch,
+            Err(error) => {
+                self.insert_before_draft_styled(
+                    &format!("{error}\n"),
+                    TranscriptStyle::SystemInfo,
+                    cx,
+                );
+                return Some(true);
+            }
+        };
+        let parsed = dispatch.parsed;
+        Some(self.send_command_event(
+            Event::ActionInvoke(tau_proto::ActionInvoke {
+                invocation_id: mint_action_invocation_id().into(),
+                extension_name: dispatch.extension_name,
+                instance_id: dispatch.instance_id,
+                action_id: parsed.action_id.clone(),
+                raw_line: text.to_owned(),
+                argv: parsed.argv.clone(),
+                arguments: parsed_action_arguments(&parsed.named_args),
+            }),
+            cx,
+        ))
     }
 
     fn handle_role_command(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -2632,6 +2676,32 @@ fn task_icon_color(kind: TaskVisualKind, active: Hsla, normal: Hsla) -> Hsla {
         TaskVisualKind::Active => active,
         TaskVisualKind::Open => normal.opacity(0.6),
     }
+}
+
+fn mint_action_invocation_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("action-{nanos}")
+}
+
+fn parsed_action_arguments(
+    args: &std::collections::BTreeMap<String, tau_proto::ParsedArgValue>,
+) -> CborValue {
+    CborValue::Map(
+        args.iter()
+            .map(|(name, value)| {
+                let value = match value {
+                    tau_proto::ParsedArgValue::String(value) => CborValue::Text(value.clone()),
+                    tau_proto::ParsedArgValue::Integer(value) => {
+                        CborValue::Integer((*value).into())
+                    }
+                };
+                (CborValue::Text(name.clone()), value)
+            })
+            .collect(),
+    )
 }
 
 fn startup_pun() -> &'static str {
