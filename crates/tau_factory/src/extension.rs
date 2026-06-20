@@ -16,7 +16,7 @@
 
 use std::error::Error;
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tau_actions::{ActionArg, ActionArgKind, ActionCommand, ActionSchema};
 use tau_proto::{
@@ -27,9 +27,10 @@ use tau_proto::{
 
 use crate::store::TaskStore;
 use crate::task::wire::{
-    CATEGORY as FACTORY_CATEGORY, SYNC as SYNC_CALL, TASKS_UPDATE as TASKS_UPDATE_CALL,
+    CATEGORY as FACTORY_CATEGORY, PROJECTS_UPDATE as PROJECTS_UPDATE_CALL, SYNC as SYNC_CALL,
+    TASKS_UPDATE as TASKS_UPDATE_CALL,
 };
-use crate::task::{Status, Task, TaskId};
+use crate::task::{Project, Status, Task, TaskId};
 
 /// Role bound to agents the factory spawns. Matches the role the CLI uses for
 /// interactive agents, so factory agents get the same tools and prompt.
@@ -87,8 +88,14 @@ where
                     // Invoking an action is an execution trigger; replayed
                     // history must not re-create agents.
                     Event::ActionInvoke(invoke) if !is_replay => {
-                        if let Some(task) = factory.handle_action(invoke, &mut writer)? {
-                            factory.emit_tasks_update(vec![task], &mut writer)?;
+                        match factory.handle_action(invoke, &mut writer)? {
+                            Some(FactoryActionChange::Task(task)) => {
+                                factory.emit_tasks_update(vec![task], &mut writer)?;
+                            }
+                            Some(FactoryActionChange::Projects) => {
+                                factory.emit_all_projects(&mut writer)?;
+                            }
+                            None => {}
                         }
                     }
                     // Binding a task to its agent is idempotent (it only fires
@@ -106,6 +113,7 @@ where
                     Event::ExtensionEvent(custom) if is_factory_event(custom.name(), SYNC_CALL) => {
                         let all = factory.store.list().collect();
                         factory.emit_tasks_update(all, &mut writer)?;
+                        factory.emit_all_projects(&mut writer)?;
                     }
                     _ => {}
                 }
@@ -135,6 +143,11 @@ struct Factory {
     workspaces_dir: PathBuf,
 }
 
+enum FactoryActionChange {
+    Task(Task),
+    Projects,
+}
+
 impl Factory {
     fn configure(message: &Configure) -> Result<Self, String> {
         let state_dir = message
@@ -161,20 +174,30 @@ impl Factory {
         })
     }
 
-    /// Handles a `/factory` action and returns the task it changed, if any, so
-    /// the caller can emit a `tasks_update` delta. `start` creates a workspace
+    /// Handles a slash action and returns what changed, if anything, so the
+    /// caller can emit the matching update event. `start` creates a workspace
     /// and requests an agent but leaves the task `Open`, so it does not itself
     /// change the board — the `Active` flip rides back on `AgentStarted`.
     fn handle_action<O: Write>(
         &mut self,
         invoke: ActionInvoke,
         writer: &mut PeerOutputWriter<O>,
-    ) -> Result<Option<Task>, Box<dyn Error>> {
+    ) -> Result<Option<FactoryActionChange>, Box<dyn Error>> {
         match invoke.action_id.as_str() {
             "new" => match self.action_new(&invoke) {
                 Ok(task) => {
                     self.reply(&invoke, Ok(format!("created {}", task.id)), writer)?;
-                    Ok(Some(task))
+                    Ok(Some(FactoryActionChange::Task(task)))
+                }
+                Err(message) => {
+                    self.reply(&invoke, Err(message), writer)?;
+                    Ok(None)
+                }
+            },
+            "project_add" => match self.action_project_add(&invoke) {
+                Ok(project) => {
+                    self.reply(&invoke, Ok(format!("added {}", project.name)), writer)?;
+                    Ok(Some(FactoryActionChange::Projects))
                 }
                 Err(message) => {
                     self.reply(&invoke, Err(message), writer)?;
@@ -214,12 +237,41 @@ impl Factory {
         Ok(())
     }
 
+    fn emit_projects_update<O: Write>(
+        &self,
+        projects: Vec<Project>,
+        writer: &mut PeerOutputWriter<O>,
+    ) -> Result<(), Box<dyn Error>> {
+        let payload = CborValue::serialized(&projects)?;
+        let event = CustomEvent::try_new(factory_event(PROJECTS_UPDATE_CALL), payload)?;
+        writer.write_message(&HarnessInputMessage::emit(Event::ExtensionEvent(event)))?;
+        writer.flush()?;
+        Ok(())
+    }
+
+    fn emit_all_projects<O: Write>(
+        &self,
+        writer: &mut PeerOutputWriter<O>,
+    ) -> Result<(), Box<dyn Error>> {
+        self.emit_projects_update(self.store.list_projects().collect(), writer)
+    }
+
     fn action_new(&mut self, invoke: &ActionInvoke) -> Result<Task, String> {
         let title = invoke.argv.join(" ").trim().to_owned();
         if title.is_empty() {
             return Err("usage: /factory new <title>".to_owned());
         }
         Ok(self.store.create(title, String::new()))
+    }
+
+    fn action_project_add(&mut self, invoke: &ActionInvoke) -> Result<Project, String> {
+        let raw_path = invoke.argv.join(" ").trim().to_owned();
+        if raw_path.is_empty() {
+            return Err("usage: /project add <path>".to_owned());
+        }
+        let path = PathBuf::from(raw_path);
+        let name = project_name_from_path(&path)?;
+        Ok(self.store.create_project(name, path))
     }
 
     /// Creates the workspace and returns the `UiCreateAgent` event to emit plus
@@ -351,43 +403,72 @@ fn parse_task_id(invoke: &ActionInvoke) -> Result<TaskId, String> {
         .map_err(|_| format!("invalid task id `{raw}`"))
 }
 
+fn project_name_from_path(path: &Path) -> Result<String, String> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| format!("project path `{}` has no basename", path.display()))
+}
+
 fn factory_action_schema() -> ActionSchema {
     ActionSchema {
         version: tau_actions::ACTION_SCHEMA_VERSION,
-        roots: vec![ActionCommand {
-            name: "/factory".to_owned(),
-            description: "Manage factory tasks".to_owned(),
-            action_id: None,
-            args: Vec::new(),
-            children: vec![
-                ActionCommand {
-                    name: "new".to_owned(),
-                    description: "Create a new task from a title".to_owned(),
-                    action_id: Some("new".to_owned()),
+        roots: vec![
+            ActionCommand {
+                name: "/factory".to_owned(),
+                description: "Manage factory tasks".to_owned(),
+                action_id: None,
+                args: Vec::new(),
+                children: vec![
+                    ActionCommand {
+                        name: "new".to_owned(),
+                        description: "Create a new task from a title".to_owned(),
+                        action_id: Some("new".to_owned()),
+                        args: vec![ActionArg {
+                            name: "title".to_owned(),
+                            description: "Short task title".to_owned(),
+                            required: true,
+                            suggestions: Vec::new(),
+                            kind: ActionArgKind::RestString,
+                        }],
+                        children: Vec::new(),
+                    },
+                    ActionCommand {
+                        name: "start".to_owned(),
+                        description: "Start an agent on a task in a fresh workspace".to_owned(),
+                        action_id: Some("start".to_owned()),
+                        args: vec![ActionArg {
+                            name: "id".to_owned(),
+                            description: "Task id, e.g. 1".to_owned(),
+                            required: true,
+                            suggestions: Vec::new(),
+                            kind: ActionArgKind::Integer,
+                        }],
+                        children: Vec::new(),
+                    },
+                ],
+            },
+            ActionCommand {
+                name: "/project".to_owned(),
+                description: "Manage factory projects".to_owned(),
+                action_id: None,
+                args: Vec::new(),
+                children: vec![ActionCommand {
+                    name: "add".to_owned(),
+                    description: "Add a project from a path".to_owned(),
+                    action_id: Some("project_add".to_owned()),
                     args: vec![ActionArg {
-                        name: "title".to_owned(),
-                        description: "Short task title".to_owned(),
+                        name: "path".to_owned(),
+                        description: "Project path; name is its basename".to_owned(),
                         required: true,
                         suggestions: Vec::new(),
                         kind: ActionArgKind::RestString,
                     }],
                     children: Vec::new(),
-                },
-                ActionCommand {
-                    name: "start".to_owned(),
-                    description: "Start an agent on a task in a fresh workspace".to_owned(),
-                    action_id: Some("start".to_owned()),
-                    args: vec![ActionArg {
-                        name: "id".to_owned(),
-                        description: "Task id, e.g. 1".to_owned(),
-                        required: true,
-                        suggestions: Vec::new(),
-                        kind: ActionArgKind::Integer,
-                    }],
-                    children: Vec::new(),
-                },
-            ],
-        }],
+                }],
+            },
+        ],
     }
 }
 
@@ -437,6 +518,7 @@ mod tests {
                 CborValue::Text(repo_root.display().to_string()),
             )]),
             state_dir: Some(state_dir.to_path_buf()),
+            debug_dir: None,
             secrets: std::collections::BTreeMap::new(),
         })
     }
@@ -495,7 +577,7 @@ mod tests {
 
     fn sync() -> HarnessOutputMessage {
         HarnessOutputMessage::deliver(Event::ExtensionEvent(
-            CustomEvent::try_new(factory_event(SYNC_CALL), None, CborValue::Null)
+            CustomEvent::try_new(factory_event(SYNC_CALL), CborValue::Null)
                 .expect("valid sync event"),
         ))
     }
@@ -519,6 +601,25 @@ mod tests {
                             .payload()
                             .deserialized::<Vec<Task>>()
                             .expect("tasks_update payload decodes to Vec<Task>"),
+                    )
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn projects_updates(messages: &[HarnessInputMessage]) -> Vec<Vec<Project>> {
+        messages
+            .iter()
+            .filter_map(|message| match emitted(message) {
+                Some(Event::ExtensionEvent(custom))
+                    if is_factory_event(custom.name(), PROJECTS_UPDATE_CALL) =>
+                {
+                    Some(
+                        custom
+                            .payload()
+                            .deserialized::<Vec<Project>>()
+                            .expect("projects_update payload decodes to Vec<Project>"),
                     )
                 }
                 _ => None,
@@ -608,6 +709,51 @@ mod tests {
             titles(&updates[2]),
             vec!["First task".to_owned(), "Second task".to_owned()]
         );
+    }
+
+    #[test]
+    fn project_add_derives_name_from_path_and_publishes_full_project_list() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo_root = temp.path().join("repo");
+        let state_dir = temp.path().join("state");
+        let first = temp.path().join("alpha");
+        let second = temp.path().join("nested").join("beta");
+
+        let messages = drive(&[
+            configure(&state_dir, &repo_root),
+            invoke("project_add", &[first.to_str().unwrap()]),
+            invoke("project_add", &[second.to_str().unwrap()]),
+            sync(),
+        ]);
+
+        let updates = projects_updates(&messages);
+        assert_eq!(
+            updates.len(),
+            3,
+            "two full-list mutations and one sync snapshot"
+        );
+        assert_eq!(
+            updates[0]
+                .iter()
+                .map(|project| &project.name)
+                .collect::<Vec<_>>(),
+            vec!["alpha"]
+        );
+        assert_eq!(
+            updates[1]
+                .iter()
+                .map(|project| &project.name)
+                .collect::<Vec<_>>(),
+            vec!["alpha", "beta"]
+        );
+        assert_eq!(
+            updates[2]
+                .iter()
+                .map(|project| &project.name)
+                .collect::<Vec<_>>(),
+            vec!["alpha", "beta"]
+        );
+        assert_eq!(updates[1][1].path, second);
     }
 
     #[test]

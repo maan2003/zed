@@ -31,6 +31,8 @@ pub mod wire {
     pub const SYNC: &str = "sync";
     /// Call segment of `factory.tasks_update` — the factory's `Vec<Task>` payload.
     pub const TASKS_UPDATE: &str = "tasks_update";
+    /// Call segment of `factory.projects_update` — the factory's `Vec<Project>` payload.
+    pub const PROJECTS_UPDATE: &str = "projects_update";
 }
 
 /// Stable, human-legible task identifier. Allocated by the store as a monotonic
@@ -55,6 +57,25 @@ pub struct Task {
     /// What is waiting on the human, in any status. `None` means the task needs
     /// nothing from you right now.
     pub attention: Option<Attention>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+/// Stable, human-legible project identifier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ProjectId(pub u64);
+
+impl std::fmt::Display for ProjectId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "project-{}", self.0)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Project {
+    pub id: ProjectId,
+    pub name: String,
+    pub path: PathBuf,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
 }
@@ -192,7 +213,8 @@ mod tests {
     #[test]
     fn start_binds_workspace_and_agent() {
         let mut task = open_task();
-        task.start(PathBuf::from("/tmp/ws"), agent("impl-1")).unwrap();
+        task.start(PathBuf::from("/tmp/ws"), agent("impl-1"))
+            .unwrap();
         assert_eq!(
             task.status,
             Status::Active {
@@ -205,9 +227,15 @@ mod tests {
     #[test]
     fn complete_carries_the_agent_forward() {
         let mut task = open_task();
-        task.start(PathBuf::from("/tmp/ws"), agent("impl-1")).unwrap();
+        task.start(PathBuf::from("/tmp/ws"), agent("impl-1"))
+            .unwrap();
         task.complete().unwrap();
-        assert_eq!(task.status, Status::Done { agent: agent("impl-1") });
+        assert_eq!(
+            task.status,
+            Status::Done {
+                agent: agent("impl-1")
+            }
+        );
     }
 
     #[test]
@@ -220,7 +248,8 @@ mod tests {
     #[test]
     fn close_from_active_remembers_the_agent() {
         let mut task = open_task();
-        task.start(PathBuf::from("/tmp/ws"), agent("impl-1")).unwrap();
+        task.start(PathBuf::from("/tmp/ws"), agent("impl-1"))
+            .unwrap();
         task.close().unwrap();
         assert_eq!(
             task.status,
@@ -249,7 +278,8 @@ mod tests {
     fn attention_is_independent_of_status() {
         let mut task = open_task();
         task.flag(Attention::Review);
-        task.start(PathBuf::from("/tmp/ws"), agent("impl-1")).unwrap();
+        task.start(PathBuf::from("/tmp/ws"), agent("impl-1"))
+            .unwrap();
         // The status moved, the flag did not.
         assert_eq!(task.attention, Some(Attention::Review));
         task.unflag();

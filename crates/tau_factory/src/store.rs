@@ -21,17 +21,19 @@ use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition, TypeName}
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::task::{Status, Task, TaskId};
+use crate::task::{Project, ProjectId, Status, Task, TaskId};
 
 /// Tasks keyed by their id; the value is the [`Task`] itself, stored as CBOR.
 /// The key is the raw `u64` (redb's built-in integer key, which sorts
 /// numerically) rather than `TaskId`, since `TaskId` lives in another crate and
 /// the orphan rule forbids implementing redb's traits on it here.
 const TASKS: TableDefinition<u64, Cbor<Task>> = TableDefinition::new("tasks");
+const PROJECTS: TableDefinition<u64, Cbor<Project>> = TableDefinition::new("projects");
 /// Small key/value table for store-wide counters.
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 /// The next task id to hand out, under [`META`].
 const NEXT_ID: &str = "next_task_id";
+const NEXT_PROJECT_ID: &str = "next_project_id";
 
 /// redb value adapter that stores any serde type as CBOR, so tables can be
 /// typed over our structs (`Cbor<Task>`) instead of opaque byte slices.
@@ -103,6 +105,7 @@ impl TaskStore {
             .begin_write()
             .expect("begin table-creation transaction");
         write.open_table(TASKS).expect("create tasks table");
+        write.open_table(PROJECTS).expect("create projects table");
         write.open_table(META).expect("create meta table");
         write.commit().expect("commit table creation");
         Self { database }
@@ -143,6 +146,39 @@ impl TaskStore {
         task
     }
 
+    pub fn create_project(&mut self, name: String, path: std::path::PathBuf) -> Project {
+        let now = Utc::now();
+        let write = self
+            .database
+            .begin_write()
+            .expect("begin write transaction");
+        let project = {
+            let mut meta = write.open_table(META).expect("open meta table");
+            let id = meta
+                .get(NEXT_PROJECT_ID)
+                .expect("read next project id")
+                .map(|value| value.value())
+                .unwrap_or(1);
+            meta.insert(NEXT_PROJECT_ID, id + 1)
+                .expect("write next project id");
+
+            let project = Project {
+                id: ProjectId(id),
+                name,
+                path,
+                created_at: now,
+                updated_at: now,
+            };
+            let mut projects = write.open_table(PROJECTS).expect("open projects table");
+            projects
+                .insert(project.id.0, &project)
+                .expect("insert project");
+            project
+        };
+        write.commit().expect("commit project creation");
+        project
+    }
+
     /// Read a single task, or `None` if no task has that id.
     pub fn get(&self, id: TaskId) -> Option<Task> {
         let read = self.database.begin_read().expect("begin read transaction");
@@ -166,6 +202,18 @@ impl TaskStore {
             .expect("range over tasks")
             .map(|entry| {
                 let (_id, value) = entry.expect("read task row");
+                value.value()
+            })
+    }
+
+    pub fn list_projects(&self) -> impl Iterator<Item = Project> + use<> {
+        let read = self.database.begin_read().expect("begin read transaction");
+        let projects = read.open_table(PROJECTS).expect("open projects table");
+        projects
+            .range::<u64>(..)
+            .expect("range over projects")
+            .map(|entry| {
+                let (_id, value) = entry.expect("read project row");
                 value.value()
             })
     }
@@ -228,6 +276,19 @@ mod tests {
         store.create("b".into(), "issue b".into());
         let ids: Vec<TaskId> = store.list().map(|task| task.id).collect();
         assert_eq!(ids, vec![TaskId(1), TaskId(2)]);
+    }
+
+    #[test]
+    fn projects_are_persisted_in_id_order() {
+        let (_dir, mut store) = store();
+        store.create_project("alpha".into(), PathBuf::from("/tmp/alpha"));
+        store.create_project("beta".into(), PathBuf::from("/tmp/beta"));
+
+        let projects = store.list_projects().collect::<Vec<_>>();
+        assert_eq!(projects[0].id, ProjectId(1));
+        assert_eq!(projects[0].name, "alpha");
+        assert_eq!(projects[1].id, ProjectId(2));
+        assert_eq!(projects[1].path, PathBuf::from("/tmp/beta"));
     }
 
     #[test]
