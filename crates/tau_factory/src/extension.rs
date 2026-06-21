@@ -28,9 +28,9 @@ use tau_proto::{
 use crate::store::TaskStore;
 use crate::task::wire::{
     CATEGORY as FACTORY_CATEGORY, PROJECTS_UPDATE as PROJECTS_UPDATE_CALL, SYNC as SYNC_CALL,
-    TASKS_UPDATE as TASKS_UPDATE_CALL,
+    TASKS_UPDATE as TASKS_UPDATE_CALL, TOPICS_UPDATE as TOPICS_UPDATE_CALL,
 };
-use crate::task::{Project, Status, Task, TaskId};
+use crate::task::{Project, Status, Task, TaskId, Topic, TopicId};
 
 /// Role bound to agents the factory spawns. Matches the role the CLI uses for
 /// interactive agents, so factory agents get the same tools and prompt.
@@ -41,6 +41,7 @@ const SHELL_CWD_KEY: &str = "ext_core-shell_cwd";
 /// Metadata key binding a spawned agent back to its task. The harness echoes it
 /// on `AgentStarted`, which is how we learn the new agent's id for a task.
 const FACTORY_TASK_ID_KEY: &str = "ext_factory_task-id";
+const FACTORY_TOPIC_ID_KEY: &str = "ext_factory_topic-id";
 
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
     run(std::io::stdin(), std::io::stdout())
@@ -95,6 +96,9 @@ where
                             Some(FactoryActionChange::Projects) => {
                                 factory.emit_all_projects(&mut writer)?;
                             }
+                            Some(FactoryActionChange::Topics(topics)) => {
+                                factory.emit_topics_update(topics, &mut writer)?;
+                            }
                             None => {}
                         }
                     }
@@ -105,6 +109,9 @@ where
                         if let Some(task) = factory.handle_agent_started(started) {
                             factory.emit_tasks_update(vec![task], &mut writer)?;
                         }
+                        if let Some(topics) = factory.take_pending_topic_update() {
+                            factory.emit_topics_update(topics, &mut writer)?;
+                        }
                     }
                     // A UI asks for the current board. Custom events are not
                     // replayed, so this request is the only way a freshly
@@ -114,6 +121,7 @@ where
                         let all = factory.store.list().collect();
                         factory.emit_tasks_update(all, &mut writer)?;
                         factory.emit_all_projects(&mut writer)?;
+                        factory.emit_all_topics(&mut writer)?;
                     }
                     _ => {}
                 }
@@ -141,11 +149,13 @@ struct Factory {
     repo_root: PathBuf,
     /// Directory the per-task workspaces are created under.
     workspaces_dir: PathBuf,
+    pending_topic_update: Option<Vec<Topic>>,
 }
 
 enum FactoryActionChange {
     Task(Task),
     Projects,
+    Topics(Vec<Topic>),
 }
 
 impl Factory {
@@ -171,6 +181,7 @@ impl Factory {
             store: TaskStore::open(&state_dir.join("factory.redb")),
             repo_root,
             workspaces_dir,
+            pending_topic_update: None,
         })
     }
 
@@ -198,6 +209,36 @@ impl Factory {
                 Ok(project) => {
                     self.reply(&invoke, Ok(format!("added {}", project.name)), writer)?;
                     Ok(Some(FactoryActionChange::Projects))
+                }
+                Err(message) => {
+                    self.reply(&invoke, Err(message), writer)?;
+                    Ok(None)
+                }
+            },
+            "topic_new" => match self.action_topic_new(&invoke) {
+                Ok(topic) => {
+                    self.reply(&invoke, Ok(format!("created {}", topic.id)), writer)?;
+                    Ok(Some(FactoryActionChange::Topics(vec![topic])))
+                }
+                Err(message) => {
+                    self.reply(&invoke, Err(message), writer)?;
+                    Ok(None)
+                }
+            },
+            "topic_rename" => match self.action_topic_rename(&invoke) {
+                Ok(topic) => {
+                    self.reply(&invoke, Ok(format!("renamed {}", topic.id)), writer)?;
+                    Ok(Some(FactoryActionChange::Topics(vec![topic])))
+                }
+                Err(message) => {
+                    self.reply(&invoke, Err(message), writer)?;
+                    Ok(None)
+                }
+            },
+            "topic_archive" => match self.action_topic_archive(&invoke) {
+                Ok(topic) => {
+                    self.reply(&invoke, Ok(format!("archived {}", topic.id)), writer)?;
+                    Ok(Some(FactoryActionChange::Topics(vec![topic])))
                 }
                 Err(message) => {
                     self.reply(&invoke, Err(message), writer)?;
@@ -249,11 +290,30 @@ impl Factory {
         Ok(())
     }
 
+    fn emit_topics_update<O: Write>(
+        &self,
+        topics: Vec<Topic>,
+        writer: &mut PeerOutputWriter<O>,
+    ) -> Result<(), Box<dyn Error>> {
+        let payload = CborValue::serialized(&topics)?;
+        let event = CustomEvent::try_new(factory_event(TOPICS_UPDATE_CALL), payload)?;
+        writer.write_message(&HarnessInputMessage::emit(Event::ExtensionEvent(event)))?;
+        writer.flush()?;
+        Ok(())
+    }
+
     fn emit_all_projects<O: Write>(
         &self,
         writer: &mut PeerOutputWriter<O>,
     ) -> Result<(), Box<dyn Error>> {
         self.emit_projects_update(self.store.list_projects().collect(), writer)
+    }
+
+    fn emit_all_topics<O: Write>(
+        &self,
+        writer: &mut PeerOutputWriter<O>,
+    ) -> Result<(), Box<dyn Error>> {
+        self.emit_topics_update(self.store.list_topics().collect(), writer)
     }
 
     fn action_new(&mut self, invoke: &ActionInvoke) -> Result<Task, String> {
@@ -272,6 +332,37 @@ impl Factory {
         let path = PathBuf::from(raw_path);
         let name = project_name_from_path(&path)?;
         Ok(self.store.create_project(name, path))
+    }
+
+    fn action_topic_new(&mut self, invoke: &ActionInvoke) -> Result<Topic, String> {
+        let name = invoke.argv.join(" ").trim().to_owned();
+        if name.is_empty() {
+            return Err("usage: /topic new <name>".to_owned());
+        }
+        let topic = self.store.create_topic(name);
+        Ok(topic)
+    }
+
+    fn action_topic_rename(&mut self, invoke: &ActionInvoke) -> Result<Topic, String> {
+        let (topic_ref, name) =
+            parse_topic_ref_and_rest(invoke, "usage: /topic rename <topic> <name>")?;
+        if name.is_empty() {
+            return Err("usage: /topic rename <topic> <name>".to_owned());
+        }
+        let mut topic = self.resolve_topic(topic_ref)?;
+        topic.name = name;
+        topic.updated_at = chrono::Utc::now();
+        self.store.put_topic(topic.clone());
+        Ok(topic)
+    }
+
+    fn action_topic_archive(&mut self, invoke: &ActionInvoke) -> Result<Topic, String> {
+        let mut topic =
+            self.resolve_topic_from_args(invoke, "usage: /topic archive <id-or-name>")?;
+        topic.archived = true;
+        topic.updated_at = chrono::Utc::now();
+        self.store.put_topic(topic.clone());
+        Ok(topic)
     }
 
     /// Creates the workspace and returns the `UiCreateAgent` event to emit plus
@@ -327,6 +418,7 @@ impl Factory {
     /// Binds a spawned agent to its task, flipping it to `Active`. Returns the
     /// changed task when it bound, so the caller can emit a `tasks_update`.
     fn handle_agent_started(&mut self, started: AgentStarted) -> Option<Task> {
+        self.pending_topic_update = Some(self.assign_started_agent_to_topic(&started));
         let id = factory_task_id(&started.metadata)?; // not an agent we spawned
         let mut task = self.store.get(id)?; // metadata names a task we do not know
         // Only bind while still `Open`; a replayed or duplicate `AgentStarted`
@@ -343,6 +435,47 @@ impl Factory {
             return Some(task);
         }
         None
+    }
+
+    fn assign_started_agent_to_topic(&mut self, started: &AgentStarted) -> Vec<Topic> {
+        let topic_id = factory_topic_id(&started.metadata)
+            .or_else(|| {
+                started
+                    .parent_agent
+                    .as_ref()
+                    .and_then(|agent_id| self.store.topic_id_for_agent(agent_id))
+            })
+            .unwrap_or_else(|| TopicId(crate::store::DEFAULT_TOPIC_ID.to_owned()));
+        self.store
+            .assign_agent_to_topic(started.agent_id.clone(), topic_id)
+    }
+
+    fn take_pending_topic_update(&mut self) -> Option<Vec<Topic>> {
+        self.pending_topic_update
+            .take()
+            .filter(|topics| !topics.is_empty())
+    }
+
+    fn resolve_topic_from_args(
+        &self,
+        invoke: &ActionInvoke,
+        usage: &'static str,
+    ) -> Result<Topic, String> {
+        let raw = invoke.argv.join(" ").trim().to_owned();
+        if raw.is_empty() {
+            return Err(usage.to_owned());
+        }
+        self.store
+            .list_topics()
+            .find(|topic| topic.id.0 == raw || topic.name == raw)
+            .ok_or_else(|| format!("no such topic `{raw}`"))
+    }
+
+    fn resolve_topic(&self, raw: String) -> Result<Topic, String> {
+        self.store
+            .list_topics()
+            .find(|topic| topic.id.0 == raw || topic.name == raw)
+            .ok_or_else(|| format!("no such topic `{raw}`"))
     }
 
     fn reply<O: Write>(
@@ -396,11 +529,33 @@ fn factory_task_id(metadata: &[AgentInitialMetadata]) -> Option<TaskId> {
         .map(TaskId)
 }
 
+fn factory_topic_id(metadata: &[AgentInitialMetadata]) -> Option<TopicId> {
+    metadata
+        .iter()
+        .find(|item| item.key.as_str() == FACTORY_TOPIC_ID_KEY)
+        .and_then(|item| match &item.value {
+            CborValue::Text(value) => Some(TopicId(value.clone())),
+            _ => None,
+        })
+}
+
 fn parse_task_id(invoke: &ActionInvoke) -> Result<TaskId, String> {
     let raw = invoke.argv.first().ok_or("usage: /factory start <id>")?;
     raw.parse::<u64>()
         .map(TaskId)
         .map_err(|_| format!("invalid task id `{raw}`"))
+}
+
+fn parse_topic_ref_and_rest(
+    invoke: &ActionInvoke,
+    usage: &'static str,
+) -> Result<(String, String), String> {
+    let topic_ref = invoke.argv.first().ok_or_else(|| usage.to_owned())?.clone();
+    let rest = invoke.argv[1..].join(" ").trim().to_owned();
+    if rest.is_empty() {
+        return Err(usage.to_owned());
+    }
+    Ok((topic_ref, rest))
 }
 
 fn project_name_from_path(path: &Path) -> Result<String, String> {
@@ -467,6 +622,62 @@ fn factory_action_schema() -> ActionSchema {
                     }],
                     children: Vec::new(),
                 }],
+            },
+            ActionCommand {
+                name: "/topic".to_owned(),
+                description: "Manage factory topics".to_owned(),
+                action_id: None,
+                args: Vec::new(),
+                children: vec![
+                    ActionCommand {
+                        name: "new".to_owned(),
+                        description: "Create and switch to a topic".to_owned(),
+                        action_id: Some("topic_new".to_owned()),
+                        args: vec![ActionArg {
+                            name: "name".to_owned(),
+                            description: "Topic name".to_owned(),
+                            required: true,
+                            suggestions: Vec::new(),
+                            kind: ActionArgKind::RestString,
+                        }],
+                        children: Vec::new(),
+                    },
+                    ActionCommand {
+                        name: "rename".to_owned(),
+                        description: "Rename a topic".to_owned(),
+                        action_id: Some("topic_rename".to_owned()),
+                        args: vec![
+                            ActionArg {
+                                name: "topic".to_owned(),
+                                description: "Topic id or name".to_owned(),
+                                required: true,
+                                suggestions: Vec::new(),
+                                kind: ActionArgKind::String,
+                            },
+                            ActionArg {
+                                name: "name".to_owned(),
+                                description: "New topic name".to_owned(),
+                                required: true,
+                                suggestions: Vec::new(),
+                                kind: ActionArgKind::RestString,
+                            },
+                        ],
+                        children: Vec::new(),
+                    },
+                    ActionCommand {
+                        name: "archive".to_owned(),
+                        description: "Archive a topic".to_owned(),
+                        action_id: Some("topic_archive".to_owned()),
+                        args: vec![ActionArg {
+                            name: "topic".to_owned(),
+                            description: "Topic id or name".to_owned(),
+                            required: true,
+                            suggestions: Vec::new(),
+                            kind: ActionArgKind::RestString,
+                        }],
+                        children: Vec::new(),
+                    },
+                ],
             },
         ],
     }
@@ -627,6 +838,25 @@ mod tests {
             .collect()
     }
 
+    fn topics_updates(messages: &[HarnessInputMessage]) -> Vec<Vec<Topic>> {
+        messages
+            .iter()
+            .filter_map(|message| match emitted(message) {
+                Some(Event::ExtensionEvent(custom))
+                    if is_factory_event(custom.name(), TOPICS_UPDATE_CALL) =>
+                {
+                    Some(
+                        custom
+                            .payload()
+                            .deserialized::<Vec<Topic>>()
+                            .expect("topics_update payload decodes to Vec<Topic>"),
+                    )
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn start_creates_workspace_and_spawns_agent_bound_to_task() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -754,6 +984,36 @@ mod tests {
             vec!["alpha", "beta"]
         );
         assert_eq!(updates[1][1].path, second);
+    }
+
+    #[test]
+    fn topic_new_emits_topic_delta_and_sync_emits_all_topics() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo_root = temp.path().join("repo");
+        let state_dir = temp.path().join("state");
+
+        let messages = drive(&[
+            configure(&state_dir, &repo_root),
+            invoke("topic_new", &["Sidebar redesign"]),
+            sync(),
+        ]);
+
+        let updates = topics_updates(&messages);
+        assert_eq!(updates.len(), 2, "topic delta and sync snapshot");
+        assert_eq!(updates[0].len(), 1);
+        assert_eq!(updates[0][0].name, "Sidebar redesign");
+        assert!(updates[0][0].id.0.starts_with("tp-"));
+        assert_eq!(updates[0][0].id.0.len(), 9);
+        assert!(
+            updates[1]
+                .iter()
+                .any(|topic| topic.name == "(no topic)" && topic.id.0 == "tp-000000")
+        );
+        assert!(
+            updates[1]
+                .iter()
+                .any(|topic| topic.name == "Sidebar redesign")
+        );
     }
 
     #[test]

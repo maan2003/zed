@@ -33,6 +33,8 @@ pub mod wire {
     pub const TASKS_UPDATE: &str = "tasks_update";
     /// Call segment of `factory.projects_update` — the factory's `Vec<Project>` payload.
     pub const PROJECTS_UPDATE: &str = "projects_update";
+    /// Call segment of `factory.topics_update` — the factory's `Vec<Topic>` payload.
+    pub const TOPICS_UPDATE: &str = "topics_update";
 }
 
 /// Stable, human-legible task identifier. Allocated by the store as a monotonic
@@ -78,6 +80,57 @@ pub struct Project {
     pub path: PathBuf,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
+}
+
+/// Stable, human-legible topic identifier. Topics are user-facing attention
+/// containers, so ids are short enough to recognize while remaining durable.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct TopicId(pub String);
+
+impl TopicId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+}
+
+impl std::fmt::Display for TopicId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Topic {
+    pub id: TopicId,
+    pub name: String,
+    pub archived: bool,
+    pub agents: Vec<TopicAgent>,
+    pub context: Vec<TopicContextItem>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopicAgent {
+    pub agent_id: AgentId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopicContextItem {
+    pub id: String,
+    pub kind: TopicContextKind,
+    pub title: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TopicContextKind {
+    Issue,
+    PullRequest,
+    Url,
+    File,
+    Note,
+    Other,
 }
 
 /// Where a task is in its lifecycle. Each variant carries exactly the data that

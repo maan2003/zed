@@ -11,11 +11,12 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use tau_proto::{CborValue, CustomEvent, Event, EventCategory, EventName, HarnessInputMessage};
-use tau_task::{Attention, Status, Task, TaskId, wire};
+use tau_task::{Attention, Status, Task, TaskId, Topic, wire};
 
 #[derive(Default)]
 pub(crate) struct TaskState {
     tasks: BTreeMap<TaskId, Task>,
+    topics: BTreeMap<String, Topic>,
 }
 
 impl TaskState {
@@ -25,22 +26,38 @@ impl TaskState {
         let Event::ExtensionEvent(custom) = event else {
             return false;
         };
-        if !is_tasks_update(custom.name()) {
-            return false;
-        }
-        match custom.payload().deserialized::<Vec<Task>>() {
-            Ok(tasks) => {
-                let mut changed = false;
-                for task in tasks {
-                    changed |= self.tasks.get(&task.id) != Some(&task);
-                    self.tasks.insert(task.id, task);
+        if is_tasks_update(custom.name()) {
+            match custom.payload().deserialized::<Vec<Task>>() {
+                Ok(tasks) => {
+                    let mut changed = false;
+                    for task in tasks {
+                        changed |= self.tasks.get(&task.id) != Some(&task);
+                        self.tasks.insert(task.id, task);
+                    }
+                    changed
                 }
-                changed
+                Err(error) => {
+                    eprintln!("tau-gui: ignoring malformed factory.tasks_update: {error}");
+                    false
+                }
             }
-            Err(error) => {
-                eprintln!("tau-gui: ignoring malformed factory.tasks_update: {error}");
-                false
+        } else if is_topics_update(custom.name()) {
+            match custom.payload().deserialized::<Vec<Topic>>() {
+                Ok(topics) => {
+                    let mut changed = false;
+                    for topic in topics {
+                        changed |= self.topics.get(&topic.id.0) != Some(&topic);
+                        self.topics.insert(topic.id.0.clone(), topic);
+                    }
+                    changed
+                }
+                Err(error) => {
+                    eprintln!("tau-gui: ignoring malformed factory.topics_update: {error}");
+                    false
+                }
             }
+        } else {
+            false
         }
     }
 
@@ -67,12 +84,28 @@ impl TaskState {
         })
     }
 
-    pub(crate) fn mini_rows(&self) -> Vec<TaskMiniRow> {
-        self.ordered_rows()
+    pub(crate) fn topic_groups(&self) -> Vec<TopicGroup> {
+        let mut topics = self
+            .topics
+            .values()
+            .filter(|topic| !topic.archived)
+            .cloned()
+            .collect::<Vec<_>>();
+        topics.sort_by_key(|topic| (topic.name.to_lowercase(), topic.id.0.clone()));
+        topics
             .into_iter()
-            .filter(|task| !matches!(task.status, Status::Done { .. } | Status::Closed { .. }))
-            .take(12)
-            .map(TaskMiniRow::from)
+            .map(|topic| {
+                let mut agents = topic
+                    .agents
+                    .iter()
+                    .map(|agent| agent.agent_id.to_string())
+                    .collect::<Vec<_>>();
+                agents.sort();
+                TopicGroup {
+                    name: topic.name,
+                    agents,
+                }
+            })
             .collect()
     }
 
@@ -140,19 +173,6 @@ impl TaskState {
         render
     }
 
-    fn ordered_rows(&self) -> Vec<&Task> {
-        let mut tasks = self.tasks.values().collect::<Vec<_>>();
-        tasks.sort_by_key(|task| {
-            (
-                section_priority(task),
-                attention_priority(task.attention),
-                std::cmp::Reverse(task.updated_at),
-                task.id,
-            )
-        });
-        tasks
-    }
-
     fn push_section(
         &self,
         render: &mut BoardRender,
@@ -201,44 +221,9 @@ pub(crate) struct BoardRowRange {
 }
 
 #[derive(Clone)]
-pub(crate) struct TaskMiniRow {
-    pub(crate) id: TaskId,
-    pub(crate) title: String,
-    pub(crate) kind: TaskVisualKind,
-}
-
-impl From<&Task> for TaskMiniRow {
-    fn from(task: &Task) -> Self {
-        Self {
-            id: task.id,
-            title: task.title.clone(),
-            kind: TaskVisualKind::from_task(task),
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TaskVisualKind {
-    Decision,
-    Question,
-    Review,
-    Active,
-    Open,
-}
-
-impl TaskVisualKind {
-    fn from_task(task: &Task) -> Self {
-        match task.attention {
-            Some(Attention::Decision) => Self::Decision,
-            Some(Attention::Question) => Self::Question,
-            Some(Attention::Review) => Self::Review,
-            None => match task.status {
-                Status::Active { .. } => Self::Active,
-                Status::Open => Self::Open,
-                Status::Done { .. } | Status::Closed { .. } => Self::Open,
-            },
-        }
-    }
+pub(crate) struct TopicGroup {
+    pub(crate) name: String,
+    pub(crate) agents: Vec<String>,
 }
 
 /// The `HarnessInputMessage` the UI emits to ask the factory for the current
@@ -255,24 +240,16 @@ fn is_tasks_update(name: &EventName) -> bool {
     name.category().as_str() == wire::CATEGORY && name.call().as_str() == wire::TASKS_UPDATE
 }
 
+fn is_topics_update(name: &EventName) -> bool {
+    name.category().as_str() == wire::CATEGORY && name.call().as_str() == wire::TOPICS_UPDATE
+}
+
 fn attention_priority(attention: Option<Attention>) -> u8 {
     match attention {
         Some(Attention::Decision) => 0,
         Some(Attention::Question) => 1,
         Some(Attention::Review) => 2,
         None => 3,
-    }
-}
-
-fn section_priority(task: &Task) -> u8 {
-    if task.attention.is_some() {
-        return 0;
-    }
-    match task.status {
-        Status::Active { .. } => 1,
-        Status::Open => 2,
-        Status::Done { .. } => 3,
-        Status::Closed { .. } => 4,
     }
 }
 

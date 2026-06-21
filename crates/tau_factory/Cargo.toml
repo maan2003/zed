@@ -18,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 chrono.workspace = true
 ciborium.workspace = true
+nanoid.workspace = true
 redb.workspace = true
 serde.workspace = true
 smol.workspace = true

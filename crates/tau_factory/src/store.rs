@@ -21,7 +21,7 @@ use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition, TypeName}
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::task::{Project, ProjectId, Status, Task, TaskId};
+use crate::task::{Project, ProjectId, Status, Task, TaskId, Topic, TopicAgent, TopicId};
 
 /// Tasks keyed by their id; the value is the [`Task`] itself, stored as CBOR.
 /// The key is the raw `u64` (redb's built-in integer key, which sorts
@@ -29,11 +29,20 @@ use crate::task::{Project, ProjectId, Status, Task, TaskId};
 /// the orphan rule forbids implementing redb's traits on it here.
 const TASKS: TableDefinition<u64, Cbor<Task>> = TableDefinition::new("tasks");
 const PROJECTS: TableDefinition<u64, Cbor<Project>> = TableDefinition::new("projects");
+const TOPICS: TableDefinition<&str, Cbor<Topic>> = TableDefinition::new("topics");
 /// Small key/value table for store-wide counters.
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 /// The next task id to hand out, under [`META`].
 const NEXT_ID: &str = "next_task_id";
 const NEXT_PROJECT_ID: &str = "next_project_id";
+pub const DEFAULT_TOPIC_ID: &str = "tp-000000";
+const DEFAULT_TOPIC_NAME: &str = "(no topic)";
+const TOPIC_ID_ALPHABET: &[char] = &[
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i',
+    'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', 'A', 'B',
+    'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U',
+    'V', 'W', 'X', 'Y', 'Z',
+];
 
 /// redb value adapter that stores any serde type as CBOR, so tables can be
 /// typed over our structs (`Cbor<Task>`) instead of opaque byte slices.
@@ -106,9 +115,12 @@ impl TaskStore {
             .expect("begin table-creation transaction");
         write.open_table(TASKS).expect("create tasks table");
         write.open_table(PROJECTS).expect("create projects table");
+        write.open_table(TOPICS).expect("create topics table");
         write.open_table(META).expect("create meta table");
         write.commit().expect("commit table creation");
-        Self { database }
+        let mut store = Self { database };
+        store.ensure_default_topic();
+        store
     }
 
     /// Create a fresh `Open` task, allocating the next id. The id allocation and
@@ -179,6 +191,47 @@ impl TaskStore {
         project
     }
 
+    pub fn create_topic(&mut self, name: String) -> Topic {
+        let now = Utc::now();
+        let write = self
+            .database
+            .begin_write()
+            .expect("begin write transaction");
+        let topic = {
+            let mut topics = write.open_table(TOPICS).expect("open topics table");
+            let id = loop {
+                let id = TopicId(format!("tp-{}", nanoid::nanoid!(6, TOPIC_ID_ALPHABET)));
+                if topics.get(id.0.as_str()).expect("read topic").is_none() {
+                    break id;
+                }
+            };
+            let topic = Topic {
+                id,
+                name,
+                archived: false,
+                agents: Vec::new(),
+                context: Vec::new(),
+                created_at: now,
+                updated_at: now,
+            };
+            topics
+                .insert(topic.id.0.as_str(), &topic)
+                .expect("insert topic");
+            topic
+        };
+        write.commit().expect("commit topic creation");
+        topic
+    }
+
+    pub fn get_topic(&self, id: &TopicId) -> Option<Topic> {
+        let read = self.database.begin_read().expect("begin read transaction");
+        let topics = read.open_table(TOPICS).expect("open topics table");
+        topics
+            .get(id.0.as_str())
+            .expect("read topic")
+            .map(|value| value.value())
+    }
+
     /// Read a single task, or `None` if no task has that id.
     pub fn get(&self, id: TaskId) -> Option<Task> {
         let read = self.database.begin_read().expect("begin read transaction");
@@ -218,6 +271,18 @@ impl TaskStore {
             })
     }
 
+    pub fn list_topics(&self) -> impl Iterator<Item = Topic> + use<> {
+        let read = self.database.begin_read().expect("begin read transaction");
+        let topics = read.open_table(TOPICS).expect("open topics table");
+        topics
+            .range::<&str>(..)
+            .expect("range over topics")
+            .map(|entry| {
+                let (_id, value) = entry.expect("read topic row");
+                value.value()
+            })
+    }
+
     /// Persist `task`, inserting it or overwriting the row with the same id —
     /// like `HashMap::insert`, but durable: the write is committed before this
     /// returns. Mutate a task by `get`-ing it, applying a transition
@@ -236,6 +301,124 @@ impl TaskStore {
             tasks.insert(task.id.0, &task).expect("write task");
         }
         write.commit().expect("commit task write");
+    }
+
+    pub fn put_topic(&mut self, topic: Topic) {
+        let write = self
+            .database
+            .begin_write()
+            .expect("begin write transaction");
+        {
+            let mut topics = write.open_table(TOPICS).expect("open topics table");
+            topics
+                .insert(topic.id.0.as_str(), &topic)
+                .expect("write topic");
+        }
+        write.commit().expect("commit topic write");
+    }
+
+    pub fn topic_id_for_agent(&self, agent_id: &tau_proto::AgentId) -> Option<TopicId> {
+        let read = self.database.begin_read().expect("begin read transaction");
+        let topics = read.open_table(TOPICS).expect("open topics table");
+        for entry in topics.range::<&str>(..).expect("range over topics") {
+            let (_id, topic) = entry.expect("read topic row");
+            let topic = topic.value();
+            if topic.agents.iter().any(|agent| &agent.agent_id == agent_id) {
+                return Some(topic.id);
+            }
+        }
+        None
+    }
+
+    pub fn assign_agent_to_topic(
+        &mut self,
+        agent_id: tau_proto::AgentId,
+        topic_id: TopicId,
+    ) -> Vec<Topic> {
+        let now = Utc::now();
+        let write = self
+            .database
+            .begin_write()
+            .expect("begin write transaction");
+        let changed = {
+            let mut topics_table = write.open_table(TOPICS).expect("open topics table");
+            let target_topic_id = if topics_table
+                .get(topic_id.0.as_str())
+                .expect("read target topic")
+                .is_some()
+            {
+                topic_id
+            } else {
+                TopicId(DEFAULT_TOPIC_ID.to_owned())
+            };
+            let mut changed = Vec::new();
+            let topic_ids = topics_table
+                .range::<&str>(..)
+                .expect("range over topics")
+                .map(|entry| {
+                    let (id, _value) = entry.expect("read topic row");
+                    id.value().to_owned()
+                })
+                .collect::<Vec<_>>();
+
+            for id in topic_ids {
+                let mut topic = topics_table
+                    .get(id.as_str())
+                    .expect("read topic")
+                    .expect("topic exists")
+                    .value();
+                let had_agent = topic.agents.iter().any(|agent| agent.agent_id == agent_id);
+                let should_have_agent = topic.id == target_topic_id;
+                if had_agent == should_have_agent {
+                    continue;
+                }
+                if should_have_agent {
+                    topic.agents.push(TopicAgent {
+                        agent_id: agent_id.clone(),
+                    });
+                } else {
+                    topic.agents.retain(|agent| agent.agent_id != agent_id);
+                }
+                topic.updated_at = now;
+                topics_table
+                    .insert(topic.id.0.as_str(), &topic)
+                    .expect("write topic");
+                changed.push(topic);
+            }
+            changed
+        };
+        write.commit().expect("commit topic assignment");
+        changed
+    }
+
+    fn ensure_default_topic(&mut self) {
+        let write = self
+            .database
+            .begin_write()
+            .expect("begin write transaction");
+        {
+            let mut topics = write.open_table(TOPICS).expect("open topics table");
+            if topics
+                .get(DEFAULT_TOPIC_ID)
+                .expect("read default topic")
+                .is_none()
+            {
+                let now = Utc::now();
+                let topic = Topic {
+                    id: TopicId(DEFAULT_TOPIC_ID.to_owned()),
+                    name: DEFAULT_TOPIC_NAME.to_owned(),
+                    archived: false,
+                    agents: Vec::new(),
+                    context: Vec::new(),
+                    created_at: now,
+                    updated_at: now,
+                };
+                topics
+                    .insert(DEFAULT_TOPIC_ID, &topic)
+                    .expect("insert default topic");
+            }
+        }
+        write.commit().expect("commit default topic");
     }
 }
 
@@ -289,6 +472,54 @@ mod tests {
         assert_eq!(projects[0].name, "alpha");
         assert_eq!(projects[1].id, ProjectId(2));
         assert_eq!(projects[1].path, PathBuf::from("/tmp/beta"));
+    }
+
+    #[test]
+    fn topics_have_short_ids_and_survive_reopen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("factory.redb");
+
+        let first_id;
+        {
+            let mut store = TaskStore::open(&path);
+            let default = store
+                .get_topic(&TopicId(DEFAULT_TOPIC_ID.to_owned()))
+                .expect("default topic exists");
+            assert_eq!(default.name, DEFAULT_TOPIC_NAME);
+
+            let first = store.create_topic("Sidebar redesign".into());
+            let second = store.create_topic("Parser bug".into());
+            assert!(first.id.0.starts_with("tp-"));
+            assert_eq!(first.id.0.len(), 9);
+            assert_ne!(first.id, second.id);
+            first_id = first.id;
+        }
+
+        let store = TaskStore::open(&path);
+        let recovered = store.get_topic(&first_id).expect("topic survived reopen");
+        assert_eq!(recovered.name, "Sidebar redesign");
+    }
+
+    #[test]
+    fn assigning_agent_moves_between_topics() {
+        let (_dir, mut store) = store();
+        let topic = store.create_topic("Work".into());
+        let agent = AgentId::parse("agent-1").unwrap();
+
+        let changed = store.assign_agent_to_topic(agent.clone(), topic.id.clone());
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].id, topic.id);
+        assert_eq!(changed[0].agents[0].agent_id, agent);
+
+        let changed = store.assign_agent_to_topic(
+            AgentId::parse("agent-1").unwrap(),
+            TopicId(DEFAULT_TOPIC_ID.to_owned()),
+        );
+        assert_eq!(changed.len(), 2, "source and destination topics change");
+        assert_eq!(
+            store.topic_id_for_agent(&AgentId::parse("agent-1").unwrap()),
+            Some(TopicId(DEFAULT_TOPIC_ID.to_owned()))
+        );
     }
 
     #[test]

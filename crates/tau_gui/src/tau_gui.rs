@@ -51,7 +51,7 @@ use prompt_state::{PromptState, QueuedPrompt};
 use role_state::{RoleCycleKind, RoleCycleOutcome, RoleState};
 use shell_state::{ShellCommandState, ShellState};
 use socket_client::{SocketEvent, Writer};
-use task_state::{TaskState, TaskVisualKind};
+use task_state::TaskState;
 use tool_state::ToolState;
 #[cfg(test)]
 use transcript::buffer_range_starts_with;
@@ -2535,67 +2535,93 @@ impl TauGui {
         }
     }
 
-    fn render_task_rail(
+    fn render_topic_rail(
         &self,
         text_style: &TextStyle,
-        active_task_color: Hsla,
+        active_topic_color: Hsla,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let colors = cx.theme().colors();
         let current_agent = self.agents.current_agent_id();
         let rows = self
             .tasks
-            .mini_rows()
+            .topic_groups()
             .into_iter()
-            .map(|row| {
-                let agent_id = self.tasks.task_agent(row.id);
-                let selected = agent_id.as_deref() == current_agent;
-                let text_color = if selected {
-                    active_task_color
-                } else {
-                    text_style.color
-                };
-                let task_id = row.id;
+            .map(|topic| {
                 div()
-                    .relative()
                     .w_full()
                     .flex()
-                    .items_center()
-                    .gap_1()
-                    .pl(px(4.))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .cursor_pointer()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| {
-                            if let Some(agent_id) = this.tasks.task_agent(task_id) {
-                                this.main_view = MainView::Agent;
-                                this.switch_to_agent_tab(Some(agent_id), window, cx);
-                            }
-                        }),
-                    )
-                    .child(Icon::new(task_icon(row.kind)).size(IconSize::XSmall).color(
-                        Color::Custom(task_icon_color(
-                            row.kind,
-                            active_task_color,
-                            text_style.color,
-                        )),
-                    ))
+                    .flex_col()
+                    .gap_0p5()
                     .child(
                         div()
-                            .flex_grow(1.0)
-                            .min_w_0()
+                            .w_full()
+                            .pt(px(5.))
+                            .pl(px(4.))
+                            .text_color(text_style.color.opacity(0.65))
+                            .child(topic.name),
+                    )
+                    .children(topic.agents.into_iter().map(|agent_id| {
+                        let selected = current_agent == Some(agent_id.as_str());
+                        let text_color = if selected {
+                            active_topic_color
+                        } else {
+                            text_style.color
+                        };
+                        div()
+                            .relative()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .pl(px(12.))
                             .overflow_hidden()
                             .whitespace_nowrap()
-                            .text_color(text_color)
-                            .child(row.title),
-                    )
+                            .cursor_pointer()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener({
+                                    let agent_id = agent_id.clone();
+                                    move |this, _, window, cx| {
+                                        this.main_view = MainView::Agent;
+                                        this.switch_to_agent_tab(
+                                            Some(agent_id.clone()),
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                }),
+                            )
+                            .child(
+                                Icon::new(if selected {
+                                    IconName::PlayFilled
+                                } else {
+                                    IconName::Circle
+                                })
+                                .size(IconSize::XSmall)
+                                .color(Color::Custom(
+                                    if selected {
+                                        active_topic_color
+                                    } else {
+                                        text_style.color.opacity(0.6)
+                                    },
+                                )),
+                            )
+                            .child(
+                                div()
+                                    .flex_grow(1.0)
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_color(text_color)
+                                    .child(agent_id),
+                            )
+                    }))
             })
             .collect::<Vec<_>>();
 
         div()
-            .id("tau-gui-task-rail")
+            .id("tau-gui-topic-rail")
             .h_full()
             .w(px(224.))
             .flex_none()
@@ -2612,7 +2638,7 @@ impl TauGui {
             .text_color(text_style.color)
             .child(
                 div()
-                    .id("tau-gui-task-list")
+                    .id("tau-gui-topic-list")
                     .w_full()
                     .flex_grow(1.0)
                     .overflow_y_scroll()
@@ -2645,7 +2671,7 @@ impl Render for TauGui {
             .bg(cx.theme().colors().editor_background)
             .key_context("TauGui")
             .when(self.main_view == MainView::Agent, |this| {
-                this.child(self.render_task_rail(&text_style, active_agent_color, cx))
+                this.child(self.render_topic_rail(&text_style, active_agent_color, cx))
             })
             .child(
                 div()
@@ -2657,24 +2683,6 @@ impl Render for TauGui {
                     .overflow_hidden()
                     .child(editor),
             )
-    }
-}
-
-fn task_icon(kind: TaskVisualKind) -> IconName {
-    match kind {
-        TaskVisualKind::Decision => IconName::BellDot,
-        TaskVisualKind::Question => IconName::CircleHelp,
-        TaskVisualKind::Review => IconName::Diff,
-        TaskVisualKind::Active => IconName::PlayFilled,
-        TaskVisualKind::Open => IconName::Circle,
-    }
-}
-
-fn task_icon_color(kind: TaskVisualKind, active: Hsla, normal: Hsla) -> Hsla {
-    match kind {
-        TaskVisualKind::Decision | TaskVisualKind::Question | TaskVisualKind::Review => active,
-        TaskVisualKind::Active => active,
-        TaskVisualKind::Open => normal.opacity(0.6),
     }
 }
 
