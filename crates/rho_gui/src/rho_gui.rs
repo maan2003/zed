@@ -2932,7 +2932,8 @@ fn render_rho_banner_block(
         .child(
             svg()
                 .path("icons/rho.svg")
-                .size(px(48.))
+                .w(px(31.))
+                .h(px(48.))
                 .text_color(colors.text_accent),
         )
         .child(
