@@ -50,40 +50,6 @@ impl Transcript {
         self.apply_highlights(cx);
     }
 
-    pub(crate) fn replace_spans<T>(
-        &mut self,
-        spans: impl IntoIterator<Item = (String, HighlightStyle)>,
-        cx: &mut Context<T>,
-    ) {
-        let spans = spans
-            .into_iter()
-            .filter(|(text, _)| !text.is_empty())
-            .collect::<Vec<_>>();
-        let text = spans
-            .iter()
-            .map(|(text, _)| text.as_str())
-            .collect::<String>();
-        self.buffer.update(cx, |buffer, cx| {
-            buffer.set_text(text, cx);
-            self.end = buffer.anchor_after(buffer.len());
-        });
-        self.ranges.clear();
-        let mut offset = 0;
-        for (text, style) in spans {
-            let end = offset + text.len();
-            let highlight_key = self.next_highlight_key;
-            self.ranges.push(HighlightedRange {
-                range: self.buffer.read(cx).anchor_before(offset)
-                    ..self.buffer.read(cx).anchor_after(end),
-                highlight_key,
-                style,
-            });
-            self.next_highlight_key = self.next_highlight_key.saturating_add(1);
-            offset = end;
-        }
-        self.apply_highlights(cx);
-    }
-
     pub(crate) fn remove_range<T>(&mut self, range: std::ops::Range<Anchor>, cx: &mut Context<T>) {
         self.buffer.update(cx, |buffer, cx| {
             let start = range.start.to_offset(buffer);

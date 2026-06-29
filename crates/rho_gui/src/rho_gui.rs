@@ -331,7 +331,7 @@ struct RhoGui {
     rho_agent: Option<RhoAgentClient>,
     rho_rx: mpsc::Receiver<RhoEvent>,
     rho_state: Option<RhoUiAgentState>,
-    rho_rendered_blocks: usize,
+    rho_inserted_blocks: Vec<Option<InsertedTranscript>>,
     rho_pending_inserted: Option<InsertedTranscript>,
     _poll_task: Task<()>,
     _subscriptions: Vec<Subscription>,
@@ -404,7 +404,7 @@ impl RhoGui {
             rho_agent: None,
             rho_rx,
             rho_state: None,
-            rho_rendered_blocks: 0,
+            rho_inserted_blocks: Vec::new(),
             rho_pending_inserted: None,
             _poll_task: poll_task,
             _subscriptions: ui_subscriptions,
@@ -878,7 +878,7 @@ impl RhoGui {
             RhoEvent::Connected(agent) => {
                 self.rho_agent = Some(agent);
                 self.rho_state = None;
-                self.rho_rendered_blocks = 0;
+                self.clear_rho_rendered_blocks(cx);
                 self.rho_pending_inserted = None;
                 self.current_role = Some("rho".to_owned());
                 self.current_model = None;
@@ -916,37 +916,30 @@ impl RhoGui {
     }
 
     fn render_rho_state(&mut self, state: &RhoUiAgentState, cx: &mut Context<Self>) {
-        let rendered_blocks_changed = self.rho_rendered_blocks > state.blocks.len()
-            || self.rho_state.as_ref().is_some_and(|previous| {
+        self.remove_rho_pending(cx);
+
+        let first_changed = self
+            .rho_state
+            .as_ref()
+            .map(|previous| {
                 previous
                     .blocks
                     .iter()
                     .zip(&state.blocks)
-                    .take(self.rho_rendered_blocks)
-                    .any(|(previous, current)| previous != current)
-            });
+                    .position(|(previous, current)| previous != current)
+                    .unwrap_or_else(|| previous.blocks.len().min(state.blocks.len()))
+            })
+            .unwrap_or(0);
 
-        if rendered_blocks_changed {
-            let spans = render_rho_transcript_spans(state, &self.cli_theme, cx);
-            self.transcript.replace_spans(spans, cx);
-            self.rho_rendered_blocks = state.blocks.len();
-            self.rho_pending_inserted = None;
-            self.rho_state = Some(state.clone());
-            self.current_context_percent = None;
-            self.current_context_input_tokens = None;
-            self.current_context_window = None;
-            self.update_status_line(cx);
-            cx.notify();
-            return;
+        if first_changed < self.rho_inserted_blocks.len() {
+            self.remove_rho_rendered_blocks_from(first_changed, cx);
         }
 
-        self.remove_rho_pending(cx);
-        let new_blocks = &state.blocks[self.rho_rendered_blocks..];
-        for block in new_blocks {
+        for block in &state.blocks[self.rho_inserted_blocks.len()..] {
             let spans = render_rho_block_spans(block, &self.cli_theme, cx);
-            self.insert_rho_spans(spans, cx);
+            let inserted = self.insert_rho_spans(spans, cx);
+            self.rho_inserted_blocks.push(inserted);
         }
-        self.rho_rendered_blocks = state.blocks.len();
 
         let pending_spans = render_rho_pending_spans(&state.pending_response, &self.cli_theme, cx);
         if !pending_spans.is_empty() {
@@ -959,6 +952,18 @@ impl RhoGui {
         self.current_context_window = None;
         self.update_status_line(cx);
         cx.notify();
+    }
+
+    fn clear_rho_rendered_blocks(&mut self, cx: &mut Context<Self>) {
+        self.remove_rho_rendered_blocks_from(0, cx);
+    }
+
+    fn remove_rho_rendered_blocks_from(&mut self, index: usize, cx: &mut Context<Self>) {
+        let removed = self.rho_inserted_blocks.split_off(index);
+        for inserted in removed.into_iter().rev().flatten() {
+            self.remove_transcript_highlights(inserted.highlight_keys);
+            self.remove_transcript_range(inserted.range, cx);
+        }
     }
 
     fn remove_rho_pending(&mut self, cx: &mut Context<Self>) {
@@ -2964,21 +2969,6 @@ fn render_rho_banner_block(
                         .child(pun.to_owned()),
                 ),
         )
-}
-
-fn render_rho_transcript_spans(
-    state: &RhoUiAgentState,
-    theme: &tau_themes::Theme,
-    cx: &App,
-) -> Vec<(String, HighlightStyle)> {
-    let mut spans = Vec::new();
-    for block in &state.blocks {
-        push_rho_block_spans(&mut spans, theme, block, cx);
-    }
-    for item in &state.pending_response {
-        push_rho_pending_item_spans(&mut spans, theme, item, cx);
-    }
-    spans
 }
 
 fn render_rho_block_spans(
