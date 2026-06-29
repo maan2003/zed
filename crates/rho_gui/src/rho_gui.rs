@@ -99,7 +99,7 @@ fn run() -> Result<()> {
             cx.activate(true);
 
             if let Err(error) = cx.open_window(WindowOptions::default(), move |window, cx| {
-                cx.new(|cx| TauGui::new(attach_target.clone(), window, cx))
+                cx.new(|cx| RhoGui::new(attach_target.clone(), window, cx))
             }) {
                 eprintln!("rho-gui: failed to open window: {error:#}");
                 cx.quit();
@@ -191,32 +191,16 @@ const DEFAULT_RHO_GUI_SETTINGS: &str = r#"// Rho GUI user settings. Values here 
 "#;
 
 const STARTUP_PUNS: &[&str] = &[
-    "Tau is like Pi, but twice as much.",
-    "A whole new angle on coding agents.",
-    "Tau day is every day if you care about circles enough.",
-    "Come for the agent, stay for the circumference discourse.",
-    "Tau is the irrational choice for rational Unix hackers.",
-    "Small tools, loosely joined — that’s the Tau of Unix.",
-    "In Tau, what goes around comes around over stdio.",
-    "We’ve come full τurn.",
-    "Tau keeps the loop tight and the pipes honest.",
-    "Every extension gets its turn in Tau.",
-    "Tau speaks fluent stdio with a circular accent.",
-    "Agents, tools, sockets, loops: a well-rounded lineup.",
-    "Ready, set, Tau!",
-    "Tau day to code.",
-    "Tau-tau control.",
-    "Tau-tally operational.",
-    "Tau much power in one terminal.",
-    "Tau infinity and beyond.",
-    "Tau the line between human and agent.",
-    "Tau’s what I’m talking about.",
-    "One shell to Tau them all.",
-    "Tau-powered, Unix-native.",
-    "Complete revolution.",
-    "Wrapping around nicely.",
-    "Continuous on S¹, probably.",
-    "Cohomology remains left as exercise.",
+    "Rho is ready.",
+    "Rows, roles, and rho.",
+    "Rho-native, Unix-shaped.",
+    "A small symbol for a large context.",
+    "rho marks the prompt.",
+    "Good tools, tight loops.",
+    "Protocol first, pixels last.",
+    "Streaming at terminal speed.",
+    "A fresh path through the graph.",
+    "Keep the context flowing.",
 ];
 
 fn rho_gui_settings_path() -> Result<PathBuf> {
@@ -334,7 +318,7 @@ struct AgentUiState {
     current_context_window: Option<u64>,
 }
 
-struct TauGui {
+struct RhoGui {
     editor: Entity<Editor>,
     prompt_buffer: Entity<Buffer>,
     multi_buffer: Entity<MultiBuffer>,
@@ -375,7 +359,7 @@ struct TauGui {
     agent_ui_states: HashMap<String, AgentUiState>,
 }
 
-impl TauGui {
+impl RhoGui {
     fn new(attach_target: AttachTarget, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let completion_state = Arc::new(Mutex::new(TauCompletionState::default()));
         let this = cx.entity().downgrade();
@@ -2825,7 +2809,7 @@ impl TauGui {
     }
 }
 
-impl Render for TauGui {
+impl Render for RhoGui {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let text_style = self
             .editor
@@ -2847,7 +2831,7 @@ impl Render for TauGui {
             .flex_row()
             .p(px(2.))
             .bg(cx.theme().colors().editor_background)
-            .key_context("TauGui")
+            .key_context("RhoGui")
             .when(self.main_view == MainView::Agent, |this| {
                 this.child(self.render_topic_rail(&text_style, active_agent_color, cx))
             })
@@ -2899,7 +2883,7 @@ fn startup_pun() -> &'static str {
 }
 
 fn build_label_parts() -> (String, String) {
-    let version = format!("tau {}", env!("CARGO_PKG_VERSION"));
+    let version = format!("rho {}", env!("CARGO_PKG_VERSION"));
     let build = match tau_harness::version::build_last_modified() {
         Some(date) => format!("({}, {})", tau_harness::version::build_revision(), date),
         None => format!("({})", tau_harness::version::build_revision()),
@@ -2918,13 +2902,17 @@ fn build_banner(theme: &tau_themes::Theme) -> tau_cli_term::StyledText {
     let pun = startup_pun();
     let (version, build) = build_label_parts();
     tau_cli_term::StyledText::from(vec![
-        tau_cli_term::Span::new("▝▜▛▀ ", logo),
-        tau_cli_term::Span::new("tau", name),
-        tau_cli_term::Span::new(version.trim_start_matches("tau"), version_style),
+        tau_cli_term::Span::new("  ___  \n", logo),
+        tau_cli_term::Span::new(" / _ \\ \n", logo),
+        tau_cli_term::Span::new("| | | |\n", logo),
+        tau_cli_term::Span::new("| |_| |\n", logo),
+        tau_cli_term::Span::new("|  __/ ", logo),
+        tau_cli_term::Span::new("rho", name),
+        tau_cli_term::Span::new(version.trim_start_matches("rho"), version_style),
         tau_cli_term::Span::new(" ", Default::default()),
         tau_cli_term::Span::new(build, build_style),
         tau_cli_term::Span::new("\n", Default::default()),
-        tau_cli_term::Span::new(" ▐▙▖ ", logo),
+        tau_cli_term::Span::new("|_|    ", logo),
         tau_cli_term::Span::new(pun, pun_style),
     ])
 }

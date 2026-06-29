@@ -1,10 +1,11 @@
 use tau_config::settings::CliTheme;
 
-const THEME_ENV: &str = "TAU_THEME";
+const THEME_ENV: &str = "RHO_THEME";
+const LEGACY_THEME_ENV: &str = "TAU_THEME";
 
-/// Resolve a configured [`CliTheme`] to a concrete theme. `TAU_THEME` may name
-/// an override (e.g. `tau-plain-light`); an unknown name falls back to the
-/// built-in default.
+/// Resolve a configured [`CliTheme`] to a concrete theme. `RHO_THEME` may name
+/// an override; `TAU_THEME` is still accepted as a transitional fallback. An
+/// unknown name falls back to the built-in default.
 pub(crate) fn select_theme(mode: CliTheme) -> tau_themes::Theme {
     let mode = env_theme_override().unwrap_or(mode);
     match mode {
@@ -15,7 +16,9 @@ pub(crate) fn select_theme(mode: CliTheme) -> tau_themes::Theme {
 }
 
 fn env_theme_override() -> Option<CliTheme> {
-    let value = std::env::var(THEME_ENV).ok()?;
+    let value = std::env::var(THEME_ENV)
+        .or_else(|_| std::env::var(LEGACY_THEME_ENV))
+        .ok()?;
     CliTheme::parse_name(&value)
 }
 

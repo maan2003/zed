@@ -37,7 +37,7 @@ impl TaskState {
                     changed
                 }
                 Err(error) => {
-                    eprintln!("tau-gui: ignoring malformed factory.tasks_update: {error}");
+                    eprintln!("rho-gui: ignoring malformed factory.tasks_update: {error}");
                     false
                 }
             }
@@ -52,7 +52,7 @@ impl TaskState {
                     changed
                 }
                 Err(error) => {
-                    eprintln!("tau-gui: ignoring malformed factory.topics_update: {error}");
+                    eprintln!("rho-gui: ignoring malformed factory.topics_update: {error}");
                     false
                 }
             }
