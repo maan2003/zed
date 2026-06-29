@@ -903,7 +903,7 @@ impl TauGui {
     }
 
     fn handle_rho_frame(&mut self, frame: RhoAgentRemoteFrame, cx: &mut Context<Self>) {
-        let mut state = self.rho_state.take().unwrap_or(RhoUiAgentState {
+        let mut state = self.rho_state.clone().unwrap_or(RhoUiAgentState {
             blocks: Vec::new(),
             status: rho_ui_proto::remote::UiAgentStatus::Idle,
             pending_response: Vec::new(),
@@ -914,12 +914,22 @@ impl TauGui {
     }
 
     fn render_rho_state(&mut self, state: &RhoUiAgentState, cx: &mut Context<Self>) {
-        self.rho_state = Some(state.clone());
-        if state.blocks.len() < self.rho_rendered_blocks {
+        let rendered_blocks_changed = self.rho_rendered_blocks > state.blocks.len()
+            || self.rho_state.as_ref().is_some_and(|previous| {
+                previous
+                    .blocks
+                    .iter()
+                    .zip(&state.blocks)
+                    .take(self.rho_rendered_blocks)
+                    .any(|(previous, current)| previous != current)
+            });
+
+        if rendered_blocks_changed {
             let spans = render_rho_transcript_spans(state, &self.cli_theme, cx);
             self.transcript.replace_spans(spans, cx);
             self.rho_rendered_blocks = state.blocks.len();
             self.rho_pending_inserted = None;
+            self.rho_state = Some(state.clone());
             self.current_context_percent = None;
             self.current_context_input_tokens = None;
             self.current_context_window = None;
@@ -941,6 +951,7 @@ impl TauGui {
             self.rho_pending_inserted = self.insert_rho_spans(pending_spans, cx);
         }
 
+        self.rho_state = Some(state.clone());
         self.current_context_percent = None;
         self.current_context_input_tokens = None;
         self.current_context_window = None;
