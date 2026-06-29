@@ -3065,7 +3065,7 @@ fn push_rho_tool_spans(
         tool_name: tool.name.clone(),
         mode: String::new(),
         args: tool.arguments.clone(),
-        range: (!tool.id.is_empty()).then(|| tool.id.clone()),
+        range: None,
         suffixes: vec![tool_render::ToolSuffixSegment {
             text: status.to_owned(),
             status: rho_tool_status_style(status),
