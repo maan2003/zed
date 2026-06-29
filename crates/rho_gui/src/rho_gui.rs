@@ -382,6 +382,7 @@ struct RhoWorkingElision {
     tool_count: usize,
 }
 
+#[derive(Clone)]
 struct RhoWorkingElisionCandidate {
     range: std::ops::Range<text::Anchor>,
     tool_count: usize,
@@ -1128,33 +1129,42 @@ impl RhoGui {
             return;
         }
 
-        let retained_count = self.rho_working_elisions.len().min(candidates.len());
-        let removed_ids = self.rho_working_elisions[retained_count..]
+        let mut removed_ids = self.rho_working_elisions
+            [candidates.len().min(self.rho_working_elisions.len())..]
             .iter()
             .map(|elision| elision.id)
             .collect::<rustc_hash::FxHashSet<_>>();
-        let updates = self.rho_working_elisions[..retained_count]
-            .iter()
-            .zip(&candidates[..retained_count])
-            .filter_map(|(elision, candidate)| {
-                self.rho_working_elision_properties(
-                    candidate.range.clone(),
-                    candidate.tool_count,
-                    cx,
-                )
-                .map(|properties| (elision.id, properties))
-            })
-            .collect::<Vec<_>>();
-        let inserted_properties = candidates[retained_count..]
-            .iter()
-            .filter_map(|candidate| {
-                self.rho_working_elision_properties(
-                    candidate.range.clone(),
-                    candidate.tool_count,
-                    cx,
-                )
-            })
-            .collect::<Vec<_>>();
+        let mut updates = Vec::new();
+        let mut inserted_candidates = Vec::new();
+        let mut inserted_properties = Vec::new();
+        let mut elisions = Vec::new();
+
+        for (index, candidate) in candidates.iter().enumerate() {
+            let Some(properties) = self.rho_working_elision_properties(
+                candidate.range.clone(),
+                candidate.tool_count,
+                cx,
+            ) else {
+                if let Some(elision) = self.rho_working_elisions.get(index) {
+                    removed_ids.insert(elision.id);
+                }
+                continue;
+            };
+
+            if let Some(elision) = self.rho_working_elisions.get(index) {
+                if elision.range != candidate.range || elision.tool_count != candidate.tool_count {
+                    updates.push((elision.id, properties));
+                }
+                elisions.push(RhoWorkingElision {
+                    id: elision.id,
+                    range: candidate.range.clone(),
+                    tool_count: candidate.tool_count,
+                });
+            } else {
+                inserted_candidates.push(candidate.clone());
+                inserted_properties.push(properties);
+            }
+        }
 
         let inserted_ids = self.editor.update(cx, |editor, cx| {
             if !removed_ids.is_empty() {
@@ -1166,21 +1176,13 @@ impl RhoGui {
             editor.insert_display_elisions(inserted_properties, None, cx)
         });
 
-        let mut elisions = self.rho_working_elisions[..retained_count].to_vec();
-        for (elision, candidate) in elisions.iter_mut().zip(&candidates[..retained_count]) {
-            elision.range = candidate.range.clone();
-            elision.tool_count = candidate.tool_count;
-        }
-        elisions.extend(
-            inserted_ids
-                .into_iter()
-                .zip(candidates[retained_count..].iter())
-                .map(|(id, candidate)| RhoWorkingElision {
-                    id,
-                    range: candidate.range.clone(),
-                    tool_count: candidate.tool_count,
-                }),
-        );
+        elisions.extend(inserted_ids.into_iter().zip(inserted_candidates).map(
+            |(id, candidate)| RhoWorkingElision {
+                id,
+                range: candidate.range,
+                tool_count: candidate.tool_count,
+            },
+        ));
         self.rho_working_elisions = elisions;
     }
 
