@@ -10,12 +10,13 @@ use audio::{Audio, Sound};
 use clap::Parser;
 use editor::{
     Editor, EditorMode, EditorRightPrompt, Inlay, SelectionEffects, SizingBehavior,
+    display_map::{BlockContext, BlockPlacement, BlockProperties, BlockStyle},
     scroll::AutoscrollStrategy,
 };
 use gpui::{
     App, Context, Entity, Focusable as _, FontStyle, FontWeight, HighlightStyle, Hsla, MouseButton,
     Rgba, Subscription, Task, TextStyle, WeakEntity, Window, WindowOptions, actions, div,
-    prelude::*, px,
+    prelude::*, px, svg,
 };
 use language::{Buffer, BufferEvent, Capability, Point};
 use multi_buffer::{MultiBuffer, PathKey};
@@ -433,12 +434,34 @@ impl RhoGui {
         };
         this.update_prompt_inlay(cx);
         this.update_status_line(cx);
-        this.insert_before_draft_block(
-            tau_cli_term::StyledBlock::new(build_banner(&this.cli_theme)),
-            cx,
-        );
+        this.insert_rho_banner_block(cx);
         this.focus_editor(window, cx);
         this
+    }
+
+    fn insert_rho_banner_block(&self, cx: &mut Context<Self>) {
+        let anchor = self
+            .multi_buffer
+            .read(cx)
+            .snapshot(cx)
+            .anchor_before(Point::new(0, 0));
+        let (version, build) = build_label_parts();
+        let pun = startup_pun().to_owned();
+        self.editor.update(cx, |editor, cx| {
+            editor.insert_blocks(
+                [BlockProperties {
+                    placement: BlockPlacement::Above(anchor),
+                    height: Some(5),
+                    style: BlockStyle::Fixed,
+                    render: Arc::new(move |cx| {
+                        render_rho_banner_block(&version, &build, &pun, cx).into_any_element()
+                    }),
+                    priority: 0,
+                }],
+                None,
+                cx,
+            );
+        });
     }
 
     fn spawn_rho_client(socket_path: PathBuf, tx: mpsc::Sender<RhoEvent>) {
@@ -2891,30 +2914,63 @@ fn build_label_parts() -> (String, String) {
     (version, build)
 }
 
-fn build_banner(theme: &tau_themes::Theme) -> tau_cli_term::StyledText {
-    use tau_themes::names;
-
-    let logo = tau_cli_term::resolve::resolve(theme, names::BANNER_LOGO);
-    let name = tau_cli_term::resolve::resolve(theme, names::BANNER_NAME);
-    let version_style = tau_cli_term::resolve::resolve(theme, names::BANNER_VERSION);
-    let build_style = tau_cli_term::resolve::resolve(theme, names::BANNER_BUILD);
-    let pun_style = tau_cli_term::resolve::resolve(theme, names::BANNER_PUN);
-    let pun = startup_pun();
-    let (version, build) = build_label_parts();
-    tau_cli_term::StyledText::from(vec![
-        tau_cli_term::Span::new("╭────╮\n", logo),
-        tau_cli_term::Span::new("│    │\n", logo),
-        tau_cli_term::Span::new("│    │\n", logo),
-        tau_cli_term::Span::new("├────╯ ", logo),
-        tau_cli_term::Span::new("rho", name),
-        tau_cli_term::Span::new(version.trim_start_matches("rho"), version_style),
-        tau_cli_term::Span::new(" ", Default::default()),
-        tau_cli_term::Span::new(build, build_style),
-        tau_cli_term::Span::new("\n", Default::default()),
-        tau_cli_term::Span::new("│\n", logo),
-        tau_cli_term::Span::new("│      ", logo),
-        tau_cli_term::Span::new(pun, pun_style),
-    ])
+fn render_rho_banner_block(
+    version: &str,
+    build: &str,
+    pun: &str,
+    cx: &mut BlockContext<'_, '_>,
+) -> impl IntoElement {
+    let colors = cx.theme().colors();
+    div()
+        .block_mouse_except_scroll()
+        .pl(cx.anchor_x)
+        .h(px(88.))
+        .flex()
+        .items_center()
+        .gap(px(16.))
+        .child(
+            svg()
+                .path("icons/rho.svg")
+                .size(px(64.))
+                .text_color(colors.text_accent),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(
+                    div()
+                        .flex()
+                        .items_baseline()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .text_size(px(26.))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(colors.text)
+                                .child("rho"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(14.))
+                                .text_color(colors.text_muted)
+                                .child(version.trim_start_matches("rho").to_owned()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(colors.text_disabled)
+                                .child(build.to_owned()),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(colors.text_muted)
+                        .child(pun.to_owned()),
+                ),
+        )
 }
 
 fn render_rho_transcript_spans(
@@ -2922,11 +2978,7 @@ fn render_rho_transcript_spans(
     theme: &tau_themes::Theme,
     cx: &App,
 ) -> Vec<(String, HighlightStyle)> {
-    let mut spans = block_spans(&tau_cli_term::StyledBlock::new(build_banner(theme)), cx)
-        .into_iter()
-        .map(|(text, style)| (text.to_owned(), style))
-        .collect::<Vec<_>>();
-    spans.push(("\n\n".to_owned(), HighlightStyle::default()));
+    let mut spans = Vec::new();
     for block in &state.blocks {
         push_rho_block_spans(&mut spans, theme, block, cx);
     }
