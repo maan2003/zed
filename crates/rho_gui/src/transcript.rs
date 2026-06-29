@@ -88,6 +88,17 @@ impl Transcript {
         buffer_range_starts_with(buffer, start..end, character)
     }
 
+    pub(crate) fn multibuffer_range<T>(
+        &self,
+        range: std::ops::Range<Anchor>,
+        cx: &Context<T>,
+    ) -> Option<std::ops::Range<multi_buffer::Anchor>> {
+        let snapshot = self.multi_buffer.read(cx).snapshot(cx);
+        let start = snapshot.anchor_in_excerpt(range.start)?;
+        let end = snapshot.anchor_in_excerpt(range.end)?;
+        Some(start..end)
+    }
+
     pub(crate) fn trailing_newlines<T>(&self, cx: &Context<T>) -> usize {
         let buffer = self.buffer.read(cx);
         let transcript_end = self.end.to_offset(buffer);

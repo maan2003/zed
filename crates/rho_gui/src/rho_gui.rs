@@ -1,3 +1,4 @@
+use std::any::TypeId;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -8,6 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result, anyhow};
 use audio::{Audio, Sound};
 use clap::Parser;
+use editor::display_map::{Crease, ElisionPolicy, FoldPlaceholder};
 use editor::{
     Editor, EditorMode, EditorRightPrompt, Inlay, SelectionEffects, SizingBehavior,
     display_map::{BlockContext, BlockPlacement, BlockProperties, BlockStyle},
@@ -24,8 +26,8 @@ use project::InlayId;
 use rho_ui_proto::client::AgentClient as RhoAgentClient;
 use rho_ui_proto::remote::{
     AgentRemoteFrame as RhoAgentRemoteFrame, UiAgentState as RhoUiAgentState,
-    UiBlock as RhoUiBlock, UiStreamingItem as RhoUiStreamingItem, UiTool as RhoUiTool,
-    UiToolStatus as RhoUiToolStatus,
+    UiBlock as RhoUiBlock, UiMessagePhase as RhoUiMessagePhase,
+    UiStreamingItem as RhoUiStreamingItem, UiTool as RhoUiTool, UiToolStatus as RhoUiToolStatus,
 };
 use settings::SettingsStore;
 use tau_proto::{
@@ -359,6 +361,8 @@ struct RhoGui {
     no_agent_ui_state: Option<AgentUiState>,
     agent_ui_states: HashMap<String, AgentUiState>,
 }
+
+struct RhoWorkingFold;
 
 impl RhoGui {
     fn new(attach_target: AttachTarget, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -857,7 +861,7 @@ impl RhoGui {
 
     fn drain_socket_events(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         while let Ok(event) = self.rho_rx.try_recv() {
-            self.handle_rho_event(event, cx);
+            self.handle_rho_event(event, window, cx);
         }
         while let Ok(event) = self.rx.try_recv() {
             match event {
@@ -873,7 +877,7 @@ impl RhoGui {
         }
     }
 
-    fn handle_rho_event(&mut self, event: RhoEvent, cx: &mut Context<Self>) {
+    fn handle_rho_event(&mut self, event: RhoEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             RhoEvent::Connected(agent) => {
                 self.rho_agent = Some(agent);
@@ -885,8 +889,8 @@ impl RhoGui {
                 self.agents.select("agent".to_owned());
                 self.update_status_line(cx);
             }
-            RhoEvent::State(state) => self.render_rho_state(&state, cx),
-            RhoEvent::Frame(frame) => self.handle_rho_frame(frame, cx),
+            RhoEvent::State(state) => self.render_rho_state(&state, window, cx),
+            RhoEvent::Frame(frame) => self.handle_rho_frame(frame, window, cx),
             RhoEvent::Disconnected => {
                 self.insert_before_draft_styled(
                     "\n[disconnected from rho daemon]\n",
@@ -904,18 +908,29 @@ impl RhoGui {
         }
     }
 
-    fn handle_rho_frame(&mut self, frame: RhoAgentRemoteFrame, cx: &mut Context<Self>) {
+    fn handle_rho_frame(
+        &mut self,
+        frame: RhoAgentRemoteFrame,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let mut state = self.rho_state.clone().unwrap_or(RhoUiAgentState {
             blocks: Vec::new(),
             status: rho_ui_proto::remote::UiAgentStatus::Idle,
             pending_response: Vec::new(),
         });
         frame.apply_diff(&mut state);
-        self.render_rho_state(&state, cx);
+        self.render_rho_state(&state, window, cx);
         self.rho_state = Some(state);
     }
 
-    fn render_rho_state(&mut self, state: &RhoUiAgentState, cx: &mut Context<Self>) {
+    fn render_rho_state(
+        &mut self,
+        state: &RhoUiAgentState,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_rho_working_folds(cx);
         self.remove_rho_pending(cx);
 
         let first_changed = self
@@ -945,6 +960,7 @@ impl RhoGui {
         if !pending_spans.is_empty() {
             self.rho_pending_inserted = self.insert_rho_spans(pending_spans, cx);
         }
+        self.fold_rho_working_blocks(state, window, cx);
 
         self.rho_state = Some(state.clone());
         self.current_context_percent = None;
@@ -982,6 +998,129 @@ impl RhoGui {
             spans.iter().map(|(text, style)| (text.as_str(), *style)),
             cx,
         )
+    }
+
+    fn clear_rho_working_folds(&mut self, cx: &mut Context<Self>) {
+        let ranges = self.rho_working_fold_ranges(cx);
+        if ranges.is_empty() {
+            return;
+        }
+
+        self.editor.update(cx, |editor, cx| {
+            editor.remove_folds_with_type(&ranges, TypeId::of::<RhoWorkingFold>(), false, cx);
+        });
+    }
+
+    fn fold_rho_working_blocks(
+        &mut self,
+        state: &RhoUiAgentState,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let creases = self.rho_working_creases(state, cx);
+        if creases.is_empty() {
+            return;
+        }
+
+        self.editor.update(cx, |editor, cx| {
+            editor.fold_creases(creases, false, window, cx);
+        });
+    }
+
+    fn rho_working_fold_ranges(
+        &self,
+        cx: &Context<Self>,
+    ) -> Vec<std::ops::Range<multi_buffer::Anchor>> {
+        self.rho_inserted_blocks
+            .iter()
+            .flatten()
+            .chain(self.rho_pending_inserted.iter())
+            .filter_map(|inserted| {
+                self.transcript
+                    .multibuffer_range(inserted.range.clone(), cx)
+            })
+            .collect()
+    }
+
+    fn rho_working_creases(
+        &self,
+        state: &RhoUiAgentState,
+        cx: &Context<Self>,
+    ) -> Vec<Crease<multi_buffer::Anchor>> {
+        let last_user_message = state
+            .blocks
+            .iter()
+            .rposition(|block| matches!(block, RhoUiBlock::UserMessage { .. }));
+        let mut crease_ranges = Vec::new();
+        let mut current: Option<(std::ops::Range<text::Anchor>, ElisionPolicy)> = None;
+
+        for (index, (block, inserted)) in state
+            .blocks
+            .iter()
+            .zip(&self.rho_inserted_blocks)
+            .enumerate()
+        {
+            let Some(inserted) = inserted else {
+                continue;
+            };
+            let policy = if rho_block_is_working(block) {
+                if last_user_message.is_none_or(|last_user| index > last_user) {
+                    Some(ElisionPolicy::Tail { rows: 5 })
+                } else {
+                    Some(ElisionPolicy::Hidden)
+                }
+            } else {
+                None
+            };
+
+            match (policy, current.take()) {
+                (Some(policy), Some((range, current_policy))) if policy == current_policy => {
+                    current = Some((range.start..inserted.range.end, policy));
+                }
+                (Some(policy), previous) => {
+                    if let Some(previous) = previous {
+                        crease_ranges.push(previous);
+                    }
+                    current = Some((inserted.range.clone(), policy));
+                }
+                (None, Some(previous)) => crease_ranges.push(previous),
+                (None, None) => {}
+            }
+        }
+
+        if let Some(previous) = current {
+            crease_ranges.push(previous);
+        }
+
+        if state
+            .pending_response
+            .iter()
+            .any(rho_pending_item_is_working)
+            && state
+                .pending_response
+                .iter()
+                .all(|item| !matches!(item, RhoUiStreamingItem::AssistantMessage { phase, .. } if *phase == Some(RhoUiMessagePhase::FinalAnswer)))
+            && let Some(inserted) = &self.rho_pending_inserted
+        {
+            crease_ranges.push((inserted.range.clone(), ElisionPolicy::Tail { rows: 5 }));
+        }
+
+        let placeholder = self.rho_working_fold_placeholder(cx);
+        crease_ranges
+            .into_iter()
+            .filter_map(|(range, policy)| {
+                self.transcript.multibuffer_range(range, cx).map(|range| {
+                    Crease::simple(range, placeholder.clone()).with_elision_policy(policy)
+                })
+            })
+            .collect()
+    }
+
+    fn rho_working_fold_placeholder(&self, cx: &Context<Self>) -> FoldPlaceholder {
+        let mut placeholder = self.editor.read(cx).default_fold_placeholder(cx);
+        placeholder.type_tag = Some(TypeId::of::<RhoWorkingFold>());
+        placeholder.collapsed_text = Some("⋯ working".into());
+        placeholder
     }
 
     fn handle_message(
@@ -3007,7 +3146,7 @@ fn push_rho_block_spans(
             theme,
             cx,
         ),
-        RhoUiBlock::AssistantMessage { text } => {
+        RhoUiBlock::AssistantMessage { text, .. } => {
             push_rho_styled_line(spans, text, TranscriptStyle::AgentResponse, theme, cx)
         }
         RhoUiBlock::Reasoning { .. } => {}
@@ -3025,7 +3164,7 @@ fn push_rho_pending_item_spans(
     cx: &App,
 ) {
     match item {
-        RhoUiStreamingItem::AssistantMessage { text } => {
+        RhoUiStreamingItem::AssistantMessage { text, .. } => {
             let block =
                 tool_render::streaming_block(theme, tau_themes::names::AGENT_RESPONSE, text);
             spans.extend(
@@ -3040,6 +3179,25 @@ fn push_rho_pending_item_spans(
         RhoUiStreamingItem::Notice { text } => {
             push_rho_styled_line(spans, text, TranscriptStyle::SystemInfo, theme, cx)
         }
+    }
+}
+
+fn rho_block_is_working(block: &RhoUiBlock) -> bool {
+    match block {
+        RhoUiBlock::UserMessage { .. } => false,
+        RhoUiBlock::AssistantMessage { phase, .. } => *phase == Some(RhoUiMessagePhase::Commentary),
+        RhoUiBlock::Reasoning { .. } | RhoUiBlock::Tool(_) | RhoUiBlock::Notice { .. } => true,
+    }
+}
+
+fn rho_pending_item_is_working(item: &RhoUiStreamingItem) -> bool {
+    match item {
+        RhoUiStreamingItem::AssistantMessage { phase, .. } => {
+            *phase == Some(RhoUiMessagePhase::Commentary)
+        }
+        RhoUiStreamingItem::Reasoning { .. }
+        | RhoUiStreamingItem::Tool(_)
+        | RhoUiStreamingItem::Notice { .. } => true,
     }
 }
 

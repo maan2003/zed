@@ -3,8 +3,8 @@ use std::sync::Arc;
 use rho_agent::{AgentState, AgentStateKind, ToolPreviewMetadata};
 use rho_core::{
     AStr, ApplyPatchMetadata, ContextBlock, Diff as AStrDiffKind, InferenceResponseItem,
-    PendingInferenceResponse, StreamingContextItem, StreamingContextItemState, ToolFileStatus,
-    ToolOutputStatus, ToolResultMetadata, UnixMs, text_content,
+    MessagePhase, PendingInferenceResponse, StreamingContextItem, StreamingContextItemState,
+    ToolFileStatus, ToolOutputStatus, ToolResultMetadata, UnixMs, text_content,
 };
 use senax_encoder::{Decode, Encode, Pack, Unpack};
 
@@ -100,11 +100,20 @@ impl UiAgentState {
 
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, Pack, Unpack)]
 pub enum UiBlock {
-    UserMessage { text: String },
-    AssistantMessage { text: String },
-    Reasoning { text: String },
+    UserMessage {
+        text: String,
+    },
+    AssistantMessage {
+        text: String,
+        phase: Option<UiMessagePhase>,
+    },
+    Reasoning {
+        text: String,
+    },
     Tool(UiTool),
-    Notice { text: String },
+    Notice {
+        text: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, Pack, Unpack)]
@@ -232,10 +241,17 @@ impl UiPendingResponseDiff {
 
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, Pack, Unpack)]
 pub enum UiStreamingItem {
-    AssistantMessage { text: String },
-    Reasoning { text: String },
+    AssistantMessage {
+        text: String,
+        phase: Option<UiMessagePhase>,
+    },
+    Reasoning {
+        text: String,
+    },
     Tool(UiTool),
-    Notice { text: String },
+    Notice {
+        text: String,
+    },
 }
 
 impl UiStreamingItem {
@@ -283,9 +299,10 @@ impl UiStreamingItemDiff {
                 if !matches!(item, UiStreamingItem::AssistantMessage { .. }) {
                     *item = UiStreamingItem::AssistantMessage {
                         text: String::new(),
+                        phase: None,
                     };
                 }
-                let UiStreamingItem::AssistantMessage { text: current } = item else {
+                let UiStreamingItem::AssistantMessage { text: current, .. } = item else {
                     unreachable!("assistant item was just installed");
                 };
                 *current = text.apply_to(current);
@@ -511,6 +528,21 @@ pub enum UiToolStatus {
     Cancelled,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode, Pack, Unpack)]
+pub enum UiMessagePhase {
+    Commentary,
+    FinalAnswer,
+}
+
+impl From<MessagePhase> for UiMessagePhase {
+    fn from(phase: MessagePhase) -> Self {
+        match phase {
+            MessagePhase::Commentary => Self::Commentary,
+            MessagePhase::FinalAnswer => Self::FinalAnswer,
+        }
+    }
+}
+
 impl From<ToolOutputStatus> for UiToolStatus {
     fn from(status: ToolOutputStatus) -> Self {
         match status {
@@ -627,9 +659,10 @@ fn ui_blocks(blocks: &[Arc<ContextBlock>]) -> Vec<UiBlock> {
 
 fn ui_block_from_response_item(item: &InferenceResponseItem) -> Option<UiBlock> {
     match item {
-        InferenceResponseItem::AssistantMessage { content, .. } => {
+        InferenceResponseItem::AssistantMessage { content, phase } => {
             Some(UiBlock::AssistantMessage {
                 text: text_content(content),
+                phase: phase.map(Into::into),
             })
         }
         InferenceResponseItem::RawReasoning { content, summary } => Some(UiBlock::Reasoning {
@@ -854,9 +887,10 @@ fn ui_streaming_item(item: &StreamingContextItemState) -> Option<UiStreamingItem
 
 fn ui_streaming_item_from_item(item: &StreamingContextItem) -> Option<UiStreamingItem> {
     match item {
-        StreamingContextItem::AssistantMessage { content, .. } => {
+        StreamingContextItem::AssistantMessage { content, phase } => {
             Some(UiStreamingItem::AssistantMessage {
                 text: content.iter().map(ToString::to_string).collect(),
+                phase: phase.map(Into::into),
             })
         }
         StreamingContextItem::RawReasoning { content, summary } => {
@@ -899,9 +933,10 @@ fn ui_streaming_item_from_item(item: &StreamingContextItem) -> Option<UiStreamin
 
 fn ui_block_from_pending(item: &UiStreamingItem) -> Option<UiBlock> {
     match item {
-        UiStreamingItem::AssistantMessage { text } => {
-            Some(UiBlock::AssistantMessage { text: text.clone() })
-        }
+        UiStreamingItem::AssistantMessage { text, phase } => Some(UiBlock::AssistantMessage {
+            text: text.clone(),
+            phase: *phase,
+        }),
         UiStreamingItem::Reasoning { text } => Some(UiBlock::Reasoning { text: text.clone() }),
         UiStreamingItem::Tool(tool) => Some(UiBlock::Tool(tool.clone())),
         UiStreamingItem::Notice { text } => Some(UiBlock::Notice { text: text.clone() }),
