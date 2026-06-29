@@ -30,6 +30,7 @@ project.workspace = true
 release_channel.workspace = true
 rho-daemon = { path = "../rho_daemon" }
 rho-ui-proto = { path = "../rho_ui_proto" }
+rustc-hash.workspace = true
 search.workspace = true
 semver.workspace = true
 settings.workspace = true

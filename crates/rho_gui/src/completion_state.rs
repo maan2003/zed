@@ -100,7 +100,7 @@ impl TauCompletionState {
         match args.command.as_str() {
             "" => self.root_command_completions(&args.current),
             "/new" | "/compact" => Vec::new(),
-            "/agent" => self.agent_command_completions(&args.arguments),
+            "/load" => self.load_command_completions(&args.arguments),
             "/model" => {
                 candidate_matches(&self.roles, args.arguments.first().copied().unwrap_or(""))
             }
@@ -150,19 +150,12 @@ impl TauCompletionState {
             .collect()
     }
 
-    fn agent_command_completions(&self, args: &[&str]) -> Vec<CompletionCandidate> {
+    fn load_command_completions(&self, args: &[&str]) -> Vec<CompletionCandidate> {
         match args.len() {
-            0 | 1 => ["new", "switch"]
-                .into_iter()
-                .filter(|subcommand| {
-                    completion_matches(subcommand, args.first().copied().unwrap_or(""))
-                })
-                .map(|subcommand| CompletionCandidate::new(subcommand, "subcommand"))
-                .collect(),
-            2 => {
-                let needle = args[1];
-                agent_completion_candidates(args[0], &self.known_agents, &self.live_agents)
-                    .into_iter()
+            0 | 1 => {
+                let needle = args.first().copied().unwrap_or("");
+                self.known_agents
+                    .iter()
                     .filter(|agent| completion_matches(agent, needle))
                     .map(|agent| CompletionCandidate::new(agent, "agent"))
                     .collect()
@@ -314,8 +307,8 @@ fn completion_replace_start(text_before_cursor: &str) -> usize {
 
 fn root_command_completions(needle: &str) -> Vec<CompletionCandidate> {
     [
-        CompletionCandidate::new("/agent", "Manage agent transcripts"),
-        CompletionCandidate::new("/new", "Alias for /agent new"),
+        CompletionCandidate::new("/new", "Create a new agent"),
+        CompletionCandidate::new("/load", "Load an agent by id"),
         CompletionCandidate::new("/model", "Select an agent role"),
         CompletionCandidate::new("/role", "Switch, create, edit, or delete an agent role"),
         CompletionCandidate::new("/compact", "Force a compaction pass"),
@@ -454,25 +447,6 @@ fn role_setting_value_completions(setting: &str, needle: &str) -> Vec<Completion
         .collect()
 }
 
-fn agent_completion_candidates(
-    subcommand: &str,
-    known_agents: &[String],
-    live_agents: &HashSet<String>,
-) -> Vec<String> {
-    match subcommand {
-        "switch" => {
-            let mut agents = known_agents
-                .iter()
-                .filter(|agent| live_agents.contains(*agent))
-                .cloned()
-                .collect::<Vec<_>>();
-            agents.insert(0, "none".to_owned());
-            agents
-        }
-        _ => Vec::new(),
-    }
-}
-
 fn candidate_matches(candidates: &[CompletionCandidate], needle: &str) -> Vec<CompletionCandidate> {
     candidates
         .iter()
@@ -497,26 +471,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn agent_completions_offer_gui_subcommands_and_live_agents() {
+    fn load_completions_offer_known_agents() {
         let mut state = TauCompletionState::default();
         state.set_agents(
-            vec!["helper".to_owned(), "worker".to_owned()],
+            vec!["agent-1".to_owned(), "agent-2".to_owned()],
             HashSet::from(["helper".to_owned(), "worker".to_owned()]),
         );
 
-        let subcommands = state
-            .completions_for("/agent ")
+        let load_agents = state
+            .completions_for("/load ")
             .into_iter()
             .map(|candidate| candidate.value)
             .collect::<Vec<_>>();
-        assert_eq!(subcommands, vec!["new", "switch"]);
-
-        let switch_agents = state
-            .completions_for("/agent switch ")
-            .into_iter()
-            .map(|candidate| candidate.value)
-            .collect::<Vec<_>>();
-        assert_eq!(switch_agents, vec!["none", "helper", "worker"]);
+        assert_eq!(load_agents, vec!["agent-1", "agent-2"]);
     }
 
     #[test]

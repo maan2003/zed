@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::str::FromStr as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Context as _;
 use futures::StreamExt as _;
 use rho_agent::Agent;
+use rho_agent::db::{AgentId, AgentReadTxnExt as _, AgentWriteTxnExt as _};
 use rho_core::text_content;
 use rho_db::RhoDb;
 use rho_inference::InferenceAuth;
@@ -89,31 +91,34 @@ struct AgentRegistry {
     auth: InferenceAuth,
     inference_config: InferenceConfig,
     agents: Mutex<HashMap<String, Agent>>,
-    next_agent_id: AtomicUsize,
 }
 
 impl AgentRegistry {
     async fn new(db: RhoDb, auth: InferenceAuth, inference_config: InferenceConfig) -> Self {
-        let initial_agent_id = "agent-1".to_owned();
-        let initial_agent = Agent::create(
-            db.clone(),
-            auth.clone(),
-            inference_config.clone(),
-            Some(initial_agent_id.clone()),
-        )
-        .await;
-        let mut agents = HashMap::new();
-        agents.insert(initial_agent_id, initial_agent);
+        let mut write = db.write().await;
+        write.init_agent_tables();
+        write.commit();
         Self {
             db,
             auth,
             inference_config,
-            agents: Mutex::new(agents),
-            next_agent_id: AtomicUsize::new(2),
+            agents: Mutex::new(HashMap::new()),
         }
     }
 
-    async fn list(&self) -> Vec<(String, Agent)> {
+    fn known_agent_ids(&self) -> Vec<String> {
+        let mut agent_ids = self
+            .db
+            .read()
+            .list_agents()
+            .into_iter()
+            .map(|(agent_id, _)| agent_id.to_string())
+            .collect::<Vec<_>>();
+        agent_ids.sort();
+        agent_ids
+    }
+
+    async fn loaded(&self) -> Vec<(String, Agent)> {
         let mut agents = self
             .agents
             .lock()
@@ -129,29 +134,40 @@ impl AgentRegistry {
         self.agents.lock().await.get(agent_id).cloned()
     }
 
-    async fn create(&self, requested_agent_id: Option<String>) -> (String, Agent, bool) {
-        let agent_id = requested_agent_id.unwrap_or_else(|| {
-            format!(
-                "agent-{}",
-                self.next_agent_id.fetch_add(1, Ordering::Relaxed)
-            )
-        });
-        if let Some(agent) = self.agents.lock().await.get(&agent_id).cloned() {
-            return (agent_id, agent.clone(), false);
-        }
-        let agent = Agent::create(
+    async fn create(&self) -> (String, Agent) {
+        let (agent_id, agent) = Agent::create_with_id(
             self.db.clone(),
             self.auth.clone(),
             self.inference_config.clone(),
-            Some(agent_id.clone()),
+            None,
         )
         .await;
+        let agent_id = agent_id.to_string();
         let mut agents = self.agents.lock().await;
-        if let Some(agent) = agents.get(&agent_id) {
-            return (agent_id, agent.clone(), false);
-        }
         agents.insert(agent_id.clone(), agent.clone());
-        (agent_id, agent, true)
+        (agent_id, agent)
+    }
+
+    async fn load(&self, agent_id: &str) -> anyhow::Result<(String, Agent, bool)> {
+        if let Some(agent) = self.agents.lock().await.get(agent_id).cloned() {
+            return Ok((agent_id.to_owned(), agent, false));
+        }
+        let parsed = AgentId::from_str(agent_id)
+            .map_err(|_| anyhow::anyhow!("invalid agent id: {agent_id}"))?;
+        let canonical_agent_id = parsed.to_string();
+        if !self
+            .known_agent_ids()
+            .iter()
+            .any(|known| known == &canonical_agent_id)
+        {
+            anyhow::bail!("unknown agent id: {agent_id}");
+        }
+        let agent = Agent::load(self.db.clone(), self.auth.clone(), parsed);
+        self.agents
+            .lock()
+            .await
+            .insert(canonical_agent_id.clone(), agent.clone());
+        Ok((canonical_agent_id, agent, true))
     }
 }
 
@@ -177,7 +193,11 @@ async fn serve_connection(
         }
     });
 
-    for (agent_id, agent) in agents.list().await {
+    let _ = outgoing_tx.send(ServerMessage::Ready {
+        agent_ids: agents.known_agent_ids(),
+    });
+
+    for (agent_id, agent) in agents.loaded().await {
         subscribe_agent(agent_id, agent, outgoing_tx.clone());
     }
 
@@ -188,20 +208,40 @@ async fn serve_connection(
                 let _ = outgoing_tx.send(ServerMessage::Pong);
             }
             ClientMessage::Subscribe => {}
-            ClientMessage::CreateAgent { agent_id } => {
-                let (agent_id, agent, created) = agents.create(Some(agent_id)).await;
-                if created {
-                    subscribe_agent(agent_id.clone(), agent, outgoing_tx.clone());
+            ClientMessage::NewAgent { content } => {
+                let (agent_id, agent) = agents.create().await;
+                subscribe_agent(agent_id.clone(), agent.clone(), outgoing_tx.clone());
+                let _ = outgoing_tx.send(ServerMessage::AgentCreated {
+                    agent_id: agent_id.clone(),
+                });
+                let _ = outgoing_tx.send(ServerMessage::Ready {
+                    agent_ids: agents.known_agent_ids(),
+                });
+                if let Some(content) = content {
+                    agent.send_user_message(text_content(&content));
                 }
-                let _ = outgoing_tx.send(ServerMessage::AgentCreated { agent_id });
             }
+            ClientMessage::LoadAgent { agent_id } => match agents.load(&agent_id).await {
+                Ok((agent_id, agent, loaded_now)) => {
+                    if loaded_now {
+                        subscribe_agent(agent_id.clone(), agent, outgoing_tx.clone());
+                    }
+                    let _ = outgoing_tx.send(ServerMessage::AgentLoaded { agent_id });
+                }
+                Err(error) => {
+                    let _ = outgoing_tx.send(ServerMessage::Error {
+                        message: error.to_string(),
+                    });
+                }
+            },
             ClientMessage::SendUserMessage { agent_id, content } => {
                 let agent = match agents.get(&agent_id).await {
                     Some(agent) => agent,
                     None => {
-                        let (_, agent, _) = agents.create(Some(agent_id.clone())).await;
-                        subscribe_agent(agent_id.clone(), agent.clone(), outgoing_tx.clone());
-                        agent
+                        let _ = outgoing_tx.send(ServerMessage::Error {
+                            message: format!("agent is not loaded: {agent_id}"),
+                        });
+                        continue;
                     }
                 };
                 agent.send_user_message(text_content(&content));

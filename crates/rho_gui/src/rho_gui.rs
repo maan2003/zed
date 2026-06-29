@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -330,6 +330,7 @@ struct AgentUiState {
     rho_state: Option<RhoUiAgentState>,
     rho_inserted_blocks: Vec<Option<InsertedTranscript>>,
     rho_pending_inserted: Option<InsertedTranscript>,
+    rho_working_elisions: Vec<DisplayElisionId>,
 }
 
 struct RhoGui {
@@ -1098,7 +1099,7 @@ impl RhoGui {
 
         let ids = std::mem::take(&mut self.rho_working_elisions)
             .into_iter()
-            .collect::<HashSet<_>>();
+            .collect::<rustc_hash::FxHashSet<_>>();
         self.editor.update(cx, |editor, cx| {
             editor.remove_display_elisions(ids, None, cx);
         });
@@ -2112,6 +2113,10 @@ impl RhoGui {
         std::mem::swap(
             &mut self.rho_pending_inserted,
             &mut state.rho_pending_inserted,
+        );
+        std::mem::swap(
+            &mut self.rho_working_elisions,
+            &mut state.rho_working_elisions,
         );
     }
 

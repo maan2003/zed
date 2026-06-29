@@ -9825,6 +9825,7 @@ dependencies = [
  "release_channel",
  "rho-daemon",
  "rho-ui-proto",
+ "rustc-hash 2.1.1",
  "search",
  "semver",
  "settings",

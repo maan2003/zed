@@ -81,10 +81,6 @@ impl AgentState {
         known_agents
     }
 
-    pub(crate) fn active_count(&self) -> usize {
-        self.live_agents.len()
-    }
-
     pub(crate) fn completion_snapshot(&self) -> (Vec<String>, HashSet<String>) {
         (self.known_agents_sorted(), self.live_agents.clone())
     }

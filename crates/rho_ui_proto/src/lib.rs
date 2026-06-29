@@ -62,7 +62,10 @@ pub struct IoStats {
 pub enum ClientMessage {
     Ping,
     Subscribe,
-    CreateAgent {
+    NewAgent {
+        content: Option<Vec<ContentPart>>,
+    },
+    LoadAgent {
         agent_id: String,
     },
     SendUserMessage {
@@ -78,6 +81,9 @@ pub enum ClientMessage {
 #[derive(Clone, Debug, PartialEq, Encode, Decode, Pack, Unpack)]
 pub enum ServerMessage {
     Pong,
+    Ready {
+        agent_ids: Vec<String>,
+    },
     Error {
         message: String,
     },
@@ -86,6 +92,9 @@ pub enum ServerMessage {
         frame: remote::AgentRemoteFrame,
     },
     AgentCreated {
+        agent_id: String,
+    },
+    AgentLoaded {
         agent_id: String,
     },
     TurnCancelled {

@@ -71,6 +71,7 @@ impl Client {
 pub struct AgentClient {
     commands: mpsc::UnboundedSender<ClientMessage>,
     state: watch::Receiver<HashMap<String, UiAgentState>>,
+    known_agent_ids: watch::Receiver<Vec<String>>,
     frames: broadcast::Sender<(String, AgentRemoteFrame)>,
     counters: IoCounters,
 }
@@ -96,28 +97,23 @@ impl AgentClient {
                 &ClientMessage::Subscribe,
             );
         }
-        let ServerMessage::Agent { agent_id, frame } =
+        let ServerMessage::Ready { agent_ids } =
             read_frame_counted(&mut stream, Some(&client_counters)).await?
         else {
-            anyhow::bail!("rho daemon did not send initial agent state");
+            anyhow::bail!("rho daemon did not send ready message");
         };
         if let Some(logger) = &logger {
             logger.log(
                 ProtocolLogDirection::ServerToClient,
-                &ServerMessage::Agent {
-                    agent_id: agent_id.clone(),
-                    frame: frame.clone(),
+                &ServerMessage::Ready {
+                    agent_ids: agent_ids.clone(),
                 },
             );
         }
-        let crate::remote::AgentRemoteFrame::Snapshot(initial_state) = frame else {
-            anyhow::bail!("rho daemon sent diff before snapshot");
-        };
 
         let (reader, writer) = stream.into_split();
-        let mut initial_states = HashMap::new();
-        initial_states.insert(agent_id, initial_state);
-        let (state_tx, state_rx) = watch::channel(initial_states);
+        let (state_tx, state_rx) = watch::channel(HashMap::new());
+        let (known_agent_ids_tx, known_agent_ids_rx) = watch::channel(agent_ids);
         let (frame_tx, _) = broadcast::channel::<(String, AgentRemoteFrame)>(256);
         let (command_tx, mut command_rx) = mpsc::unbounded_channel::<ClientMessage>();
 
@@ -127,6 +123,7 @@ impl AgentClient {
         tokio::spawn(async move {
             let mut reader = reader;
             let mut state = state_tx.borrow().clone();
+            let mut known_agent_ids = known_agent_ids_tx.borrow().clone();
             loop {
                 let message = match read_frame_counted::<_, ServerMessage>(
                     &mut reader,
@@ -149,12 +146,26 @@ impl AgentClient {
                             break;
                         }
                     }
+                    ServerMessage::Ready { agent_ids } => {
+                        known_agent_ids = agent_ids;
+                        if known_agent_ids_tx.send(known_agent_ids.clone()).is_err() {
+                            break;
+                        }
+                    }
                     ServerMessage::Error { message } => {
                         eprintln!("rho daemon error: {message}")
                     }
-                    ServerMessage::AgentCreated { .. }
-                    | ServerMessage::Pong
-                    | ServerMessage::TurnCancelled { .. } => {}
+                    ServerMessage::AgentCreated { agent_id }
+                    | ServerMessage::AgentLoaded { agent_id } => {
+                        if !known_agent_ids.contains(&agent_id) {
+                            known_agent_ids.push(agent_id);
+                            known_agent_ids.sort();
+                            if known_agent_ids_tx.send(known_agent_ids.clone()).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    ServerMessage::Pong | ServerMessage::TurnCancelled { .. } => {}
                 }
             }
         });
@@ -179,6 +190,7 @@ impl AgentClient {
         Ok(Self {
             commands: command_tx,
             state: state_rx,
+            known_agent_ids: known_agent_ids_rx,
             frames: frame_tx,
             counters: client_counters,
         })
@@ -207,14 +219,30 @@ impl AgentClient {
         self.state.borrow().clone()
     }
 
-    pub fn agent_ids(&self) -> Vec<String> {
+    pub fn loaded_agent_ids(&self) -> Vec<String> {
         let mut agent_ids = self.state.borrow().keys().cloned().collect::<Vec<_>>();
         agent_ids.sort();
         agent_ids
     }
 
-    pub fn create_agent(&self, agent_id: String) {
-        let _ = self.commands.send(ClientMessage::CreateAgent { agent_id });
+    pub fn known_agent_ids(&self) -> Vec<String> {
+        self.known_agent_ids.borrow().clone()
+    }
+
+    pub fn new_agent(&self) {
+        let _ = self
+            .commands
+            .send(ClientMessage::NewAgent { content: None });
+    }
+
+    pub fn new_agent_with_user_message(&self, text: String) {
+        let _ = self.commands.send(ClientMessage::NewAgent {
+            content: Some(vec![ContentPart::Text { text }]),
+        });
+    }
+
+    pub fn load_agent(&self, agent_id: String) {
+        let _ = self.commands.send(ClientMessage::LoadAgent { agent_id });
     }
 
     pub fn send_user_message(&self, agent_id: String, text: String) {
