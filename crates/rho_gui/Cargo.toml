@@ -28,8 +28,8 @@ language.workspace = true
 multi_buffer.workspace = true
 project.workspace = true
 release_channel.workspace = true
-rho-daemon = { path = "../../../rho/crates/rho-daemon" }
-rho-ui-proto = { path = "../../../rho/crates/rho-ui-proto" }
+rho-daemon = { path = "../rho_daemon" }
+rho-ui-proto = { path = "../rho_ui_proto" }
 search.workspace = true
 semver.workspace = true
 settings.workspace = true

@@ -1,0 +1,28 @@
+[package]
+name = "rho-daemon"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "MIT OR Apache-2.0"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "rho-daemon"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+dirs.workspace = true
+futures.workspace = true
+rho-agent = { path = "../../../rho/crates/rho-agent" }
+rho-core = { path = "../../../rho/crates/rho-core" }
+rho-db = { path = "../../../rho/crates/rho-db" }
+rho-inference = { path = "../../../rho/crates/rho-inference" }
+rho-ui-proto = { path = "../rho_ui_proto" }
+tokio.workspace = true

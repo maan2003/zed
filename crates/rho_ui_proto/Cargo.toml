@@ -1,0 +1,22 @@
+[package]
+name = "rho-ui-proto"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "MIT OR Apache-2.0"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-stream = "0.3"
+bytes.workspace = true
+futures.workspace = true
+rho-agent = { path = "../../../rho/crates/rho-agent" }
+rho-core = { path = "../../../rho/crates/rho-core" }
+senax-encoder = { path = "../../../rho/crates/senax-encoder" }
+tokio.workspace = true
