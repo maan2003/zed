@@ -492,10 +492,6 @@ fn ui_blocks(blocks: &[Arc<ContextBlock>]) -> Vec<UiBlock> {
                         matches!(block, UiBlock::Tool(tool) if tool.id == result.call_id.as_str())
                     }) {
                         tool.status = result.body.status.into();
-                        tool.output = Some(result.body.output.to_string());
-                        if matches!(result.body.status, ToolOutputStatus::Error) {
-                            tool.error = Some(result.body.output.to_string());
-                        }
                     }
                 }
             }
@@ -1008,9 +1004,10 @@ mod tests {
                 name,
                 arguments,
                 status: UiToolStatus::Success,
-                output: Some(output),
+                output: None,
+                error: None,
                 ..
-            }) if name == "shell_command" && arguments.contains("printf hi") && output == "hi"
+            }) if name == "shell_command" && arguments.contains("printf hi")
         ));
     }
 
@@ -1035,10 +1032,11 @@ mod tests {
                 index: 0,
                 block: UiBlockDiff::Tool(UiToolDiff {
                     status: Some(UiToolStatus::Success),
-                    output: Some(Some(output)),
+                    output: None,
+                    error: None,
                     ..
                 })
-            }] if output == "hi"
+            }]
         ));
 
         frame.apply_diff(&mut receiver);
