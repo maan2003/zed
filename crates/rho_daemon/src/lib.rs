@@ -91,6 +91,7 @@ struct AgentRegistry {
     auth: InferenceAuth,
     inference_config: InferenceConfig,
     agents: Mutex<HashMap<String, Agent>>,
+    known_agent_ids: Mutex<Vec<String>>,
 }
 
 impl AgentRegistry {
@@ -98,24 +99,32 @@ impl AgentRegistry {
         let mut write = db.write().await;
         write.init_agent_tables();
         write.commit();
-        Self {
-            db,
-            auth,
-            inference_config,
-            agents: Mutex::new(HashMap::new()),
-        }
-    }
-
-    fn known_agent_ids(&self) -> Vec<String> {
-        let mut agent_ids = self
-            .db
+        let mut known_agent_ids = db
             .read()
             .list_agents()
             .into_iter()
             .map(|(agent_id, _)| agent_id.to_string())
             .collect::<Vec<_>>();
-        agent_ids.sort();
-        agent_ids
+        known_agent_ids.sort();
+        Self {
+            db,
+            auth,
+            inference_config,
+            agents: Mutex::new(HashMap::new()),
+            known_agent_ids: Mutex::new(known_agent_ids),
+        }
+    }
+
+    async fn known_agent_ids(&self) -> Vec<String> {
+        self.known_agent_ids.lock().await.clone()
+    }
+
+    async fn remember_agent_id(&self, agent_id: String) {
+        let mut known_agent_ids = self.known_agent_ids.lock().await;
+        if !known_agent_ids.contains(&agent_id) {
+            known_agent_ids.push(agent_id);
+            known_agent_ids.sort();
+        }
     }
 
     async fn loaded(&self) -> Vec<(String, Agent)> {
@@ -143,8 +152,11 @@ impl AgentRegistry {
         )
         .await;
         let agent_id = agent_id.to_string();
-        let mut agents = self.agents.lock().await;
-        agents.insert(agent_id.clone(), agent.clone());
+        self.agents
+            .lock()
+            .await
+            .insert(agent_id.clone(), agent.clone());
+        self.remember_agent_id(agent_id.clone()).await;
         (agent_id, agent)
     }
 
@@ -156,9 +168,10 @@ impl AgentRegistry {
             .map_err(|_| anyhow::anyhow!("invalid agent id: {agent_id}"))?;
         let canonical_agent_id = parsed.to_string();
         if !self
-            .known_agent_ids()
-            .iter()
-            .any(|known| known == &canonical_agent_id)
+            .known_agent_ids
+            .lock()
+            .await
+            .contains(&canonical_agent_id)
         {
             anyhow::bail!("unknown agent id: {agent_id}");
         }
@@ -194,7 +207,7 @@ async fn serve_connection(
     });
 
     let _ = outgoing_tx.send(ServerMessage::Ready {
-        agent_ids: agents.known_agent_ids(),
+        agent_ids: agents.known_agent_ids().await,
     });
 
     for (agent_id, agent) in agents.loaded().await {
@@ -215,7 +228,7 @@ async fn serve_connection(
                     agent_id: agent_id.clone(),
                 });
                 let _ = outgoing_tx.send(ServerMessage::Ready {
-                    agent_ids: agents.known_agent_ids(),
+                    agent_ids: agents.known_agent_ids().await,
                 });
                 if let Some(content) = content {
                     agent.send_user_message(text_content(&content));

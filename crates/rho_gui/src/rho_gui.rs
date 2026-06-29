@@ -967,6 +967,10 @@ impl RhoGui {
         cx: &mut Context<Self>,
     ) {
         self.agents.mark_live(agent_id.clone());
+        if self.agents.current_agent_id().is_none() {
+            self.agents.select(agent_id.clone());
+            self.show_agent_transcript(Some(agent_id.clone()), window, cx);
+        }
         if self.displayed_agent_id.as_deref() == Some(agent_id.as_str()) {
             let mut state = self
                 .rho_state
@@ -1881,9 +1885,6 @@ impl RhoGui {
         }
         if text == "/new" {
             self.clear_selected_agent(window, cx);
-            if let Some(agent) = &self.rho_agent {
-                agent.new_agent();
-            }
             return true;
         }
         if let Some(agent_id) = text.strip_prefix("/load ") {
