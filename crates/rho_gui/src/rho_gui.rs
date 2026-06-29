@@ -2925,6 +2925,7 @@ fn render_rho_banner_block(
     div()
         .block_mouse_except_scroll()
         .pl(cx.anchor_x)
+        .ml(px(6.))
         .h(px(64.))
         .flex()
         .items_center()
