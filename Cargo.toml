@@ -89,6 +89,7 @@ members = [
     "crates/syntax_theme",
     "crates/tau_factory",
     "crates/tau_gui",
+    "crates/rho_gui",
     "crates/tau_task",
     "crates/task",
     "crates/telemetry",
@@ -115,7 +116,7 @@ members = [
     "crates/ztracing",
     "crates/ztracing_macro",
 ]
-default-members = ["crates/tau_gui"]
+default-members = ["crates/rho_gui"]
 
 [workspace.package]
 publish = false
