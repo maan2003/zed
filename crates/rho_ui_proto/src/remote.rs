@@ -27,24 +27,12 @@ impl AgentRemoteEncoder {
     pub fn encode(&mut self, current: AgentState) -> AgentRemoteFrame {
         let current_sent = UiAgentState::from_agent_state(&current);
         let frame = match (&self.last_agent, &self.last_sent) {
-            (Some(previous_agent), Some(previous_sent)) => {
-                let keep_blocks = common_ui_block_prefix_len(previous_sent, &current_sent);
-                let blocks = current_sent.blocks[keep_blocks..]
-                    .iter()
-                    .cloned()
-                    .map(|block| UiBlockAppend::from_previous_pending(block, previous_sent))
-                    .collect();
-                AgentRemoteFrame::Diff {
-                    keep_blocks,
-                    blocks,
-                    status: (ui_status(&previous_agent.kind) != ui_status(&current.kind))
-                        .then(|| ui_status(&current.kind)),
-                    pending_response: diff_pending_response_kind(
-                        &previous_agent.kind,
-                        &current.kind,
-                    ),
-                }
-            }
+            (Some(previous_agent), Some(previous_sent)) => AgentRemoteFrame::Diff {
+                blocks: diff_blocks(previous_sent, &current_sent),
+                status: (ui_status(&previous_agent.kind) != ui_status(&current.kind))
+                    .then(|| ui_status(&current.kind)),
+                pending_response: diff_pending_response_kind(&previous_agent.kind, &current.kind),
+            },
             _ => AgentRemoteFrame::Snapshot(UiAgentState::from_agent_state(&current)),
         };
 
@@ -67,10 +55,7 @@ impl AgentRemoteEncoder {
 pub enum AgentRemoteFrame {
     Snapshot(UiAgentState),
     Diff {
-        /// Number of already-rendered blocks the receiver should keep before
-        /// appending `blocks`.
-        keep_blocks: usize,
-        blocks: Vec<UiBlockAppend>,
+        blocks: UiBlocksDiff,
         status: Option<UiAgentStatus>,
         pending_response: UiPendingResponseDiff,
     },
@@ -81,17 +66,11 @@ impl AgentRemoteFrame {
         match self {
             Self::Snapshot(snapshot) => *state = snapshot,
             Self::Diff {
-                keep_blocks,
                 blocks,
                 status,
                 pending_response,
             } => {
-                state.blocks.truncate(keep_blocks);
-                state.blocks.extend(
-                    blocks
-                        .into_iter()
-                        .filter_map(|block| block.into_block(&state.pending_response)),
-                );
+                blocks.apply_diff(&mut state.blocks, &state.pending_response);
                 if let Some(status) = status {
                     state.status = status;
                 }
@@ -131,6 +110,64 @@ pub enum UiBlock {
 pub enum UiBlockAppend {
     Block(UiBlock),
     Pending { index: usize },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, Pack, Unpack)]
+pub struct UiBlocksDiff {
+    pub updates: Vec<UiBlockUpdate>,
+    pub truncate_to: Option<usize>,
+    pub append: Vec<UiBlockAppend>,
+}
+
+impl UiBlocksDiff {
+    fn apply_diff(self, blocks: &mut Vec<UiBlock>, pending_response: &[UiStreamingItem]) {
+        for update in self.updates {
+            update.apply_diff(blocks);
+        }
+        if let Some(truncate_to) = self.truncate_to {
+            blocks.truncate(truncate_to);
+        }
+        blocks.extend(
+            self.append
+                .into_iter()
+                .filter_map(|block| block.into_block(pending_response)),
+        );
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, Pack, Unpack)]
+pub struct UiBlockUpdate {
+    pub index: usize,
+    pub block: UiBlockDiff,
+}
+
+impl UiBlockUpdate {
+    fn apply_diff(self, blocks: &mut [UiBlock]) {
+        if let Some(block) = blocks.get_mut(self.index) {
+            self.block.apply_diff(block);
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, Pack, Unpack)]
+pub enum UiBlockDiff {
+    Replace(UiBlock),
+    Tool(UiToolDiff),
+}
+
+impl UiBlockDiff {
+    fn apply_diff(self, block: &mut UiBlock) {
+        match self {
+            Self::Replace(replacement) => *block = replacement,
+            Self::Tool(diff) => {
+                if let UiBlock::Tool(tool) = block {
+                    diff.apply_diff(tool);
+                } else {
+                    *block = UiBlock::Tool(diff.into_tool());
+                }
+            }
+        }
+    }
 }
 
 impl UiBlockAppend {
@@ -324,6 +361,67 @@ pub struct UiTool {
     pub error: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, Pack, Unpack)]
+pub struct UiToolDiff {
+    pub id: String,
+    pub name: String,
+    pub arguments: Option<UiTextDiff>,
+    pub preview: Option<Option<String>>,
+    pub status: Option<UiToolStatus>,
+    pub output: Option<Option<String>>,
+    pub error: Option<Option<String>>,
+}
+
+impl UiToolDiff {
+    fn from_changed(previous: &UiTool, current: &UiTool) -> Self {
+        Self {
+            id: current.id.clone(),
+            name: current.name.clone(),
+            arguments: (previous.arguments != current.arguments)
+                .then(|| diff_text(&previous.arguments, &current.arguments)),
+            preview: (previous.preview != current.preview).then(|| current.preview.clone()),
+            status: (previous.status != current.status).then_some(current.status),
+            output: (previous.output != current.output).then(|| current.output.clone()),
+            error: (previous.error != current.error).then(|| current.error.clone()),
+        }
+    }
+
+    fn apply_diff(self, tool: &mut UiTool) {
+        tool.id = self.id;
+        tool.name = self.name;
+        if let Some(arguments) = self.arguments {
+            tool.arguments = arguments.apply_to(&tool.arguments);
+        }
+        if let Some(preview) = self.preview {
+            tool.preview = preview;
+        }
+        if let Some(status) = self.status {
+            tool.status = status;
+        }
+        if let Some(output) = self.output {
+            tool.output = output;
+        }
+        if let Some(error) = self.error {
+            tool.error = error;
+        }
+    }
+
+    fn into_tool(self) -> UiTool {
+        UiTool {
+            id: self.id,
+            name: self.name,
+            arguments: self
+                .arguments
+                .map(|arguments| arguments.apply_to(""))
+                .unwrap_or_default(),
+            preview: self.preview.flatten(),
+            status: self.status.unwrap_or(UiToolStatus::Running),
+            output: self.output.flatten(),
+            error: self.error.flatten(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode, Pack, Unpack)]
 pub enum UiToolStatus {
     Running,
@@ -342,13 +440,40 @@ impl From<ToolOutputStatus> for UiToolStatus {
     }
 }
 
-fn common_ui_block_prefix_len(previous: &UiAgentState, current: &UiAgentState) -> usize {
-    previous
-        .blocks
+fn diff_blocks(previous: &UiAgentState, current: &UiAgentState) -> UiBlocksDiff {
+    let common_len = previous.blocks.len().min(current.blocks.len());
+    let updates = previous.blocks[..common_len]
         .iter()
-        .zip(&current.blocks)
-        .take_while(|(previous, current)| previous == current)
-        .count()
+        .zip(&current.blocks[..common_len])
+        .enumerate()
+        .filter_map(|(index, (previous, current))| {
+            (previous != current).then(|| UiBlockUpdate {
+                index,
+                block: diff_block(previous, current),
+            })
+        })
+        .collect();
+    let append = current.blocks[common_len..]
+        .iter()
+        .cloned()
+        .map(|block| UiBlockAppend::from_previous_pending(block, previous))
+        .collect();
+    UiBlocksDiff {
+        updates,
+        truncate_to: (current.blocks.len() < previous.blocks.len()).then_some(current.blocks.len()),
+        append,
+    }
+}
+
+fn diff_block(previous: &UiBlock, current: &UiBlock) -> UiBlockDiff {
+    match (previous, current) {
+        (UiBlock::Tool(previous), UiBlock::Tool(current))
+            if previous.id == current.id && previous.name == current.name =>
+        {
+            UiBlockDiff::Tool(UiToolDiff::from_changed(previous, current))
+        }
+        _ => UiBlockDiff::Replace(current.clone()),
+    }
 }
 
 fn ui_blocks(blocks: &[Arc<ContextBlock>]) -> Vec<UiBlock> {
@@ -845,7 +970,14 @@ mod tests {
         else {
             panic!("second frame should be a diff");
         };
-        assert_eq!(blocks, &[UiBlockAppend::Pending { index: 0 }]);
+        assert_eq!(
+            blocks,
+            &UiBlocksDiff {
+                updates: Vec::new(),
+                truncate_to: None,
+                append: vec![UiBlockAppend::Pending { index: 0 }],
+            }
+        );
         assert_eq!(*status, Some(UiAgentStatus::Idle));
         assert_eq!(
             *pending_response,
@@ -880,6 +1012,40 @@ mod tests {
                 ..
             }) if name == "shell_command" && arguments.contains("printf hi") && output == "hi"
         ));
+    }
+
+    #[test]
+    fn tool_result_updates_existing_tool_block() {
+        let mut encoder = AgentRemoteEncoder::new();
+        let mut running = finished_tool_state();
+        running.blocks.pop();
+        let AgentRemoteFrame::Snapshot(mut receiver) = encoder.encode(running) else {
+            panic!("first frame should be a snapshot");
+        };
+
+        let frame = encoder.encode(finished_tool_state());
+        let AgentRemoteFrame::Diff { blocks, .. } = &frame else {
+            panic!("second frame should be a diff");
+        };
+        assert_eq!(blocks.append, Vec::new());
+        assert_eq!(blocks.truncate_to, None);
+        assert!(matches!(
+            blocks.updates.as_slice(),
+            [UiBlockUpdate {
+                index: 0,
+                block: UiBlockDiff::Tool(UiToolDiff {
+                    status: Some(UiToolStatus::Success),
+                    output: Some(Some(output)),
+                    ..
+                })
+            }] if output == "hi"
+        ));
+
+        frame.apply_diff(&mut receiver);
+        assert_eq!(
+            receiver,
+            UiAgentState::from_agent_state(&finished_tool_state())
+        );
     }
 
     #[test]
