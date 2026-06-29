@@ -640,7 +640,10 @@ impl SplitBufferHeadersElement {
                 }
                 Block::FoldedBuffer { first_excerpt, .. } => (first_excerpt, true),
                 // ExcerptBoundary is just a separator line, not a buffer header
-                Block::ExcerptBoundary { .. } | Block::Custom(_) | Block::Spacer { .. } => continue,
+                Block::ExcerptBoundary { .. }
+                | Block::Custom(_)
+                | Block::DisplayElision(_)
+                | Block::Spacer { .. } => continue,
             };
 
             let selected = selected_buffer_ids.contains(&excerpt.buffer_id());

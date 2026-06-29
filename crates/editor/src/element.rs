@@ -3280,6 +3280,27 @@ impl EditorElement {
                     .into_any()
             }
 
+            Block::DisplayElision(elision) => {
+                x_position = Some((text_x, text_x + text_hitbox.size.width.max(*scroll_width)));
+                div()
+                    .size_full()
+                    .child(elision.render(&mut BlockContext {
+                        window,
+                        app: cx,
+                        anchor_x: text_x,
+                        margins: editor_margins,
+                        line_height,
+                        em_width,
+                        block_id,
+                        height: elision.height.unwrap_or(1),
+                        selected: false,
+                        max_width: text_hitbox.size.width.max(*scroll_width),
+                        editor_style: &self.style,
+                        indent_guide_padding: px(0.0),
+                    }))
+                    .into_any()
+            }
+
             Block::FoldedBuffer {
                 first_excerpt,
                 height,

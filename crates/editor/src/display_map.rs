@@ -82,7 +82,8 @@ pub use crate::display_map::{fold_map::FoldMap, inlay_map::InlayMap, tab_map::Ta
 pub use block_map::{
     Block, BlockChunks as DisplayChunks, BlockContext, BlockId, BlockMap, BlockPlacement,
     BlockPoint, BlockProperties, BlockRows, BlockStyle, CompanionView, CompanionViewMut,
-    CustomBlockId, EditorMargins, RenderBlock, StickyHeaderExcerpt,
+    CustomBlockId, DisplayElisionId, DisplayElisionProperties, EditorMargins, RenderBlock,
+    StickyHeaderExcerpt,
 };
 pub use crease_map::*;
 pub use fold_map::{
@@ -1080,6 +1081,52 @@ impl DisplayMap {
                         companion_view,
                     )
                     .remove(ids);
+            },
+        )
+    }
+
+    #[instrument(skip_all)]
+    pub fn insert_display_elisions(
+        &mut self,
+        elisions: impl IntoIterator<Item = DisplayElisionProperties<Anchor>>,
+        cx: &mut Context<Self>,
+    ) -> Vec<DisplayElisionId> {
+        let (self_wrap_snapshot, self_wrap_edits) = self.sync_through_wrap(cx);
+        Self::with_synced_companion_mut(
+            self.entity_id,
+            &self.companion,
+            cx,
+            |companion_view, _cx| {
+                self.block_map
+                    .write(
+                        self_wrap_snapshot.clone(),
+                        self_wrap_edits.clone(),
+                        companion_view,
+                    )
+                    .insert_elisions(elisions)
+            },
+        )
+    }
+
+    #[instrument(skip_all)]
+    pub fn remove_display_elisions(
+        &mut self,
+        ids: HashSet<DisplayElisionId>,
+        cx: &mut Context<Self>,
+    ) {
+        let (self_wrap_snapshot, self_wrap_edits) = self.sync_through_wrap(cx);
+        Self::with_synced_companion_mut(
+            self.entity_id,
+            &self.companion,
+            cx,
+            |companion_view, _cx| {
+                self.block_map
+                    .write(
+                        self_wrap_snapshot.clone(),
+                        self_wrap_edits.clone(),
+                        companion_view,
+                    )
+                    .remove_elisions(ids);
             },
         )
     }

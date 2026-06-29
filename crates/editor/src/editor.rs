@@ -82,8 +82,8 @@ pub(crate) use completions::split_words;
 use diagnostics::{ActiveDiagnostic, GlobalDiagnosticRenderer, InlineDiagnostic};
 pub use diagnostics::{DiagnosticRenderer, set_diagnostic_renderer};
 pub use display_map::{
-    ChunkRenderer, ChunkRendererContext, DisplayPoint, FoldPlaceholder, HighlightKey,
-    NavigationOverlayKey, SemanticTokenHighlight,
+    ChunkRenderer, ChunkRendererContext, DisplayElisionId, DisplayElisionProperties, DisplayPoint,
+    FoldPlaceholder, HighlightKey, NavigationOverlayKey, SemanticTokenHighlight,
 };
 pub use edit_prediction::make_suggestion_styles;
 
@@ -8363,6 +8363,37 @@ impl Editor {
         }
         cx.notify();
         blocks
+    }
+
+    pub fn insert_display_elisions(
+        &mut self,
+        elisions: impl IntoIterator<Item = DisplayElisionProperties<Anchor>>,
+        autoscroll: Option<Autoscroll>,
+        cx: &mut Context<Self>,
+    ) -> Vec<DisplayElisionId> {
+        let elisions = self.display_map.update(cx, |display_map, cx| {
+            display_map.insert_display_elisions(elisions, cx)
+        });
+        if let Some(autoscroll) = autoscroll {
+            self.request_autoscroll(autoscroll, cx);
+        }
+        cx.notify();
+        elisions
+    }
+
+    pub fn remove_display_elisions(
+        &mut self,
+        ids: HashSet<DisplayElisionId>,
+        autoscroll: Option<Autoscroll>,
+        cx: &mut Context<Self>,
+    ) {
+        self.display_map.update(cx, |display_map, cx| {
+            display_map.remove_display_elisions(ids, cx)
+        });
+        if let Some(autoscroll) = autoscroll {
+            self.request_autoscroll(autoscroll, cx);
+        }
+        cx.notify();
     }
 
     pub fn resize_blocks(
