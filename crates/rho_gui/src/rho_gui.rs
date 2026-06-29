@@ -343,6 +343,8 @@ struct TauGui {
     rx: mpsc::Receiver<SocketEvent>,
     rho_agent: Option<RhoAgentClient>,
     rho_rx: mpsc::Receiver<RhoEvent>,
+    rho_rendered_blocks: usize,
+    rho_pending_inserted: Option<InsertedTranscript>,
     _poll_task: Task<()>,
     _subscriptions: Vec<Subscription>,
     project_root: PathBuf,
@@ -413,6 +415,8 @@ impl TauGui {
             rx,
             rho_agent: None,
             rho_rx,
+            rho_rendered_blocks: 0,
+            rho_pending_inserted: None,
             _poll_task: poll_task,
             _subscriptions: ui_subscriptions,
             project_root: attach_target.project_root,
@@ -859,6 +863,8 @@ impl TauGui {
         match event {
             RhoEvent::Connected(agent) => {
                 self.rho_agent = Some(agent);
+                self.rho_rendered_blocks = 0;
+                self.rho_pending_inserted = None;
                 self.current_role = Some("rho".to_owned());
                 self.current_model = None;
                 self.agents.select("agent".to_owned());
@@ -888,13 +894,55 @@ impl TauGui {
     }
 
     fn render_rho_state(&mut self, state: &RhoUiAgentState, cx: &mut Context<Self>) {
-        let spans = render_rho_transcript_spans(state, &self.cli_theme, cx);
-        self.transcript.replace_spans(spans, cx);
+        if state.blocks.len() < self.rho_rendered_blocks {
+            let spans = render_rho_transcript_spans(state, &self.cli_theme, cx);
+            self.transcript.replace_spans(spans, cx);
+            self.rho_rendered_blocks = state.blocks.len();
+            self.rho_pending_inserted = None;
+            self.current_context_percent = None;
+            self.current_context_input_tokens = None;
+            self.current_context_window = None;
+            self.update_status_line(cx);
+            cx.notify();
+            return;
+        }
+
+        self.remove_rho_pending(cx);
+        let new_blocks = &state.blocks[self.rho_rendered_blocks..];
+        for block in new_blocks {
+            let spans = render_rho_block_spans(block, &self.cli_theme, cx);
+            self.insert_rho_spans(spans, cx);
+        }
+        self.rho_rendered_blocks = state.blocks.len();
+
+        let pending_spans = render_rho_pending_spans(&state.pending_response, &self.cli_theme, cx);
+        if !pending_spans.is_empty() {
+            self.rho_pending_inserted = self.insert_rho_spans(pending_spans, cx);
+        }
+
         self.current_context_percent = None;
         self.current_context_input_tokens = None;
         self.current_context_window = None;
         self.update_status_line(cx);
         cx.notify();
+    }
+
+    fn remove_rho_pending(&mut self, cx: &mut Context<Self>) {
+        if let Some(inserted) = self.rho_pending_inserted.take() {
+            self.remove_transcript_highlights(inserted.highlight_keys);
+            self.remove_transcript_range(inserted.range, cx);
+        }
+    }
+
+    fn insert_rho_spans(
+        &mut self,
+        spans: Vec<(String, HighlightStyle)>,
+        cx: &mut Context<Self>,
+    ) -> Option<InsertedTranscript> {
+        self.insert_before_draft_spans(
+            spans.iter().map(|(text, style)| (text.as_str(), *style)),
+            cx,
+        )
     }
 
     fn handle_message(
@@ -2863,6 +2911,28 @@ fn render_rho_transcript_spans(
         push_rho_block_spans(&mut spans, theme, block, cx);
     }
     for item in &state.pending_response {
+        push_rho_pending_item_spans(&mut spans, theme, item, cx);
+    }
+    spans
+}
+
+fn render_rho_block_spans(
+    block: &RhoUiBlock,
+    theme: &tau_themes::Theme,
+    cx: &App,
+) -> Vec<(String, HighlightStyle)> {
+    let mut spans = Vec::new();
+    push_rho_block_spans(&mut spans, theme, block, cx);
+    spans
+}
+
+fn render_rho_pending_spans(
+    pending_response: &[RhoUiStreamingItem],
+    theme: &tau_themes::Theme,
+    cx: &App,
+) -> Vec<(String, HighlightStyle)> {
+    let mut spans = Vec::new();
+    for item in pending_response {
         push_rho_pending_item_spans(&mut spans, theme, item, cx);
     }
     spans
