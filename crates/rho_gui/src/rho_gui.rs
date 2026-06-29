@@ -23,7 +23,8 @@ use project::InlayId;
 use rho_ui_proto::client::AgentClient as RhoAgentClient;
 use rho_ui_proto::remote::{
     AgentRemoteFrame as RhoAgentRemoteFrame, UiAgentState as RhoUiAgentState,
-    UiBlock as RhoUiBlock, UiStreamingItem as RhoUiStreamingItem, UiToolStatus as RhoUiToolStatus,
+    UiBlock as RhoUiBlock, UiStreamingItem as RhoUiStreamingItem, UiTool as RhoUiTool,
+    UiToolStatus as RhoUiToolStatus,
 };
 use settings::SettingsStore;
 use tau_proto::{
@@ -2976,20 +2977,7 @@ fn push_rho_block_spans(
             push_rho_styled_line(spans, text, TranscriptStyle::AgentResponse, theme, cx)
         }
         RhoUiBlock::Reasoning { .. } => {}
-        RhoUiBlock::ToolCall {
-            id,
-            name,
-            arguments,
-            status,
-        } => push_rho_tool_spans(
-            spans,
-            theme,
-            id,
-            name,
-            rho_tool_status_label(status),
-            arguments,
-            cx,
-        ),
+        RhoUiBlock::Tool(tool) => push_rho_tool_spans(spans, theme, tool, cx),
         RhoUiBlock::Notice { text } => {
             push_rho_styled_line(spans, text, TranscriptStyle::SystemInfo, theme, cx)
         }
@@ -3014,19 +3002,7 @@ fn push_rho_pending_item_spans(
             spans.push(("\n".to_owned(), HighlightStyle::default()));
         }
         RhoUiStreamingItem::Reasoning { .. } => {}
-        RhoUiStreamingItem::ToolCall {
-            id,
-            name,
-            arguments,
-        } => push_rho_tool_spans(
-            spans,
-            theme,
-            id,
-            name,
-            tau_proto::PROGRESS_INDICATOR_TEXT,
-            arguments,
-            cx,
-        ),
+        RhoUiStreamingItem::Tool(tool) => push_rho_tool_spans(spans, theme, tool, cx),
         RhoUiStreamingItem::Notice { text } => {
             push_rho_styled_line(spans, text, TranscriptStyle::SystemInfo, theme, cx)
         }
@@ -3070,23 +3046,27 @@ fn highlight_style_for_theme(
 fn push_rho_tool_spans(
     spans: &mut Vec<(String, HighlightStyle)>,
     theme: &tau_themes::Theme,
-    id: &str,
-    name: &str,
-    status: &str,
-    arguments: &str,
+    tool: &RhoUiTool,
     cx: &App,
 ) {
+    let status = rho_tool_status_label(&tool.status);
     let display = tool_render::ToolCallDisplay {
-        tool_name: name.to_owned(),
+        tool_name: tool.name.clone(),
         mode: String::new(),
-        args: arguments.to_owned(),
-        range: (!id.is_empty()).then(|| id.to_owned()),
+        args: tool.arguments.clone(),
+        range: (!tool.id.is_empty()).then(|| tool.id.clone()),
         suffixes: vec![tool_render::ToolSuffixSegment {
             text: status.to_owned(),
             status: rho_tool_status_style(status),
             no_leading_space: false,
         }],
-        payload: None,
+        payload: tool
+            .preview
+            .as_deref()
+            .or(tool.output.as_deref())
+            .map(|text| tau_proto::ToolUsePayload::Text {
+                text: text.to_owned(),
+            }),
     };
     let block = tool_render::render_tool_block(theme, &display);
     spans.extend(
