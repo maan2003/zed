@@ -883,11 +883,6 @@ impl RhoGui {
                 self.current_role = Some("rho".to_owned());
                 self.current_model = None;
                 self.agents.select("agent".to_owned());
-                self.insert_before_draft_styled(
-                    "[connected to rho daemon]\n",
-                    TranscriptStyle::SystemInfo,
-                    cx,
-                );
                 self.update_status_line(cx);
             }
             RhoEvent::State(state) => self.render_rho_state(&state, cx),
