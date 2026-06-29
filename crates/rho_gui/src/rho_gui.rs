@@ -65,7 +65,7 @@ use transcript::buffer_range_starts_with;
 use transcript::{InsertedTranscript, Transcript};
 
 actions!(
-    tau_gui,
+    rho_gui,
     [
         SubmitPrompt,
         AgentPrevious,

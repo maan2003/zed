@@ -1226,11 +1226,19 @@
     },
   },
   {
-    "context": "TauGui > Editor",
+    "context": "RhoGui > Editor && vim_mode == insert && !showing_completions",
     "use_key_equivalents": true,
     "bindings": {
-      "ctrl-k": "tau_gui::AgentPrevious",
-      "ctrl-j": "tau_gui::AgentNext",
+      "shift-enter": "editor::Newline",
+      "enter": "rho_gui::SubmitPrompt",
+    },
+  },
+  {
+    "context": "RhoGui > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-k": "rho_gui::AgentPrevious",
+      "ctrl-j": "rho_gui::AgentNext",
     },
   },
 ]
