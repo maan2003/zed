@@ -2921,6 +2921,7 @@ fn render_rho_banner_block(
     cx: &mut BlockContext<'_, '_>,
 ) -> impl IntoElement {
     let colors = cx.theme().colors();
+    let text_style = cx.editor_style.text.clone();
     div()
         .block_mouse_except_scroll()
         .pl(cx.anchor_x)
@@ -2939,35 +2940,30 @@ fn render_rho_banner_block(
                 .flex()
                 .flex_col()
                 .gap(px(4.))
+                .font_family(text_style.font_family.clone())
+                .text_size(text_style.font_size)
+                .line_height(text_style.line_height)
+                .text_color(text_style.color)
                 .child(
                     div()
                         .flex()
                         .items_baseline()
                         .gap(px(8.))
+                        .child(div().font_weight(FontWeight::BOLD).child("rho"))
                         .child(
                             div()
-                                .text_size(px(26.))
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(colors.text)
-                                .child("rho"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(14.))
-                                .text_color(colors.text_muted)
+                                .text_color(text_style.color.opacity(0.7))
                                 .child(version.trim_start_matches("rho").to_owned()),
                         )
                         .child(
                             div()
-                                .text_size(px(12.))
-                                .text_color(colors.text_disabled)
+                                .text_color(text_style.color.opacity(0.5))
                                 .child(build.to_owned()),
                         ),
                 )
                 .child(
                     div()
-                        .text_size(px(13.))
-                        .text_color(colors.text_muted)
+                        .text_color(text_style.color.opacity(0.7))
                         .child(pun.to_owned()),
                 ),
         )
