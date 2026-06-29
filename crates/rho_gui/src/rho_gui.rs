@@ -1230,14 +1230,11 @@ impl RhoGui {
             ranges.push(previous);
         }
 
-        if state
-            .pending_response
-            .iter()
-            .any(rho_pending_item_is_working)
+        if !state.pending_response.is_empty()
             && state
                 .pending_response
                 .iter()
-                .all(|item| !matches!(item, RhoUiStreamingItem::AssistantMessage { phase, .. } if *phase == Some(RhoUiMessagePhase::FinalAnswer)))
+                .all(rho_pending_item_is_working)
             && let Some(inserted) = &self.rho_pending_inserted
         {
             let tool_count = rho_active_turn_tool_count(state)
