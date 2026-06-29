@@ -1132,6 +1132,29 @@ impl DisplayMap {
     }
 
     #[instrument(skip_all)]
+    pub fn update_display_elisions(
+        &mut self,
+        elisions: impl IntoIterator<Item = (DisplayElisionId, DisplayElisionProperties<Anchor>)>,
+        cx: &mut Context<Self>,
+    ) {
+        let (self_wrap_snapshot, self_wrap_edits) = self.sync_through_wrap(cx);
+        Self::with_synced_companion_mut(
+            self.entity_id,
+            &self.companion,
+            cx,
+            |companion_view, _cx| {
+                self.block_map
+                    .write(
+                        self_wrap_snapshot.clone(),
+                        self_wrap_edits.clone(),
+                        companion_view,
+                    )
+                    .update_elisions(elisions);
+            },
+        )
+    }
+
+    #[instrument(skip_all)]
     pub fn row_for_block(
         &mut self,
         block_id: CustomBlockId,

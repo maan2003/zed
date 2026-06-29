@@ -330,7 +330,7 @@ struct AgentUiState {
     rho_state: Option<RhoUiAgentState>,
     rho_inserted_blocks: Vec<Option<InsertedTranscript>>,
     rho_pending_inserted: Option<InsertedTranscript>,
-    rho_working_elisions: Vec<DisplayElisionId>,
+    rho_working_elisions: Vec<RhoWorkingElision>,
 }
 
 struct RhoGui {
@@ -347,7 +347,7 @@ struct RhoGui {
     rho_state: Option<RhoUiAgentState>,
     rho_inserted_blocks: Vec<Option<InsertedTranscript>>,
     rho_pending_inserted: Option<InsertedTranscript>,
-    rho_working_elisions: Vec<DisplayElisionId>,
+    rho_working_elisions: Vec<RhoWorkingElision>,
     _poll_task: Task<()>,
     _subscriptions: Vec<Subscription>,
     project_root: PathBuf,
@@ -373,6 +373,18 @@ struct RhoGui {
     displayed_agent_id: Option<String>,
     no_agent_ui_state: Option<AgentUiState>,
     agent_ui_states: HashMap<String, AgentUiState>,
+}
+
+#[derive(Clone)]
+struct RhoWorkingElision {
+    id: DisplayElisionId,
+    range: std::ops::Range<text::Anchor>,
+    tool_count: usize,
+}
+
+struct RhoWorkingElisionCandidate {
+    range: std::ops::Range<text::Anchor>,
+    tool_count: usize,
 }
 
 impl RhoGui {
@@ -1015,7 +1027,6 @@ impl RhoGui {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.clear_rho_working_elisions(cx);
         self.remove_rho_pending(cx);
 
         let first_changed = self
@@ -1103,6 +1114,7 @@ impl RhoGui {
 
         let ids = std::mem::take(&mut self.rho_working_elisions)
             .into_iter()
+            .map(|elision| elision.id)
             .collect::<rustc_hash::FxHashSet<_>>();
         self.editor.update(cx, |editor, cx| {
             editor.remove_display_elisions(ids, None, cx);
@@ -1110,21 +1122,72 @@ impl RhoGui {
     }
 
     fn elide_rho_working_blocks(&mut self, state: &RhoUiAgentState, cx: &mut Context<Self>) {
-        let elisions = self.rho_working_elision_properties(state, cx);
-        if elisions.is_empty() {
+        let candidates = self.rho_working_elision_candidates(state);
+        if candidates.is_empty() {
+            self.clear_rho_working_elisions(cx);
             return;
         }
 
-        self.rho_working_elisions = self.editor.update(cx, |editor, cx| {
-            editor.insert_display_elisions(elisions, None, cx)
+        let retained_count = self.rho_working_elisions.len().min(candidates.len());
+        let removed_ids = self.rho_working_elisions[retained_count..]
+            .iter()
+            .map(|elision| elision.id)
+            .collect::<rustc_hash::FxHashSet<_>>();
+        let updates = self.rho_working_elisions[..retained_count]
+            .iter()
+            .zip(&candidates[..retained_count])
+            .filter_map(|(elision, candidate)| {
+                self.rho_working_elision_properties(
+                    candidate.range.clone(),
+                    candidate.tool_count,
+                    cx,
+                )
+                .map(|properties| (elision.id, properties))
+            })
+            .collect::<Vec<_>>();
+        let inserted_properties = candidates[retained_count..]
+            .iter()
+            .filter_map(|candidate| {
+                self.rho_working_elision_properties(
+                    candidate.range.clone(),
+                    candidate.tool_count,
+                    cx,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let inserted_ids = self.editor.update(cx, |editor, cx| {
+            if !removed_ids.is_empty() {
+                editor.remove_display_elisions(removed_ids, None, cx);
+            }
+            if !updates.is_empty() {
+                editor.update_display_elisions(updates, None, cx);
+            }
+            editor.insert_display_elisions(inserted_properties, None, cx)
         });
+
+        let mut elisions = self.rho_working_elisions[..retained_count].to_vec();
+        for (elision, candidate) in elisions.iter_mut().zip(&candidates[..retained_count]) {
+            elision.range = candidate.range.clone();
+            elision.tool_count = candidate.tool_count;
+        }
+        elisions.extend(
+            inserted_ids
+                .into_iter()
+                .zip(candidates[retained_count..].iter())
+                .map(|(id, candidate)| RhoWorkingElision {
+                    id,
+                    range: candidate.range.clone(),
+                    tool_count: candidate.tool_count,
+                }),
+        );
+        self.rho_working_elisions = elisions;
     }
 
-    fn rho_working_elision_properties(
+    fn rho_working_elision_candidates(
         &self,
         state: &RhoUiAgentState,
-        cx: &Context<Self>,
-    ) -> Vec<DisplayElisionProperties<multi_buffer::Anchor>> {
+    ) -> Vec<RhoWorkingElisionCandidate> {
         let mut ranges = Vec::new();
         let mut current: Option<(std::ops::Range<text::Anchor>, usize)> = None;
 
@@ -1186,23 +1249,30 @@ impl RhoGui {
 
         ranges
             .into_iter()
-            .filter_map(|(range, tool_count)| {
-                let label = rho_working_elision_label(tool_count);
-                self.transcript
-                    .multibuffer_range(range, cx)
-                    .map(|range| DisplayElisionProperties {
-                        range,
-                        tail_rows: 5,
-                        height: Some(1),
-                        style: BlockStyle::Flex,
-                        render: Arc::new(move |cx| {
-                            render_rho_working_elision_block(&label, cx).into_any_element()
-                        }),
-                        priority: 0,
-                        type_tag: None,
-                    })
-            })
+            .map(|(range, tool_count)| RhoWorkingElisionCandidate { range, tool_count })
             .collect()
+    }
+
+    fn rho_working_elision_properties(
+        &self,
+        range: std::ops::Range<text::Anchor>,
+        tool_count: usize,
+        cx: &Context<Self>,
+    ) -> Option<DisplayElisionProperties<multi_buffer::Anchor>> {
+        let label = rho_working_elision_label(tool_count);
+        self.transcript
+            .multibuffer_range(range, cx)
+            .map(|range| DisplayElisionProperties {
+                range,
+                tail_rows: 5,
+                height: Some(1),
+                style: BlockStyle::Flex,
+                render: Arc::new(move |cx| {
+                    render_rho_working_elision_block(&label, cx).into_any_element()
+                }),
+                priority: 0,
+                type_tag: None,
+            })
     }
 
     fn handle_message(

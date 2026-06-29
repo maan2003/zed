@@ -8396,6 +8396,21 @@ impl Editor {
         cx.notify();
     }
 
+    pub fn update_display_elisions(
+        &mut self,
+        elisions: impl IntoIterator<Item = (DisplayElisionId, DisplayElisionProperties<Anchor>)>,
+        autoscroll: Option<Autoscroll>,
+        cx: &mut Context<Self>,
+    ) {
+        self.display_map.update(cx, |display_map, cx| {
+            display_map.update_display_elisions(elisions, cx)
+        });
+        if let Some(autoscroll) = autoscroll {
+            self.request_autoscroll(autoscroll, cx);
+        }
+        cx.notify();
+    }
+
     pub fn resize_blocks(
         &mut self,
         heights: HashMap<CustomBlockId, u32>,

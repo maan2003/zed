@@ -1928,6 +1928,35 @@ impl BlockMapWriter<'_> {
         }]));
     }
 
+    pub fn update_elisions(
+        &mut self,
+        elisions: impl IntoIterator<Item = (DisplayElisionId, DisplayElisionProperties<Anchor>)>,
+    ) {
+        for (id, properties) in elisions {
+            if let Some(elision) = self
+                .block_map
+                .display_elisions
+                .iter_mut()
+                .find(|elision| elision.id == id)
+            {
+                *elision = Arc::new(DisplayElision {
+                    id,
+                    range: properties.range,
+                    tail_rows: properties.tail_rows,
+                    height: properties.height,
+                    style: properties.style,
+                    render: Arc::new(Mutex::new(properties.render)),
+                    priority: properties.priority,
+                    type_tag: properties.type_tag,
+                });
+            }
+        }
+        self.block_map.deferred_edits.set(Patch::new(vec![Edit {
+            old: WrapRow(0)..self.block_map.wrap_snapshot.borrow().max_point().row() + WrapRow(1),
+            new: WrapRow(0)..self.block_map.wrap_snapshot.borrow().max_point().row() + WrapRow(1),
+        }]));
+    }
+
     #[ztracing::instrument(skip_all)]
     pub fn insert(
         &mut self,
