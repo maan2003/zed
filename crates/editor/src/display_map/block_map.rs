@@ -1135,21 +1135,25 @@ impl BlockMap {
             blocks_in_edit.extend(self.display_elisions.iter().filter_map(|elision| {
                 let buffer = wrap_snapshot.buffer_snapshot();
                 let mut start = elision.range.start.to_point(buffer);
-                let mut end = elision.range.end.to_point(buffer);
+                let end = elision.range.end.to_point(buffer);
                 if start >= end || elision.tail_rows == 0 {
                     return None;
                 }
 
                 start.column = 0;
                 let start_wrap_row = wrap_snapshot.make_wrap_point(start, Bias::Left).row();
-                end.column = buffer.line_len(MultiBufferRow(end.row));
-                let end_wrap_row = wrap_snapshot.make_wrap_point(end, Bias::Right).row();
-                let total_rows = end_wrap_row.0.saturating_sub(start_wrap_row.0) + 1;
+                let end_wrap_point = wrap_snapshot.make_wrap_point(end, Bias::Left);
+                let end_wrap_row = if end_wrap_point.column() > 0 || end_wrap_point == max_point {
+                    end_wrap_point.row() + WrapRow(1)
+                } else {
+                    end_wrap_point.row()
+                };
+                let total_rows = end_wrap_row.0.saturating_sub(start_wrap_row.0);
                 if total_rows <= elision.tail_rows {
                     return None;
                 }
 
-                let replace_end = WrapRow(end_wrap_row.0 - elision.tail_rows);
+                let replace_end = WrapRow(end_wrap_row.0 - elision.tail_rows - 1);
                 if replace_end < new_start || start_wrap_row >= new_end {
                     return None;
                 }
