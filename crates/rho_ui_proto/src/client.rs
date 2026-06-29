@@ -4,7 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::Stream;
 use rho_core::ContentPart;
+use std::collections::HashMap;
 use tokio::net::UnixStream;
+
 use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::remote::{AgentRemoteFrame, UiAgentState, UiBlock};
@@ -68,8 +70,8 @@ impl Client {
 #[derive(Clone)]
 pub struct AgentClient {
     commands: mpsc::UnboundedSender<ClientMessage>,
-    state: watch::Receiver<UiAgentState>,
-    frames: broadcast::Sender<AgentRemoteFrame>,
+    state: watch::Receiver<HashMap<String, UiAgentState>>,
+    frames: broadcast::Sender<(String, AgentRemoteFrame)>,
     counters: IoCounters,
 }
 
@@ -94,7 +96,7 @@ impl AgentClient {
                 &ClientMessage::Subscribe,
             );
         }
-        let ServerMessage::Agent(frame) =
+        let ServerMessage::Agent { agent_id, frame } =
             read_frame_counted(&mut stream, Some(&client_counters)).await?
         else {
             anyhow::bail!("rho daemon did not send initial agent state");
@@ -102,7 +104,10 @@ impl AgentClient {
         if let Some(logger) = &logger {
             logger.log(
                 ProtocolLogDirection::ServerToClient,
-                &ServerMessage::Agent(frame.clone()),
+                &ServerMessage::Agent {
+                    agent_id: agent_id.clone(),
+                    frame: frame.clone(),
+                },
             );
         }
         let crate::remote::AgentRemoteFrame::Snapshot(initial_state) = frame else {
@@ -110,8 +115,10 @@ impl AgentClient {
         };
 
         let (reader, writer) = stream.into_split();
-        let (state_tx, state_rx) = watch::channel(initial_state);
-        let (frame_tx, _) = broadcast::channel::<AgentRemoteFrame>(256);
+        let mut initial_states = HashMap::new();
+        initial_states.insert(agent_id, initial_state);
+        let (state_tx, state_rx) = watch::channel(initial_states);
+        let (frame_tx, _) = broadcast::channel::<(String, AgentRemoteFrame)>(256);
         let (command_tx, mut command_rx) = mpsc::unbounded_channel::<ClientMessage>();
 
         let reader_counters = client_counters.clone();
@@ -134,9 +141,10 @@ impl AgentClient {
                     logger.log(ProtocolLogDirection::ServerToClient, &message);
                 }
                 match message {
-                    ServerMessage::Agent(frame) => {
-                        let _ = reader_frame_tx.send(frame.clone());
-                        frame.apply_diff(&mut state);
+                    ServerMessage::Agent { agent_id, frame } => {
+                        let _ = reader_frame_tx.send((agent_id.clone(), frame.clone()));
+                        let agent_state = state.entry(agent_id).or_insert_with(empty_agent_state);
+                        frame.apply_diff(agent_state);
                         if state_tx.send(state.clone()).is_err() {
                             break;
                         }
@@ -144,7 +152,9 @@ impl AgentClient {
                     ServerMessage::Error { message } => {
                         eprintln!("rho daemon error: {message}")
                     }
-                    ServerMessage::Pong | ServerMessage::TurnCancelled => {}
+                    ServerMessage::AgentCreated { .. }
+                    | ServerMessage::Pong
+                    | ServerMessage::TurnCancelled { .. } => {}
                 }
             }
         });
@@ -179,24 +189,46 @@ impl AgentClient {
     }
 
     pub fn blocks(&self) -> Vec<UiBlock> {
-        self.state.borrow().blocks.clone()
+        self.state().map(|state| state.blocks).unwrap_or_default()
     }
 
-    pub fn state(&self) -> UiAgentState {
+    pub fn state(&self) -> Option<UiAgentState> {
+        self.states()
+            .into_iter()
+            .min_by(|(left, _), (right, _)| left.cmp(right))
+            .map(|(_, state)| state)
+    }
+
+    pub fn state_for_agent(&self, agent_id: &str) -> Option<UiAgentState> {
+        self.state.borrow().get(agent_id).cloned()
+    }
+
+    pub fn states(&self) -> HashMap<String, UiAgentState> {
         self.state.borrow().clone()
     }
 
-    pub fn send_user_message(&self, text: String) {
+    pub fn agent_ids(&self) -> Vec<String> {
+        let mut agent_ids = self.state.borrow().keys().cloned().collect::<Vec<_>>();
+        agent_ids.sort();
+        agent_ids
+    }
+
+    pub fn create_agent(&self, agent_id: String) {
+        let _ = self.commands.send(ClientMessage::CreateAgent { agent_id });
+    }
+
+    pub fn send_user_message(&self, agent_id: String, text: String) {
         let _ = self.commands.send(ClientMessage::SendUserMessage {
+            agent_id,
             content: vec![ContentPart::Text { text }],
         });
     }
 
-    pub fn cancel(&self) {
-        let _ = self.commands.send(ClientMessage::CancelTurn);
+    pub fn cancel(&self, agent_id: String) {
+        let _ = self.commands.send(ClientMessage::CancelTurn { agent_id });
     }
 
-    pub fn subscribe(&self) -> impl Stream<Item = UiAgentState> + use<> {
+    pub fn subscribe(&self) -> impl Stream<Item = HashMap<String, UiAgentState>> + use<> {
         let mut state = self.state.clone();
         async_stream::stream! {
             while state.changed().await.is_ok() {
@@ -206,7 +238,7 @@ impl AgentClient {
         }
     }
 
-    pub fn subscribe_frames(&self) -> impl Stream<Item = AgentRemoteFrame> + use<> {
+    pub fn subscribe_frames(&self) -> impl Stream<Item = (String, AgentRemoteFrame)> + use<> {
         let mut frames = self.frames.subscribe();
         async_stream::stream! {
             loop {
@@ -217,6 +249,14 @@ impl AgentClient {
                 }
             }
         }
+    }
+}
+
+fn empty_agent_state() -> UiAgentState {
+    UiAgentState {
+        blocks: Vec::new(),
+        status: crate::remote::UiAgentStatus::Idle,
+        pending_response: Vec::new(),
     }
 }
 

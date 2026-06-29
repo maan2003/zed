@@ -62,17 +62,35 @@ pub struct IoStats {
 pub enum ClientMessage {
     Ping,
     Subscribe,
-    SendUserMessage { content: Vec<ContentPart> },
-    CancelTurn,
+    CreateAgent {
+        agent_id: String,
+    },
+    SendUserMessage {
+        agent_id: String,
+        content: Vec<ContentPart>,
+    },
+    CancelTurn {
+        agent_id: String,
+    },
 }
 
 /// Message sent from the rho daemon to a UI client.
 #[derive(Clone, Debug, PartialEq, Encode, Decode, Pack, Unpack)]
 pub enum ServerMessage {
     Pong,
-    Error { message: String },
-    Agent(remote::AgentRemoteFrame),
-    TurnCancelled,
+    Error {
+        message: String,
+    },
+    Agent {
+        agent_id: String,
+        frame: remote::AgentRemoteFrame,
+    },
+    AgentCreated {
+        agent_id: String,
+    },
+    TurnCancelled {
+        agent_id: String,
+    },
 }
 
 /// Encode and write one length-prefixed senax frame.

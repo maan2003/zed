@@ -1159,8 +1159,12 @@ mod tests {
         let mut encoder = AgentRemoteEncoder::new();
         let _ = encoder.encode(streaming_state("hel"));
         let frame = encoder.encode(streaming_state("hello"));
-        let bytes = crate::protocol_frame_bytes(&crate::ServerMessage::Agent(frame)).unwrap();
-        assert!(bytes.len() < 40, "tiny frame was {} bytes", bytes.len());
+        let bytes = crate::protocol_frame_bytes(&crate::ServerMessage::Agent {
+            agent_id: "agent-1".to_owned(),
+            frame,
+        })
+        .unwrap();
+        assert!(bytes.len() < 56, "tiny frame was {} bytes", bytes.len());
     }
 
     #[test]
@@ -1195,10 +1199,13 @@ mod tests {
             UiPendingResponseDiff::Replace(Vec::new())
         );
 
-        let bytes =
-            crate::protocol_frame_bytes(&crate::ServerMessage::Agent(frame.clone())).unwrap();
+        let bytes = crate::protocol_frame_bytes(&crate::ServerMessage::Agent {
+            agent_id: "agent-1".to_owned(),
+            frame: frame.clone(),
+        })
+        .unwrap();
         assert!(
-            bytes.len() < 20,
+            bytes.len() < 36,
             "finish frame resent too much data: {} bytes",
             bytes.len()
         );

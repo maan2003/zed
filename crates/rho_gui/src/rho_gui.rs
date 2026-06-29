@@ -250,6 +250,14 @@ fn buffer_text_ends_with(buffer: &Buffer, end: usize, character: char) -> bool {
         .ends_with(character)
 }
 
+fn empty_rho_ui_agent_state() -> RhoUiAgentState {
+    RhoUiAgentState {
+        blocks: Vec::new(),
+        status: rho_ui_proto::remote::UiAgentStatus::Idle,
+        pending_response: Vec::new(),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum TranscriptStyle {
     UserPrompt,
@@ -283,8 +291,8 @@ enum MainView {
 
 enum RhoEvent {
     Connected(RhoAgentClient),
-    State(RhoUiAgentState),
-    Frame(RhoAgentRemoteFrame),
+    State(String, RhoUiAgentState),
+    Frame(String, RhoAgentRemoteFrame),
     Disconnected,
     Error(String),
 }
@@ -319,6 +327,9 @@ struct AgentUiState {
     current_context_percent: Option<u8>,
     current_context_input_tokens: Option<u64>,
     current_context_window: Option<u64>,
+    rho_state: Option<RhoUiAgentState>,
+    rho_inserted_blocks: Vec<Option<InsertedTranscript>>,
+    rho_pending_inserted: Option<InsertedTranscript>,
 }
 
 struct RhoGui {
@@ -493,12 +504,14 @@ impl RhoGui {
                 if tx.send(RhoEvent::Connected(agent.clone())).is_err() {
                     return;
                 }
-                if tx.send(RhoEvent::State(agent.state())).is_err() {
-                    return;
+                for (agent_id, state) in agent.states() {
+                    if tx.send(RhoEvent::State(agent_id, state)).is_err() {
+                        return;
+                    }
                 }
                 let mut frames = Box::pin(agent.subscribe_frames());
-                while let Some(frame) = futures::StreamExt::next(&mut frames).await {
-                    if tx.send(RhoEvent::Frame(frame)).is_err() {
+                while let Some((agent_id, frame)) = futures::StreamExt::next(&mut frames).await {
+                    if tx.send(RhoEvent::Frame(agent_id, frame)).is_err() {
                         return;
                     }
                 }
@@ -856,6 +869,9 @@ impl RhoGui {
             current_context_percent: None,
             current_context_input_tokens: None,
             current_context_window: None,
+            rho_state: None,
+            rho_inserted_blocks: Vec::new(),
+            rho_pending_inserted: None,
         }
     }
 
@@ -886,11 +902,10 @@ impl RhoGui {
                 self.rho_pending_inserted = None;
                 self.current_role = Some("rho".to_owned());
                 self.current_model = None;
-                self.agents.select("agent".to_owned());
                 self.update_status_line(cx);
             }
-            RhoEvent::State(state) => self.render_rho_state(&state, window, cx),
-            RhoEvent::Frame(frame) => self.handle_rho_frame(frame, window, cx),
+            RhoEvent::State(agent_id, state) => self.handle_rho_state(agent_id, state, window, cx),
+            RhoEvent::Frame(agent_id, frame) => self.handle_rho_frame(agent_id, frame, window, cx),
             RhoEvent::Disconnected => {
                 self.insert_before_draft_styled(
                     "\n[disconnected from rho daemon]\n",
@@ -908,20 +923,71 @@ impl RhoGui {
         }
     }
 
+    fn handle_rho_state(
+        &mut self,
+        agent_id: String,
+        state: RhoUiAgentState,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.agents.mark_live(agent_id.clone());
+        if self.agents.current_agent_id().is_none() {
+            self.agents.select(agent_id.clone());
+            self.show_agent_transcript(Some(agent_id.clone()), window, cx);
+        }
+        if self.displayed_agent_id.as_deref() == Some(agent_id.as_str()) {
+            self.render_rho_state(&state, window, cx);
+        } else {
+            self.hidden_agent_ui_state_mut(agent_id, window, cx)
+                .rho_state = Some(state);
+        }
+        self.update_status_line(cx);
+    }
+
     fn handle_rho_frame(
         &mut self,
+        agent_id: String,
         frame: RhoAgentRemoteFrame,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut state = self.rho_state.clone().unwrap_or(RhoUiAgentState {
-            blocks: Vec::new(),
-            status: rho_ui_proto::remote::UiAgentStatus::Idle,
-            pending_response: Vec::new(),
-        });
-        frame.apply_diff(&mut state);
-        self.render_rho_state(&state, window, cx);
-        self.rho_state = Some(state);
+        self.agents.mark_live(agent_id.clone());
+        if self.displayed_agent_id.as_deref() == Some(agent_id.as_str()) {
+            let mut state = self
+                .rho_state
+                .clone()
+                .unwrap_or_else(empty_rho_ui_agent_state);
+            frame.apply_diff(&mut state);
+            self.render_rho_state(&state, window, cx);
+            self.rho_state = Some(state);
+        } else {
+            let ui_state = self.hidden_agent_ui_state_mut(agent_id, window, cx);
+            let mut state = ui_state
+                .rho_state
+                .clone()
+                .unwrap_or_else(empty_rho_ui_agent_state);
+            frame.apply_diff(&mut state);
+            ui_state.rho_state = Some(state);
+        }
+        self.update_status_line(cx);
+    }
+
+    fn hidden_agent_ui_state_mut(
+        &mut self,
+        agent_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> &mut AgentUiState {
+        if self.displayed_agent_id.as_deref() == Some(agent_id.as_str()) {
+            unreachable!("visible agent state is stored directly on RhoGui");
+        }
+        if !self.agent_ui_states.contains_key(&agent_id) {
+            let state = self.empty_agent_ui_state(window, cx);
+            self.agent_ui_states.insert(agent_id.clone(), state);
+        }
+        self.agent_ui_states
+            .get_mut(&agent_id)
+            .expect("hidden agent state just inserted")
     }
 
     fn render_rho_state(
@@ -968,6 +1034,17 @@ impl RhoGui {
         self.current_context_window = None;
         self.update_status_line(cx);
         cx.notify();
+    }
+
+    fn rerender_current_rho_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(state) = self.rho_state.clone() else {
+            return;
+        };
+        self.clear_rho_working_folds(cx);
+        self.remove_rho_pending(cx);
+        self.clear_rho_rendered_blocks(cx);
+        self.rho_state = None;
+        self.render_rho_state(&state, window, cx);
     }
 
     fn clear_rho_rendered_blocks(&mut self, cx: &mut Context<Self>) {
@@ -1748,7 +1825,9 @@ impl RhoGui {
     ) -> bool {
         if text == "/cancel" {
             if let Some(agent) = &self.rho_agent {
-                agent.cancel();
+                if let Some(agent_id) = self.agents.current_agent_id_owned() {
+                    agent.cancel(agent_id);
+                }
                 return true;
             }
             return self.send_command_event(
@@ -2051,6 +2130,15 @@ impl RhoGui {
             &mut self.current_context_window,
             &mut state.current_context_window,
         );
+        std::mem::swap(&mut self.rho_state, &mut state.rho_state);
+        std::mem::swap(
+            &mut self.rho_inserted_blocks,
+            &mut state.rho_inserted_blocks,
+        );
+        std::mem::swap(
+            &mut self.rho_pending_inserted,
+            &mut state.rho_pending_inserted,
+        );
     }
 
     fn show_current_transcript_buffer(&mut self, cx: &mut Context<Self>) {
@@ -2088,6 +2176,7 @@ impl RhoGui {
         } else {
             self.no_agent_ui_state = Some(state);
         }
+        self.rerender_current_rho_state(window, cx);
         self.show_current_transcript_buffer(cx);
     }
 
@@ -2164,6 +2253,18 @@ impl RhoGui {
         self.focus_editor(window, cx);
     }
 
+    fn next_rho_agent_id(&self) -> String {
+        let next = self
+            .agents
+            .known_agents_sorted()
+            .into_iter()
+            .filter_map(|agent_id| agent_id.strip_prefix("agent-")?.parse::<usize>().ok())
+            .max()
+            .unwrap_or(0)
+            + 1;
+        format!("agent-{next}")
+    }
+
     fn send_shell_command(
         &mut self,
         command: &str,
@@ -2223,8 +2324,18 @@ impl RhoGui {
             return;
         }
 
-        if let Some(agent) = &self.rho_agent {
-            agent.send_user_message(text);
+        if let Some(agent) = self.rho_agent.clone() {
+            let agent_id = match self.agents.current_agent_id_owned() {
+                Some(agent_id) => agent_id,
+                None => {
+                    let agent_id = self.next_rho_agent_id();
+                    agent.create_agent(agent_id.clone());
+                    self.agents.select(agent_id.clone());
+                    self.show_agent_transcript(Some(agent_id.clone()), window, cx);
+                    agent_id
+                }
+            };
+            agent.send_user_message(agent_id, text);
             self.clear_prompt_draft(window, cx);
             return;
         }
