@@ -3327,7 +3327,9 @@ fn push_rho_pending_item_spans(
 fn rho_block_is_working(block: &RhoUiBlock) -> bool {
     match block {
         RhoUiBlock::UserMessage { .. } => false,
-        RhoUiBlock::AssistantMessage { phase, .. } => *phase == Some(RhoUiMessagePhase::Commentary),
+        RhoUiBlock::AssistantMessage { phase, .. } => {
+            *phase != Some(RhoUiMessagePhase::FinalAnswer)
+        }
         RhoUiBlock::Reasoning { .. } | RhoUiBlock::Tool(_) | RhoUiBlock::Notice { .. } => true,
     }
 }
@@ -3335,7 +3337,7 @@ fn rho_block_is_working(block: &RhoUiBlock) -> bool {
 fn rho_pending_item_is_working(item: &RhoUiStreamingItem) -> bool {
     match item {
         RhoUiStreamingItem::AssistantMessage { phase, .. } => {
-            *phase == Some(RhoUiMessagePhase::Commentary)
+            *phase != Some(RhoUiMessagePhase::FinalAnswer)
         }
         RhoUiStreamingItem::Reasoning { .. }
         | RhoUiStreamingItem::Tool(_)
