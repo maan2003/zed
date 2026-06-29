@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
-use rho_agent::{AgentState, AgentStateKind};
+use rho_agent::{AgentState, AgentStateKind, ToolPreviewMetadata};
 use rho_core::{
-    AStr, ContextBlock, Diff as AStrDiffKind, InferenceResponseItem, PendingInferenceResponse,
-    StreamingContextItem, StreamingContextItemState, ToolOutputStatus, text_content,
+    AStr, ApplyPatchMetadata, ContextBlock, Diff as AStrDiffKind, InferenceResponseItem,
+    PendingInferenceResponse, StreamingContextItem, StreamingContextItemState, ToolFileStatus,
+    ToolOutputStatus, ToolResultMetadata, UnixMs, text_content,
 };
 use senax_encoder::{Decode, Encode, Pack, Unpack};
 
@@ -192,9 +193,16 @@ impl UiBlockAppend {
 pub enum UiAgentStatus {
     Idle,
     Streaming,
-    ToolCalling { results: Vec<UiToolResult> },
-    UnfinishedTurn { outstanding_calls: usize },
-    Error { message: String },
+    ToolCalling {
+        previews: Vec<UiToolPreview>,
+        results: Vec<UiToolResult>,
+    },
+    UnfinishedTurn {
+        outstanding_calls: usize,
+    },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, Pack, Unpack)]
@@ -298,15 +306,7 @@ impl UiStreamingItemDiff {
                     arguments: current, ..
                 }) = item
                 else {
-                    *item = UiStreamingItem::Tool(UiTool {
-                        id: String::new(),
-                        name: String::new(),
-                        arguments: String::new(),
-                        preview: None,
-                        status: UiToolStatus::Running,
-                        output: None,
-                        error: None,
-                    });
+                    *item = UiStreamingItem::Tool(UiTool::empty());
                     let UiStreamingItem::Tool(UiTool {
                         arguments: current, ..
                     }) = item
@@ -348,6 +348,48 @@ impl UiTextDiff {
 pub struct UiToolResult {
     pub call_id: String,
     pub status: UiToolStatus,
+    pub started_at: UnixMs,
+    pub finished_at: UnixMs,
+    pub metadata: Option<UiToolMetadata>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, Pack, Unpack)]
+pub struct UiToolPreview {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+    pub started_at: UnixMs,
+    pub metadata: Option<UiToolPreviewMetadata>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, Pack, Unpack)]
+pub enum UiToolPreviewMetadata {
+    ShellCommand { output_tail: String },
+    ApplyPatch(UiApplyPatchMetadata),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, Pack, Unpack)]
+pub enum UiToolMetadata {
+    ApplyPatch(UiApplyPatchMetadata),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, Pack, Unpack)]
+pub struct UiApplyPatchMetadata {
+    pub changes: Vec<UiToolFileChange>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, Pack, Unpack)]
+pub struct UiToolFileChange {
+    pub path: String,
+    pub status: UiToolFileStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode, Pack, Unpack)]
+pub enum UiToolFileStatus {
+    Added,
+    Modified,
+    Deleted,
+    Moved,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, Pack, Unpack)]
@@ -359,6 +401,9 @@ pub struct UiTool {
     pub status: UiToolStatus,
     pub output: Option<String>,
     pub error: Option<String>,
+    pub started_at: Option<UnixMs>,
+    pub finished_at: Option<UnixMs>,
+    pub metadata: Option<UiToolMetadata>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, Pack, Unpack)]
@@ -370,6 +415,9 @@ pub struct UiToolDiff {
     pub status: Option<UiToolStatus>,
     pub output: Option<Option<String>>,
     pub error: Option<Option<String>>,
+    pub started_at: Option<Option<UnixMs>>,
+    pub finished_at: Option<Option<UnixMs>>,
+    pub metadata: Option<Option<UiToolMetadata>>,
 }
 
 impl UiToolDiff {
@@ -383,6 +431,10 @@ impl UiToolDiff {
             status: (previous.status != current.status).then_some(current.status),
             output: (previous.output != current.output).then(|| current.output.clone()),
             error: (previous.error != current.error).then(|| current.error.clone()),
+            started_at: (previous.started_at != current.started_at).then_some(current.started_at),
+            finished_at: (previous.finished_at != current.finished_at)
+                .then_some(current.finished_at),
+            metadata: (previous.metadata != current.metadata).then(|| current.metadata.clone()),
         }
     }
 
@@ -404,6 +456,15 @@ impl UiToolDiff {
         if let Some(error) = self.error {
             tool.error = error;
         }
+        if let Some(started_at) = self.started_at {
+            tool.started_at = started_at;
+        }
+        if let Some(finished_at) = self.finished_at {
+            tool.finished_at = finished_at;
+        }
+        if let Some(metadata) = self.metadata {
+            tool.metadata = metadata;
+        }
     }
 
     fn into_tool(self) -> UiTool {
@@ -418,6 +479,26 @@ impl UiToolDiff {
             status: self.status.unwrap_or(UiToolStatus::Running),
             output: self.output.flatten(),
             error: self.error.flatten(),
+            started_at: self.started_at.flatten(),
+            finished_at: self.finished_at.flatten(),
+            metadata: self.metadata.flatten(),
+        }
+    }
+}
+
+impl UiTool {
+    fn empty() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            arguments: String::new(),
+            preview: None,
+            status: UiToolStatus::Running,
+            output: None,
+            error: None,
+            started_at: None,
+            finished_at: None,
+            metadata: None,
         }
     }
 }
@@ -437,6 +518,47 @@ impl From<ToolOutputStatus> for UiToolStatus {
             ToolOutputStatus::Error => Self::Error,
             ToolOutputStatus::Cancelled => Self::Cancelled,
         }
+    }
+}
+
+fn ui_tool_preview_metadata(metadata: &ToolPreviewMetadata) -> UiToolPreviewMetadata {
+    match metadata {
+        ToolPreviewMetadata::ShellCommand { output_tail } => UiToolPreviewMetadata::ShellCommand {
+            output_tail: output_tail.clone(),
+        },
+        ToolPreviewMetadata::ApplyPatch(metadata) => {
+            UiToolPreviewMetadata::ApplyPatch(ui_apply_patch_metadata(metadata))
+        }
+    }
+}
+
+fn ui_tool_metadata(metadata: &ToolResultMetadata) -> UiToolMetadata {
+    match metadata {
+        ToolResultMetadata::ApplyPatch(metadata) => {
+            UiToolMetadata::ApplyPatch(ui_apply_patch_metadata(metadata))
+        }
+    }
+}
+
+fn ui_apply_patch_metadata(metadata: &ApplyPatchMetadata) -> UiApplyPatchMetadata {
+    UiApplyPatchMetadata {
+        changes: metadata
+            .changes
+            .iter()
+            .map(|change| UiToolFileChange {
+                path: change.path.clone(),
+                status: ui_tool_file_status(change.status),
+            })
+            .collect(),
+    }
+}
+
+fn ui_tool_file_status(status: ToolFileStatus) -> UiToolFileStatus {
+    match status {
+        ToolFileStatus::Added => UiToolFileStatus::Added,
+        ToolFileStatus::Modified => UiToolFileStatus::Modified,
+        ToolFileStatus::Deleted => UiToolFileStatus::Deleted,
+        ToolFileStatus::Moved => UiToolFileStatus::Moved,
     }
 }
 
@@ -492,6 +614,9 @@ fn ui_blocks(blocks: &[Arc<ContextBlock>]) -> Vec<UiBlock> {
                         matches!(block, UiBlock::Tool(tool) if tool.id == result.call_id.as_str())
                     }) {
                         tool.status = result.body.status.into();
+                        tool.started_at = Some(result.started_at);
+                        tool.finished_at = Some(result.finished_at);
+                        tool.metadata = result.metadata.as_ref().map(ui_tool_metadata);
                     }
                 }
             }
@@ -523,6 +648,9 @@ fn ui_block_from_response_item(item: &InferenceResponseItem) -> Option<UiBlock> 
             status: UiToolStatus::Running,
             output: None,
             error: None,
+            started_at: None,
+            finished_at: None,
+            metadata: None,
         })),
         InferenceResponseItem::Compaction(_) => Some(UiBlock::Notice {
             text: "compacting context".to_owned(),
@@ -539,12 +667,25 @@ fn ui_block_from_response_item(item: &InferenceResponseItem) -> Option<UiBlock> 
 fn ui_status(kind: &AgentStateKind) -> UiAgentStatus {
     match kind {
         AgentStateKind::ApiStreaming { .. } => UiAgentStatus::Streaming,
-        AgentStateKind::ToolCalling { results } => UiAgentStatus::ToolCalling {
+        AgentStateKind::ToolCalling { previews, results } => UiAgentStatus::ToolCalling {
+            previews: previews
+                .values()
+                .map(|preview| UiToolPreview {
+                    id: preview.call.id.as_str().to_owned(),
+                    name: preview.call.name.as_str().to_owned(),
+                    arguments: preview.call.arguments.clone(),
+                    started_at: preview.started_at,
+                    metadata: preview.metadata.as_ref().map(ui_tool_preview_metadata),
+                })
+                .collect(),
             results: results
                 .iter()
                 .map(|result| UiToolResult {
                     call_id: result.call_id.as_str().to_owned(),
                     status: result.body.status.into(),
+                    started_at: result.started_at,
+                    finished_at: result.finished_at,
+                    metadata: result.metadata.as_ref().map(ui_tool_metadata),
                 })
                 .collect(),
         },
@@ -745,6 +886,9 @@ fn ui_streaming_item_from_item(item: &StreamingContextItem) -> Option<UiStreamin
             status: UiToolStatus::Running,
             output: None,
             error: None,
+            started_at: None,
+            finished_at: None,
+            metadata: None,
         })),
         StreamingContextItem::Compaction(_) => Some(UiStreamingItem::Notice {
             text: "compacting context".to_owned(),
@@ -806,12 +950,13 @@ fn diff_text(previous: &str, current: &str) -> UiTextDiff {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::num::NonZeroU64;
 
-    use rho_agent::FailedInferenceResponse;
+    use rho_agent::{FailedInferenceResponse, ToolPreview};
     use rho_core::{
-        AStr, ContentPart, PendingInferenceResponse, ToolCallId, ToolName, ToolOutput, ToolResult,
-        ToolType,
+        AStr, ApplyPatchMetadata, ContentPart, PendingInferenceResponse, ToolCall, ToolCallId,
+        ToolFileChange, ToolFileStatus, ToolName, ToolOutput, ToolResult, ToolType,
     };
 
     use super::*;
@@ -889,12 +1034,47 @@ mod tests {
                             output: Arc::new("hi".to_owned()),
                             status: ToolOutputStatus::Success,
                         },
+                        started_at: UnixMs(1),
+                        finished_at: UnixMs(3),
+                        metadata: None,
                     }],
                 }),
             ],
             tool_specs: Arc::from([]),
             system_prompt: Arc::from(""),
             kind: AgentStateKind::Idle,
+        }
+    }
+
+    fn tool_calling_state() -> AgentState {
+        let call_id = ToolCallId::try_from("call-1").unwrap();
+        let mut previews = BTreeMap::new();
+        previews.insert(
+            call_id.clone(),
+            ToolPreview {
+                call: ToolCall {
+                    id: call_id,
+                    name: ToolName::try_from("apply_patch").unwrap(),
+                    tool_type: ToolType::Function,
+                    arguments: "*** Begin Patch\n*** End Patch\n".to_owned(),
+                },
+                started_at: UnixMs(10),
+                metadata: Some(ToolPreviewMetadata::ApplyPatch(ApplyPatchMetadata {
+                    changes: vec![ToolFileChange {
+                        path: "src/lib.rs".to_owned(),
+                        status: ToolFileStatus::Modified,
+                    }],
+                })),
+            },
+        );
+        AgentState {
+            blocks: Vec::new(),
+            tool_specs: Arc::from([]),
+            system_prompt: Arc::from(""),
+            kind: AgentStateKind::ToolCalling {
+                previews,
+                results: Vec::new(),
+            },
         }
     }
 
@@ -1006,8 +1186,41 @@ mod tests {
                 status: UiToolStatus::Success,
                 output: None,
                 error: None,
+                started_at: Some(UnixMs(1)),
+                finished_at: Some(UnixMs(3)),
+                metadata: None,
                 ..
             }) if name == "shell_command" && arguments.contains("printf hi")
+        ));
+    }
+
+    #[test]
+    fn tool_calling_status_includes_live_previews() {
+        let state = UiAgentState::from_agent_state(&tool_calling_state());
+        assert!(matches!(
+            state.status,
+            UiAgentStatus::ToolCalling {
+                previews,
+                results
+            } if results.is_empty()
+                && matches!(
+                    previews.as_slice(),
+                    [UiToolPreview {
+                        name,
+                        started_at: UnixMs(10),
+                        metadata: Some(UiToolPreviewMetadata::ApplyPatch(UiApplyPatchMetadata {
+                            changes
+                        })),
+                        ..
+                    }] if name == "apply_patch"
+                        && matches!(
+                            changes.as_slice(),
+                            [UiToolFileChange {
+                                path,
+                                status: UiToolFileStatus::Modified,
+                            }] if path == "src/lib.rs"
+                        )
+                )
         ));
     }
 
@@ -1034,6 +1247,9 @@ mod tests {
                     status: Some(UiToolStatus::Success),
                     output: None,
                     error: None,
+                    started_at: Some(Some(UnixMs(1))),
+                    finished_at: Some(Some(UnixMs(3))),
+                    metadata: None,
                     ..
                 })
             }]
