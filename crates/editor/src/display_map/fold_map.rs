@@ -1,7 +1,7 @@
 use crate::display_map::inlay_map::InlayChunk;
 
 use super::{
-    Highlights,
+    ElisionPolicy, Highlights,
     inlay_map::{InlayBufferRows, InlayChunks, InlayEdit, InlayOffset, InlayPoint, InlaySnapshot},
 };
 use gpui::{AnyElement, App, ElementId, HighlightStyle, Pixels, SharedString, Stateful, Window};
@@ -167,16 +167,33 @@ impl<'a> sum_tree::Dimension<'a, TransformSummary> for FoldPoint {
 
 pub(crate) struct FoldMapWriter<'a>(&'a mut FoldMap);
 
+pub(crate) trait FoldInput<T> {
+    fn into_parts(self) -> (Range<T>, FoldPlaceholder, ElisionPolicy);
+}
+
+impl<T> FoldInput<T> for (Range<T>, FoldPlaceholder) {
+    fn into_parts(self) -> (Range<T>, FoldPlaceholder, ElisionPolicy) {
+        (self.0, self.1, ElisionPolicy::Hidden)
+    }
+}
+
+impl<T> FoldInput<T> for (Range<T>, FoldPlaceholder, ElisionPolicy) {
+    fn into_parts(self) -> (Range<T>, FoldPlaceholder, ElisionPolicy) {
+        self
+    }
+}
+
 impl FoldMapWriter<'_> {
     #[ztracing::instrument(skip_all)]
-    pub(crate) fn fold<T: ToOffset>(
+    pub(crate) fn fold<T: ToOffset, I: FoldInput<T>>(
         &mut self,
-        ranges: impl IntoIterator<Item = (Range<T>, FoldPlaceholder)>,
+        ranges: impl IntoIterator<Item = I>,
     ) -> (FoldSnapshot, Vec<FoldEdit>) {
         let mut edits = Vec::new();
         let mut folds = Vec::new();
         let snapshot = self.0.snapshot.inlay_snapshot.clone();
-        for (range, fold_text) in ranges.into_iter() {
+        for input in ranges.into_iter() {
+            let (range, fold_text, elision_policy) = input.into_parts();
             let buffer = &snapshot.buffer;
             let range = range.start.to_offset(buffer)..range.end.to_offset(buffer);
 
@@ -198,6 +215,7 @@ impl FoldMapWriter<'_> {
                 id: FoldId(post_inc(&mut self.0.next_fold_id.0)),
                 range: FoldRange(fold_range),
                 placeholder: fold_text,
+                elision_policy,
             });
 
             let inlay_range =
@@ -544,6 +562,8 @@ impl FoldMap {
                     while folds.peek().is_some_and(|(next_fold, next_fold_range)| {
                         next_fold_range.start < fold_range.end
                             || (next_fold_range.start == fold_range.end
+                                && fold.elision_policy == ElisionPolicy::Hidden
+                                && next_fold.elision_policy == ElisionPolicy::Hidden
                                 && fold.placeholder.merge_adjacent
                                 && next_fold.placeholder.merge_adjacent)
                     }) {
@@ -559,7 +579,10 @@ impl FoldMap {
                         push_isomorphic(&mut new_transforms, text_summary);
                     }
 
-                    if fold_range.end > fold_range.start {
+                    let (placeholder_range, visible_tail_range) =
+                        elided_ranges(&inlay_snapshot, fold_range, fold.elision_policy);
+
+                    if let Some(fold_range) = placeholder_range {
                         const ELLIPSIS: &str = "⋯";
 
                         let placeholder_text: SharedString = fold
@@ -600,6 +623,11 @@ impl FoldMap {
                             },
                             (),
                         );
+                    }
+
+                    if let Some(tail_range) = visible_tail_range {
+                        let text_summary = inlay_snapshot.text_summary_for_range(tail_range);
+                        push_isomorphic(&mut new_transforms, text_summary);
                     }
                 }
 
@@ -1075,6 +1103,48 @@ fn push_isomorphic(transforms: &mut SumTree<Transform>, summary: MBTextSummary) 
     }
 }
 
+fn elided_ranges(
+    inlay_snapshot: &InlaySnapshot,
+    fold_range: Range<InlayOffset>,
+    elision_policy: ElisionPolicy,
+) -> (Option<Range<InlayOffset>>, Option<Range<InlayOffset>>) {
+    if fold_range.start >= fold_range.end {
+        return (None, None);
+    }
+
+    match elision_policy {
+        ElisionPolicy::Visible => (None, Some(fold_range)),
+        ElisionPolicy::Hidden => (Some(fold_range), None),
+        ElisionPolicy::Tail { rows } => {
+            if rows == 0 {
+                return (Some(fold_range), None);
+            }
+
+            let start_point = inlay_snapshot.to_point(fold_range.start);
+            let end_point = inlay_snapshot.to_point(fold_range.end);
+            let tail_start_row = end_point
+                .row()
+                .saturating_sub(rows.saturating_sub(1))
+                .max(start_point.row());
+            let tail_start = inlay_snapshot
+                .to_offset(InlayPoint(Point::new(tail_start_row, 0)))
+                .max(fold_range.start)
+                .min(fold_range.end);
+
+            if tail_start <= fold_range.start {
+                (None, Some(fold_range))
+            } else if tail_start >= fold_range.end {
+                (Some(fold_range), None)
+            } else {
+                (
+                    Some(fold_range.start..tail_start),
+                    Some(tail_start..fold_range.end),
+                )
+            }
+        }
+    }
+}
+
 fn intersecting_folds<'a>(
     inlay_snapshot: &'a InlaySnapshot,
     folds: &'a SumTree<Fold>,
@@ -1226,6 +1296,7 @@ pub struct Fold {
     pub id: FoldId,
     pub range: FoldRange,
     pub placeholder: FoldPlaceholder,
+    pub elision_policy: ElisionPolicy,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1821,6 +1892,25 @@ mod tests {
         writer.unfold_intersecting(Some(Point::new(0, 4)..Point::new(0, 4)), true);
         let (snapshot6, _) = map.read(inlay_snapshot, vec![]);
         assert_eq!(snapshot6.text(), "123aaaaa\nbbbbbb\nccc123456eee");
+    }
+
+    #[gpui::test]
+    fn test_tail_elision(cx: &mut gpui::App) {
+        init_test(cx);
+        let buffer = MultiBuffer::build_simple("one\ntwo\nthree\nfour\nfive", cx);
+        let buffer_snapshot = buffer.read(cx).snapshot(cx);
+        let (_inlay_map, inlay_snapshot) = InlayMap::new(buffer_snapshot);
+        let mut map = FoldMap::new(inlay_snapshot.clone()).0;
+
+        let (mut writer, _, _) = map.write(inlay_snapshot.clone(), vec![]);
+        writer.fold(vec![(
+            Point::new(0, 0)..Point::new(4, 4),
+            FoldPlaceholder::test(),
+            ElisionPolicy::Tail { rows: 2 },
+        )]);
+
+        let (snapshot, _) = map.read(inlay_snapshot, vec![]);
+        assert_eq!(snapshot.text(), "⋯four\nfive");
     }
 
     #[gpui::test]
