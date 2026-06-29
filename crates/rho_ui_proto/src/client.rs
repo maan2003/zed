@@ -5,9 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use futures::Stream;
 use rho_core::ContentPart;
 use tokio::net::UnixStream;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 
-use crate::remote::{UiAgentState, UiBlock};
+use crate::remote::{AgentRemoteFrame, UiAgentState, UiBlock};
 use crate::{
     ClientMessage, IoCounters, ProtocolLogDirection, ServerMessage, append_protocol_log_record,
     protocol_frame_bytes, read_frame_counted, write_frame_counted,
@@ -69,6 +69,7 @@ impl Client {
 pub struct AgentClient {
     commands: mpsc::UnboundedSender<ClientMessage>,
     state: watch::Receiver<UiAgentState>,
+    frames: broadcast::Sender<AgentRemoteFrame>,
     counters: IoCounters,
 }
 
@@ -110,10 +111,12 @@ impl AgentClient {
 
         let (reader, writer) = stream.into_split();
         let (state_tx, state_rx) = watch::channel(initial_state);
+        let (frame_tx, _) = broadcast::channel::<AgentRemoteFrame>(256);
         let (command_tx, mut command_rx) = mpsc::unbounded_channel::<ClientMessage>();
 
         let reader_counters = client_counters.clone();
         let reader_logger = logger.clone();
+        let reader_frame_tx = frame_tx.clone();
         tokio::spawn(async move {
             let mut reader = reader;
             let mut state = state_tx.borrow().clone();
@@ -132,6 +135,7 @@ impl AgentClient {
                 }
                 match message {
                     ServerMessage::Agent(frame) => {
+                        let _ = reader_frame_tx.send(frame.clone());
                         frame.apply_diff(&mut state);
                         if state_tx.send(state.clone()).is_err() {
                             break;
@@ -165,6 +169,7 @@ impl AgentClient {
         Ok(Self {
             commands: command_tx,
             state: state_rx,
+            frames: frame_tx,
             counters: client_counters,
         })
     }
@@ -197,6 +202,19 @@ impl AgentClient {
             while state.changed().await.is_ok() {
                 let current = state.borrow().clone();
                 yield current;
+            }
+        }
+    }
+
+    pub fn subscribe_frames(&self) -> impl Stream<Item = AgentRemoteFrame> + use<> {
+        let mut frames = self.frames.subscribe();
+        async_stream::stream! {
+            loop {
+                match frames.recv().await {
+                    Ok(frame) => yield frame,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
             }
         }
     }

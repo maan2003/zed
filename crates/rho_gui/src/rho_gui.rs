@@ -22,8 +22,8 @@ use multi_buffer::{MultiBuffer, PathKey};
 use project::InlayId;
 use rho_ui_proto::client::AgentClient as RhoAgentClient;
 use rho_ui_proto::remote::{
-    UiAgentState as RhoUiAgentState, UiBlock as RhoUiBlock, UiStreamingItem as RhoUiStreamingItem,
-    UiToolStatus as RhoUiToolStatus,
+    AgentRemoteFrame as RhoAgentRemoteFrame, UiAgentState as RhoUiAgentState,
+    UiBlock as RhoUiBlock, UiStreamingItem as RhoUiStreamingItem, UiToolStatus as RhoUiToolStatus,
 };
 use settings::SettingsStore;
 use tau_proto::{
@@ -296,6 +296,7 @@ enum MainView {
 enum RhoEvent {
     Connected(RhoAgentClient),
     State(RhoUiAgentState),
+    Frame(RhoAgentRemoteFrame),
     Disconnected,
     Error(String),
 }
@@ -343,6 +344,7 @@ struct TauGui {
     rx: mpsc::Receiver<SocketEvent>,
     rho_agent: Option<RhoAgentClient>,
     rho_rx: mpsc::Receiver<RhoEvent>,
+    rho_state: Option<RhoUiAgentState>,
     rho_rendered_blocks: usize,
     rho_pending_inserted: Option<InsertedTranscript>,
     _poll_task: Task<()>,
@@ -415,6 +417,7 @@ impl TauGui {
             rx,
             rho_agent: None,
             rho_rx,
+            rho_state: None,
             rho_rendered_blocks: 0,
             rho_pending_inserted: None,
             _poll_task: poll_task,
@@ -478,9 +481,12 @@ impl TauGui {
                 if tx.send(RhoEvent::Connected(agent.clone())).is_err() {
                     return;
                 }
-                let mut states = Box::pin(agent.subscribe());
-                while let Some(state) = futures::StreamExt::next(&mut states).await {
-                    if tx.send(RhoEvent::State(state)).is_err() {
+                if tx.send(RhoEvent::State(agent.state())).is_err() {
+                    return;
+                }
+                let mut frames = Box::pin(agent.subscribe_frames());
+                while let Some(frame) = futures::StreamExt::next(&mut frames).await {
+                    if tx.send(RhoEvent::Frame(frame)).is_err() {
                         return;
                     }
                 }
@@ -863,6 +869,7 @@ impl TauGui {
         match event {
             RhoEvent::Connected(agent) => {
                 self.rho_agent = Some(agent);
+                self.rho_state = None;
                 self.rho_rendered_blocks = 0;
                 self.rho_pending_inserted = None;
                 self.current_role = Some("rho".to_owned());
@@ -876,6 +883,7 @@ impl TauGui {
                 self.update_status_line(cx);
             }
             RhoEvent::State(state) => self.render_rho_state(&state, cx),
+            RhoEvent::Frame(frame) => self.handle_rho_frame(frame, cx),
             RhoEvent::Disconnected => {
                 self.insert_before_draft_styled(
                     "\n[disconnected from rho daemon]\n",
@@ -893,7 +901,19 @@ impl TauGui {
         }
     }
 
+    fn handle_rho_frame(&mut self, frame: RhoAgentRemoteFrame, cx: &mut Context<Self>) {
+        let mut state = self.rho_state.take().unwrap_or(RhoUiAgentState {
+            blocks: Vec::new(),
+            status: rho_ui_proto::remote::UiAgentStatus::Idle,
+            pending_response: Vec::new(),
+        });
+        frame.apply_diff(&mut state);
+        self.render_rho_state(&state, cx);
+        self.rho_state = Some(state);
+    }
+
     fn render_rho_state(&mut self, state: &RhoUiAgentState, cx: &mut Context<Self>) {
+        self.rho_state = Some(state.clone());
         if state.blocks.len() < self.rho_rendered_blocks {
             let spans = render_rho_transcript_spans(state, &self.cli_theme, cx);
             self.transcript.replace_spans(spans, cx);
