@@ -451,7 +451,7 @@ impl RhoGui {
             editor.insert_blocks(
                 [BlockProperties {
                     placement: BlockPlacement::Above(anchor),
-                    height: Some(5),
+                    height: Some(4),
                     style: BlockStyle::Fixed,
                     render: Arc::new(move |cx| {
                         render_rho_banner_block(&version, &build, &pun, cx).into_any_element()
@@ -2925,21 +2925,21 @@ fn render_rho_banner_block(
     div()
         .block_mouse_except_scroll()
         .pl(cx.anchor_x)
-        .h(px(88.))
+        .h(px(64.))
         .flex()
         .items_center()
-        .gap(px(16.))
+        .gap(px(8.))
         .child(
             svg()
                 .path("icons/rho.svg")
-                .size(px(64.))
+                .size(px(48.))
                 .text_color(colors.text_accent),
         )
         .child(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(4.))
+                .gap(px(0.))
                 .font_family(text_style.font_family.clone())
                 .text_size(text_style.font_size)
                 .line_height(text_style.line_height)
@@ -2948,7 +2948,7 @@ fn render_rho_banner_block(
                     div()
                         .flex()
                         .items_baseline()
-                        .gap(px(8.))
+                        .gap(px(6.))
                         .child(div().font_weight(FontWeight::BOLD).child("rho"))
                         .child(
                             div()
