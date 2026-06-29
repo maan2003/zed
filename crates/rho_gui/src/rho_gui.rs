@@ -2902,17 +2902,17 @@ fn build_banner(theme: &tau_themes::Theme) -> tau_cli_term::StyledText {
     let pun = startup_pun();
     let (version, build) = build_label_parts();
     tau_cli_term::StyledText::from(vec![
-        tau_cli_term::Span::new("  ___  \n", logo),
-        tau_cli_term::Span::new(" / _ \\ \n", logo),
-        tau_cli_term::Span::new("| | | |\n", logo),
-        tau_cli_term::Span::new("| |_| |\n", logo),
-        tau_cli_term::Span::new("|  __/ ", logo),
+        tau_cli_term::Span::new("  ρρρρ \n", logo),
+        tau_cli_term::Span::new(" ρ    ρ\n", logo),
+        tau_cli_term::Span::new(" ρ    ρ\n", logo),
+        tau_cli_term::Span::new("  ρρρρ ", logo),
         tau_cli_term::Span::new("rho", name),
         tau_cli_term::Span::new(version.trim_start_matches("rho"), version_style),
         tau_cli_term::Span::new(" ", Default::default()),
         tau_cli_term::Span::new(build, build_style),
         tau_cli_term::Span::new("\n", Default::default()),
-        tau_cli_term::Span::new("|_|    ", logo),
+        tau_cli_term::Span::new("     ρ \n", logo),
+        tau_cli_term::Span::new("     ρ ", logo),
         tau_cli_term::Span::new(pun, pun_style),
     ])
 }
