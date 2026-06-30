@@ -1,8 +1,9 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow};
@@ -20,7 +21,10 @@ use gpui::{
     Rgba, Subscription, Task, TextStyle, WeakEntity, Window, WindowOptions, actions, div,
     prelude::*, px, svg,
 };
-use language::{Buffer, BufferEvent, Capability, Point};
+use language::{
+    Buffer, BufferEvent, Capability, Language, LanguageConfig, LanguageMatcher, LanguageQueries,
+    Point, Rope,
+};
 use multi_buffer::{MultiBuffer, PathKey};
 use project::InlayId;
 use rho_ui_proto::client::AgentClient as RhoAgentClient;
@@ -191,6 +195,8 @@ fn init_app(cx: &mut App) -> Result<()> {
 const PROMPT_PLACEHOLDER_INLAY_ID: usize = 0;
 const USER_MESSAGE_PREFIX_INLAY_ID_BASE: usize = 10_000;
 const USER_MESSAGE_PREFIX: &str = "▎";
+static RHO_MARKDOWN_LANGUAGE: OnceLock<Option<Arc<Language>>> = OnceLock::new();
+static RHO_MARKDOWN_INLINE_LANGUAGE: OnceLock<Option<Arc<Language>>> = OnceLock::new();
 const DEFAULT_RHO_GUI_SETTINGS: &str = r#"// Rho GUI user settings. Values here override bundled defaults.
 {}
 "#;
@@ -264,7 +270,6 @@ fn empty_rho_ui_agent_state() -> RhoUiAgentState {
 enum TranscriptStyle {
     UserPrompt,
     UserPromptQueued,
-    AgentResponse,
     ToolProgress,
     SystemInfo,
     SystemImportant,
@@ -276,7 +281,6 @@ impl TranscriptStyle {
         match self {
             Self::UserPrompt => tau_themes::names::USER_PROMPT,
             Self::UserPromptQueued => tau_themes::names::USER_PROMPT_QUEUED,
-            Self::AgentResponse => tau_themes::names::AGENT_RESPONSE,
             Self::ToolProgress => tau_themes::names::PROGRESS_INDICATOR,
             Self::SystemInfo => tau_themes::names::SYSTEM_INFO,
             Self::SystemImportant => tau_themes::names::SYSTEM_INFO_IMPORTANT,
@@ -2801,10 +2805,7 @@ impl RhoGui {
     }
 
     fn upsert_live_response(&mut self, key: String, text: &str, cx: &mut Context<Self>) {
-        let spans = vec![(
-            text.to_owned(),
-            self.highlight_style(TranscriptStyle::AgentResponse, cx),
-        )];
+        let spans = rho_markdown_spans(text, cx);
         if let Some(inserted) = self.prompt_state.take_live_response(&key) {
             self.remove_transcript_highlights(inserted.highlight_keys, cx);
             if let Some(inserted) = self.replace_transcript_range_with_spans(
@@ -2823,12 +2824,19 @@ impl RhoGui {
     }
 
     fn finalize_live_response(&mut self, key: &str, text: &str, cx: &mut Context<Self>) {
-        let style = self.highlight_style(TranscriptStyle::AgentResponse, cx);
+        let spans = rho_markdown_spans(text, cx);
         if let Some(inserted) = self.prompt_state.take_live_response(key) {
             self.remove_transcript_highlights(inserted.highlight_keys, cx);
-            self.replace_transcript_range_with_spans(inserted.range, [(text, style)], cx);
+            self.replace_transcript_range_with_spans(
+                inserted.range,
+                spans.iter().map(|(text, style)| (text.as_str(), *style)),
+                cx,
+            );
         } else {
-            self.insert_before_draft_styled(text, TranscriptStyle::AgentResponse, cx);
+            self.insert_before_draft_spans(
+                spans.iter().map(|(text, style)| (text.as_str(), *style)),
+                cx,
+            );
         }
     }
 
@@ -3217,7 +3225,6 @@ impl RhoGui {
                     fade_out: None,
                 };
             }
-            TranscriptStyle::AgentResponse => return HighlightStyle::default(),
             _ => {}
         }
 
@@ -3519,7 +3526,7 @@ fn push_rho_block_spans(
             push_rho_styled_line(spans, text, TranscriptStyle::UserPrompt, theme, cx)
         }
         RhoUiBlock::AssistantMessage { text, .. } => {
-            push_rho_styled_line(spans, text, TranscriptStyle::AgentResponse, theme, cx)
+            push_rho_assistant_markdown_spans(spans, text, cx)
         }
         RhoUiBlock::Reasoning { .. } => {}
         RhoUiBlock::Tool(tool) => push_rho_tool_spans(spans, theme, tool, cx),
@@ -3537,7 +3544,7 @@ fn push_rho_pending_item_spans(
 ) {
     match item {
         RhoUiStreamingItem::AssistantMessage { text, .. } => {
-            push_rho_styled_line(spans, text, TranscriptStyle::AgentResponse, theme, cx)
+            push_rho_assistant_markdown_spans(spans, text, cx)
         }
         RhoUiStreamingItem::Reasoning { .. } => {}
         RhoUiStreamingItem::Tool(tool) => push_rho_tool_spans(spans, theme, tool, cx),
@@ -3679,6 +3686,107 @@ fn push_rho_styled_line(
     spans.push((text, highlight_style_for_theme(theme, style, cx)));
 }
 
+fn push_rho_assistant_markdown_spans(
+    spans: &mut Vec<(String, HighlightStyle)>,
+    text: &str,
+    cx: &App,
+) {
+    let mut text = text.to_owned();
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    spans.extend(rho_markdown_spans(&text, cx));
+}
+
+fn rho_markdown_spans(text: &str, cx: &App) -> Vec<(String, HighlightStyle)> {
+    let Some(markdown_language) = rho_markdown_language(cx) else {
+        return vec![(text.to_owned(), HighlightStyle::default())];
+    };
+    markdown_language.set_theme(cx.theme().syntax());
+    let rope = Rope::from(text);
+    let mut highlights = markdown_language.highlight_text(&rope, 0..text.len());
+    if let Some(markdown_inline_language) = rho_markdown_inline_language(cx) {
+        markdown_inline_language.set_theme(cx.theme().syntax());
+        highlights.extend(markdown_inline_language.highlight_text(&rope, 0..text.len()));
+    }
+    highlights.sort_by_key(|(range, _)| range.start);
+
+    let mut spans = Vec::new();
+    let mut cursor = 0;
+    let syntax = cx.theme().syntax();
+    for (range, highlight_id) in highlights {
+        if range.start > cursor {
+            spans.push((
+                text[cursor..range.start].to_owned(),
+                HighlightStyle::default(),
+            ));
+        }
+        let start = range.start.max(cursor);
+        if range.end > start {
+            let style = syntax.get(highlight_id).cloned().unwrap_or_default();
+            spans.push((text[start..range.end].to_owned(), style));
+        }
+        cursor = cursor.max(range.end);
+    }
+    if cursor < text.len() {
+        spans.push((text[cursor..].to_owned(), HighlightStyle::default()));
+    }
+    spans
+}
+
+fn rho_markdown_language(cx: &App) -> Option<&'static Arc<Language>> {
+    RHO_MARKDOWN_LANGUAGE
+        .get_or_init(|| {
+            let language = Language::new(
+                LanguageConfig {
+                    name: "Markdown".into(),
+                    matcher: LanguageMatcher {
+                        path_suffixes: vec!["md".into()],
+                        ..Default::default()
+                    },
+                    ..LanguageConfig::default()
+                },
+                Some(tree_sitter_md::LANGUAGE.into()),
+            )
+            .with_queries(LanguageQueries {
+                highlights: Some(Cow::from(include_str!(
+                    "../../grammars/src/markdown/highlights.scm"
+                ))),
+                ..LanguageQueries::default()
+            })
+            .ok()?;
+            let language = Arc::new(language);
+            language.set_theme(cx.theme().syntax());
+            Some(language)
+        })
+        .as_ref()
+}
+
+fn rho_markdown_inline_language(cx: &App) -> Option<&'static Arc<Language>> {
+    RHO_MARKDOWN_INLINE_LANGUAGE
+        .get_or_init(|| {
+            let language = Language::new(
+                LanguageConfig {
+                    name: "Markdown-Inline".into(),
+                    hidden: true,
+                    ..LanguageConfig::default()
+                },
+                Some(tree_sitter_md::INLINE_LANGUAGE.into()),
+            )
+            .with_queries(LanguageQueries {
+                highlights: Some(Cow::from(include_str!(
+                    "../../grammars/src/markdown-inline/highlights.scm"
+                ))),
+                ..LanguageQueries::default()
+            })
+            .ok()?;
+            let language = Arc::new(language);
+            language.set_theme(cx.theme().syntax());
+            Some(language)
+        })
+        .as_ref()
+}
+
 fn highlight_style_for_theme(
     theme: &tau_themes::Theme,
     style: TranscriptStyle,
@@ -3696,7 +3804,6 @@ fn highlight_style_for_theme(
                 fade_out: None,
             };
         }
-        TranscriptStyle::AgentResponse => return HighlightStyle::default(),
         _ => {}
     }
 
@@ -4427,6 +4534,32 @@ mod tests {
 
         assert_eq!(spans[0].0, "$ echo ok");
         assert_eq!(spans[0].1.color, Some(cx.theme().colors().text_muted));
+    }
+
+    #[gpui::test]
+    fn rho_assistant_messages_use_markdown_highlights(cx: &mut App) {
+        init_test_app(cx);
+
+        let spans = render_rho_block_spans(
+            &RhoUiBlock::AssistantMessage {
+                text: "**bold** `code`".to_owned(),
+                phase: Some(RhoUiMessagePhase::FinalAnswer),
+            },
+            &cli_theme::select_theme(tau_config::settings::CliTheme::default()),
+            cx,
+        );
+
+        assert_eq!(
+            spans
+                .iter()
+                .map(|(text, _)| text.as_str())
+                .collect::<String>(),
+            "**bold** `code`\n"
+        );
+        assert!(
+            spans.len() > 1,
+            "markdown should be split into syntax-highlighted spans: {spans:?}"
+        );
     }
 
     #[gpui::test]

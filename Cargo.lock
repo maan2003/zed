@@ -9839,6 +9839,7 @@ dependencies = [
  "theme",
  "theme_settings",
  "tokio",
+ "tree-sitter-md",
  "ui",
  "vim",
 ]
