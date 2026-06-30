@@ -3551,8 +3551,9 @@ fn render_rho_working_elision_block(
     cx: &mut BlockContext<'_, '_>,
 ) -> impl IntoElement {
     let text_style = cx.editor_style.text.clone();
+    let cursor_color = cx.editor_style.local_player.cursor;
     let text_color = if cx.selected {
-        text_style.color
+        cx.editor_style.background
     } else {
         text_style.color.opacity(0.65)
     };
@@ -3572,7 +3573,8 @@ fn render_rho_working_elision_block(
                 .flex()
                 .items_center()
                 .gap_1()
-                .when(cx.selected, |this| this.bg(text_style.color.opacity(0.08)))
+                .pr_1()
+                .when(cx.selected, |this| this.bg(cursor_color))
                 .child(
                     Icon::new(IconName::ChevronRight)
                         .size(IconSize::XSmall)
