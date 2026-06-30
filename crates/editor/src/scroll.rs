@@ -584,6 +584,10 @@ impl ScrollManager {
             || self.autoscroll_pin.as_ref().is_some_and(|pin| pin.active)
     }
 
+    pub fn has_active_autoscroll_pin(&self) -> bool {
+        self.autoscroll_pin.as_ref().is_some_and(|pin| pin.active)
+    }
+
     pub fn set_autoscroll_pin(&mut self, anchor: Anchor, strategy: AutoscrollStrategy) {
         self.autoscroll_pin = Some(AutoscrollPin {
             anchor,
@@ -712,6 +716,10 @@ impl ScrollManager {
 impl Editor {
     pub fn has_autoscroll_request(&self) -> bool {
         self.scroll_manager.has_autoscroll_request()
+    }
+
+    pub fn has_active_autoscroll_pin(&self) -> bool {
+        self.scroll_manager.has_active_autoscroll_pin()
     }
 
     pub fn set_autoscroll_pin(

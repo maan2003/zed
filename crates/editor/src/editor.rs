@@ -8421,7 +8421,9 @@ impl Editor {
         self.display_map.update(cx, |display_map, cx| {
             display_map.set_display_elisions_expanded(ids, expanded, cx)
         });
-        if let Some(autoscroll) = autoscroll {
+        if let Some(autoscroll) = autoscroll
+            && !self.has_active_autoscroll_pin()
+        {
             self.request_autoscroll(autoscroll, cx);
         }
         cx.notify();
