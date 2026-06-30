@@ -3566,8 +3566,14 @@ fn render_rho_working_elision_block(
         .text_size(text_style.font_size)
         .line_height(text_style.line_height)
         .text_color(text_color)
-        .when(cx.selected, |this| this.bg(text_style.color.opacity(0.08)))
-        .child(format!("⋯ {label}"))
+        .child(
+            div()
+                .h(cx.line_height)
+                .flex()
+                .items_center()
+                .when(cx.selected, |this| this.bg(text_style.color.opacity(0.08)))
+                .child(format!("⋯ {label}")),
+        )
 }
 
 fn push_rho_styled_line(
