@@ -79,6 +79,7 @@ pub struct BlockSnapshot {
     pub(super) wrap_snapshot: WrapSnapshot,
     transforms: SumTree<Transform>,
     custom_blocks_by_id: TreeMap<CustomBlockId, Arc<CustomBlock>>,
+    display_elisions: Vec<Arc<DisplayElision>>,
     pub(super) buffer_header_height: u32,
     pub(super) excerpt_header_height: u32,
     pub(super) buffers_with_disabled_headers: HashSet<BufferId>,
@@ -284,6 +285,7 @@ pub struct CustomBlock {
     priority: usize,
 }
 
+#[derive(Clone)]
 pub struct DisplayElision {
     pub id: DisplayElisionId,
     pub range: Range<Anchor>,
@@ -293,6 +295,7 @@ pub struct DisplayElision {
     render: Arc<Mutex<RenderBlock>>,
     pub priority: usize,
     pub type_tag: Option<TypeId>,
+    pub expanded: bool,
 }
 
 #[derive(Clone)]
@@ -557,6 +560,7 @@ impl Debug for Block {
                 .field("id", &block.id)
                 .field("range", &block.range)
                 .field("tail_rows", &block.tail_rows)
+                .field("expanded", &block.expanded)
                 .finish(),
             Self::FoldedBuffer {
                 first_excerpt,
@@ -744,6 +748,7 @@ impl BlockMap {
                 wrap_snapshot,
                 transforms: self.transforms.borrow().clone(),
                 custom_blocks_by_id: self.custom_blocks_by_id.clone(),
+                display_elisions: self.display_elisions.clone(),
                 buffer_header_height: self.buffer_header_height,
                 excerpt_header_height: self.excerpt_header_height,
                 buffers_with_disabled_headers: self.buffers_with_disabled_headers.clone(),
@@ -1142,6 +1147,10 @@ impl BlockMap {
             );
 
             blocks_in_edit.extend(self.display_elisions.iter().filter_map(|elision| {
+                if elision.expanded {
+                    return None;
+                }
+
                 let buffer = wrap_snapshot.buffer_snapshot();
                 let mut start = elision.range.start.to_point(buffer);
                 let end = elision.range.end.to_point(buffer);
@@ -1918,6 +1927,7 @@ impl BlockMapWriter<'_> {
                     render: Arc::new(Mutex::new(elision.render)),
                     priority: elision.priority,
                     type_tag: elision.type_tag,
+                    expanded: false,
                 }));
         }
         self.block_map.deferred_edits.set(Patch::new(vec![Edit {
@@ -1948,6 +1958,7 @@ impl BlockMapWriter<'_> {
                 .iter_mut()
                 .find(|elision| elision.id == id)
             {
+                let expanded = elision.expanded;
                 *elision = Arc::new(DisplayElision {
                     id,
                     range: properties.range,
@@ -1957,6 +1968,7 @@ impl BlockMapWriter<'_> {
                     render: Arc::new(Mutex::new(properties.render)),
                     priority: properties.priority,
                     type_tag: properties.type_tag,
+                    expanded,
                 });
             }
         }
@@ -1964,6 +1976,31 @@ impl BlockMapWriter<'_> {
             old: WrapRow(0)..self.block_map.wrap_snapshot.borrow().max_point().row() + WrapRow(1),
             new: WrapRow(0)..self.block_map.wrap_snapshot.borrow().max_point().row() + WrapRow(1),
         }]));
+    }
+
+    pub fn set_elisions_expanded(&mut self, ids: HashSet<DisplayElisionId>, expanded: bool) {
+        if ids.is_empty() {
+            return;
+        }
+
+        let mut changed = false;
+        for elision in &mut self.block_map.display_elisions {
+            if ids.contains(&elision.id) && elision.expanded != expanded {
+                let mut updated = (**elision).clone();
+                updated.expanded = expanded;
+                *elision = Arc::new(updated);
+                changed = true;
+            }
+        }
+
+        if changed {
+            self.block_map.deferred_edits.set(Patch::new(vec![Edit {
+                old: WrapRow(0)
+                    ..self.block_map.wrap_snapshot.borrow().max_point().row() + WrapRow(1),
+                new: WrapRow(0)
+                    ..self.block_map.wrap_snapshot.borrow().max_point().row() + WrapRow(1),
+            }]));
+        }
     }
 
     #[ztracing::instrument(skip_all)]
@@ -2552,6 +2589,35 @@ impl BlockSnapshot {
         }
 
         None
+    }
+
+    pub fn expanded_display_elisions_intersecting_range(
+        &self,
+        range: Range<MultiBufferOffset>,
+        inclusive: bool,
+    ) -> Vec<DisplayElisionId> {
+        if range.is_empty() && !inclusive {
+            return Vec::new();
+        }
+
+        let buffer = self.wrap_snapshot.buffer_snapshot();
+        self.display_elisions
+            .iter()
+            .filter_map(|elision| {
+                if !elision.expanded {
+                    return None;
+                }
+
+                let elision_range =
+                    elision.range.start.to_offset(buffer)..elision.range.end.to_offset(buffer);
+                let intersects = if inclusive {
+                    elision_range.start <= range.end && range.start <= elision_range.end
+                } else {
+                    elision_range.start < range.end && range.start < elision_range.end
+                };
+                intersects.then_some(elision.id)
+            })
+            .collect()
     }
 
     #[ztracing::instrument(skip_all)]

@@ -7926,6 +7926,31 @@ fn test_display_elision_limited_and_collapsed_modes(cx: &mut TestAppContext) {
                 .any(|(row, block)| row == DisplayRow(0)
                     && matches!(block, Block::DisplayElision(_)))
         );
+        assert_eq!(
+            snapshot
+                .point_to_display_point(Point::new(0, 0), text::Bias::Left)
+                .row(),
+            DisplayRow(0)
+        );
+        assert_eq!(
+            DisplayPoint::new(DisplayRow(0), 0).to_point(&snapshot),
+            Point::new(0, 0)
+        );
+
+        editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+            selections.select_ranges([Point::new(0, 0)..Point::new(0, 0)])
+        });
+        editor.unfold_lines(&UnfoldLines, window, cx);
+        assert_eq!(
+            editor.display_text(cx),
+            "one\ntwo\nthree\nfour\nfive\nsix\nseven\n"
+        );
+
+        editor.fold(&Fold, window, cx);
+        assert_eq!(
+            editor.display_text(cx),
+            "\ntwo\nthree\nfour\nfive\nsix\nseven\n"
+        );
     });
 
     let editor = cx.add_window(|window, cx| {

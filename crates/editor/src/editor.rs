@@ -8411,6 +8411,22 @@ impl Editor {
         cx.notify();
     }
 
+    pub fn set_display_elisions_expanded(
+        &mut self,
+        ids: HashSet<DisplayElisionId>,
+        expanded: bool,
+        autoscroll: Option<Autoscroll>,
+        cx: &mut Context<Self>,
+    ) {
+        self.display_map.update(cx, |display_map, cx| {
+            display_map.set_display_elisions_expanded(ids, expanded, cx)
+        });
+        if let Some(autoscroll) = autoscroll {
+            self.request_autoscroll(autoscroll, cx);
+        }
+        cx.notify();
+    }
+
     pub fn resize_blocks(
         &mut self,
         heights: HashMap<CustomBlockId, u32>,

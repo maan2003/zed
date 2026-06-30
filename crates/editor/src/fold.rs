@@ -93,6 +93,34 @@ impl EditorSnapshot {
 }
 
 impl Editor {
+    fn folded_display_elisions_at_selections(
+        &self,
+        display_map: &DisplaySnapshot,
+    ) -> HashSet<DisplayElisionId> {
+        self.selections
+            .all::<Point>(display_map)
+            .into_iter()
+            .flat_map(|selection| {
+                let row = selection.head().to_display_point(display_map).row();
+                display_map.display_elisions_in_range(row..DisplayRow(row.0 + 1))
+            })
+            .collect()
+    }
+
+    fn expanded_display_elisions_at_selections(
+        &self,
+        display_map: &DisplaySnapshot,
+    ) -> HashSet<DisplayElisionId> {
+        self.selections
+            .all::<Point>(display_map)
+            .into_iter()
+            .flat_map(|selection| {
+                let range = selection.range().sorted();
+                display_map.expanded_display_elisions_intersecting_range(range, true)
+            })
+            .collect()
+    }
+
     pub fn toggle_fold(
         &mut self,
         _: &actions::ToggleFold,
@@ -101,6 +129,28 @@ impl Editor {
     ) {
         if self.buffer_kind(cx) == ItemBufferKind::Singleton {
             let display_map = self.display_map.update(cx, |map, cx| map.snapshot(cx));
+            let folded_display_elisions = self.folded_display_elisions_at_selections(&display_map);
+            if !folded_display_elisions.is_empty() {
+                self.set_display_elisions_expanded(
+                    folded_display_elisions,
+                    true,
+                    Some(Autoscroll::fit()),
+                    cx,
+                );
+                return;
+            }
+            let expanded_display_elisions =
+                self.expanded_display_elisions_at_selections(&display_map);
+            if !expanded_display_elisions.is_empty() {
+                self.set_display_elisions_expanded(
+                    expanded_display_elisions,
+                    false,
+                    Some(Autoscroll::fit()),
+                    cx,
+                );
+                return;
+            }
+
             let selection = self.selections.newest::<Point>(&display_map);
 
             let range = if selection.is_empty() {
@@ -168,6 +218,17 @@ impl Editor {
         if self.buffer_kind(cx) == ItemBufferKind::Singleton {
             let mut to_fold = Vec::new();
             let display_map = self.display_map.update(cx, |map, cx| map.snapshot(cx));
+            let display_elisions = self.expanded_display_elisions_at_selections(&display_map);
+            if !display_elisions.is_empty() {
+                self.set_display_elisions_expanded(
+                    display_elisions,
+                    false,
+                    Some(Autoscroll::fit()),
+                    cx,
+                );
+                return;
+            }
+
             let selections = self.selections.all_adjusted(&display_map);
 
             for selection in selections {
@@ -443,6 +504,17 @@ impl Editor {
     pub fn unfold_lines(&mut self, _: &UnfoldLines, _window: &mut Window, cx: &mut Context<Self>) {
         if self.buffer_kind(cx) == ItemBufferKind::Singleton {
             let display_map = self.display_map.update(cx, |map, cx| map.snapshot(cx));
+            let display_elisions = self.folded_display_elisions_at_selections(&display_map);
+            if !display_elisions.is_empty() {
+                self.set_display_elisions_expanded(
+                    display_elisions,
+                    true,
+                    Some(Autoscroll::fit()),
+                    cx,
+                );
+                return;
+            }
+
             let buffer = display_map.buffer_snapshot();
             let selections = self.selections.all::<Point>(&display_map);
             let ranges = selections

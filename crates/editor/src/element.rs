@@ -3282,6 +3282,11 @@ impl EditorElement {
 
             Block::DisplayElision(elision) => {
                 x_position = Some((text_x, text_x + text_hitbox.size.width.max(*scroll_width)));
+                let block_row_end = DisplayRow(block_row_start.0 + elision.height.unwrap_or(1));
+                let selected = selections.iter().any(|selection| {
+                    let head_row = selection.head().to_display_point(snapshot).row();
+                    (block_row_start..block_row_end).contains(&head_row)
+                });
                 div()
                     .size_full()
                     .child(elision.render(&mut BlockContext {
@@ -3293,7 +3298,7 @@ impl EditorElement {
                         em_width,
                         block_id,
                         height: elision.height.unwrap_or(1),
-                        selected: false,
+                        selected,
                         max_width: text_hitbox.size.width.max(*scroll_width),
                         editor_style: &self.style,
                         indent_guide_padding: px(0.0),

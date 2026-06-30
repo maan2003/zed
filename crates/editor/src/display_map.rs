@@ -1155,6 +1155,30 @@ impl DisplayMap {
     }
 
     #[instrument(skip_all)]
+    pub fn set_display_elisions_expanded(
+        &mut self,
+        ids: HashSet<DisplayElisionId>,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let (self_wrap_snapshot, self_wrap_edits) = self.sync_through_wrap(cx);
+        Self::with_synced_companion_mut(
+            self.entity_id,
+            &self.companion,
+            cx,
+            |companion_view, _cx| {
+                self.block_map
+                    .write(
+                        self_wrap_snapshot.clone(),
+                        self_wrap_edits.clone(),
+                        companion_view,
+                    )
+                    .set_elisions_expanded(ids, expanded);
+            },
+        )
+    }
+
+    #[instrument(skip_all)]
     pub fn row_for_block(
         &mut self,
         block_id: CustomBlockId,
@@ -2208,6 +2232,33 @@ impl DisplaySnapshot {
         self.block_snapshot
             .blocks_in_range(BlockRow(rows.start.0)..BlockRow(rows.end.0))
             .map(|(row, block)| (DisplayRow(row.0), block))
+    }
+
+    pub fn display_elisions_in_range(
+        &self,
+        rows: Range<DisplayRow>,
+    ) -> impl Iterator<Item = DisplayElisionId> + '_ {
+        self.blocks_in_range(rows).filter_map(|(_, block)| {
+            if let Block::DisplayElision(elision) = block {
+                Some(elision.id)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn expanded_display_elisions_intersecting_range<T>(
+        &self,
+        range: Range<T>,
+        inclusive: bool,
+    ) -> Vec<DisplayElisionId>
+    where
+        T: ToOffset,
+    {
+        let range = range.start.to_offset(self.buffer_snapshot())
+            ..range.end.to_offset(self.buffer_snapshot());
+        self.block_snapshot
+            .expanded_display_elisions_intersecting_range(range, inclusive)
     }
 
     pub fn sticky_header_excerpt(&self, row: f64) -> Option<StickyHeaderExcerpt<'_>> {
