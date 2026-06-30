@@ -2620,6 +2620,35 @@ impl BlockSnapshot {
             .collect()
     }
 
+    pub fn folded_display_elisions_intersecting_range(
+        &self,
+        range: Range<MultiBufferOffset>,
+        inclusive: bool,
+    ) -> Vec<DisplayElisionId> {
+        if range.is_empty() && !inclusive {
+            return Vec::new();
+        }
+
+        let buffer = self.wrap_snapshot.buffer_snapshot();
+        self.display_elisions
+            .iter()
+            .filter_map(|elision| {
+                if elision.expanded {
+                    return None;
+                }
+
+                let elision_range =
+                    elision.range.start.to_offset(buffer)..elision.range.end.to_offset(buffer);
+                let intersects = if inclusive {
+                    elision_range.start <= range.end && range.start <= elision_range.end
+                } else {
+                    elision_range.start < range.end && range.start < elision_range.end
+                };
+                intersects.then_some(elision.id)
+            })
+            .collect()
+    }
+
     #[ztracing::instrument(skip_all)]
     pub fn max_point(&self) -> BlockPoint {
         let row = self

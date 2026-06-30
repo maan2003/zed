@@ -4104,6 +4104,32 @@ mod tests {
     use editor::display_map::{Block, DisplayRow};
     use gpui::TestAppContext;
 
+    fn init_test_app(cx: &mut App) {
+        assets::Assets.load_test_fonts(cx);
+        let store = SettingsStore::new(cx, settings::default_settings().as_ref());
+        cx.set_global(store);
+        theme_settings::init(theme::LoadThemes::JustBase, cx);
+        release_channel::init(semver::Version::new(0, 0, 0), cx);
+        editor::init(cx);
+        command_palette::init(cx);
+        search::init(cx);
+        vim::init(cx);
+    }
+
+    fn bind_rho_test_keymaps(cx: &mut App) {
+        let default_key_bindings = settings::KeymapFile::load_asset_allow_partial_failure(
+            settings::DEFAULT_KEYMAP_PATH,
+            cx,
+        )
+        .expect("load default keymap");
+        cx.bind_keys(default_key_bindings);
+
+        let vim_key_bindings =
+            settings::KeymapFile::load_asset_allow_partial_failure(settings::VIM_KEYMAP_PATH, cx)
+                .expect("load vim keymap");
+        cx.bind_keys(vim_key_bindings);
+    }
+
     fn buffer_text(buffer: &Buffer) -> String {
         buffer.text_for_range(0..buffer.len()).collect()
     }
@@ -4249,15 +4275,7 @@ mod tests {
     #[gpui::test]
     fn rho_rendering_elides_pending_unknown_phase_but_not_final_answer(cx: &mut TestAppContext) {
         cx.update(|cx| {
-            assets::Assets.load_test_fonts(cx);
-            let store = SettingsStore::new(cx, settings::default_settings().as_ref());
-            cx.set_global(store);
-            theme_settings::init(theme::LoadThemes::JustBase, cx);
-            release_channel::init(semver::Version::new(0, 0, 0), cx);
-            editor::init(cx);
-            command_palette::init(cx);
-            search::init(cx);
-            vim::init(cx);
+            init_test_app(cx);
         });
 
         let gui = cx.add_window(|window, cx| RhoGui::new_for_test(window, cx));
@@ -4303,15 +4321,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         cx.update(|cx| {
-            assets::Assets.load_test_fonts(cx);
-            let store = SettingsStore::new(cx, settings::default_settings().as_ref());
-            cx.set_global(store);
-            theme_settings::init(theme::LoadThemes::JustBase, cx);
-            release_channel::init(semver::Version::new(0, 0, 0), cx);
-            editor::init(cx);
-            command_palette::init(cx);
-            search::init(cx);
-            vim::init(cx);
+            init_test_app(cx);
         });
 
         let gui = cx.add_window(|window, cx| RhoGui::new_for_test(window, cx));
@@ -4343,15 +4353,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         cx.update(|cx| {
-            assets::Assets.load_test_fonts(cx);
-            let store = SettingsStore::new(cx, settings::default_settings().as_ref());
-            cx.set_global(store);
-            theme_settings::init(theme::LoadThemes::JustBase, cx);
-            release_channel::init(semver::Version::new(0, 0, 0), cx);
-            editor::init(cx);
-            command_palette::init(cx);
-            search::init(cx);
-            vim::init(cx);
+            init_test_app(cx);
         });
 
         let gui = cx.add_window(|window, cx| RhoGui::new_for_test(window, cx));
@@ -4379,15 +4381,7 @@ mod tests {
     #[gpui::test]
     fn rho_rendering_elides_burst_of_pending_tools(cx: &mut TestAppContext) {
         cx.update(|cx| {
-            assets::Assets.load_test_fonts(cx);
-            let store = SettingsStore::new(cx, settings::default_settings().as_ref());
-            cx.set_global(store);
-            theme_settings::init(theme::LoadThemes::JustBase, cx);
-            release_channel::init(semver::Version::new(0, 0, 0), cx);
-            editor::init(cx);
-            command_palette::init(cx);
-            search::init(cx);
-            vim::init(cx);
+            init_test_app(cx);
         });
 
         let gui = cx.add_window(|window, cx| RhoGui::new_for_test(window, cx));
@@ -4413,15 +4407,7 @@ mod tests {
     #[gpui::test]
     fn rho_rendering_elides_pending_tools_when_stream_grows(cx: &mut TestAppContext) {
         cx.update(|cx| {
-            assets::Assets.load_test_fonts(cx);
-            let store = SettingsStore::new(cx, settings::default_settings().as_ref());
-            cx.set_global(store);
-            theme_settings::init(theme::LoadThemes::JustBase, cx);
-            release_channel::init(semver::Version::new(0, 0, 0), cx);
-            editor::init(cx);
-            command_palette::init(cx);
-            search::init(cx);
-            vim::init(cx);
+            init_test_app(cx);
         });
 
         let gui = cx.add_window(|window, cx| RhoGui::new_for_test(window, cx));
@@ -4453,15 +4439,7 @@ mod tests {
     #[gpui::test]
     fn rho_rendering_merges_committed_commentary_with_pending_tools(cx: &mut TestAppContext) {
         cx.update(|cx| {
-            assets::Assets.load_test_fonts(cx);
-            let store = SettingsStore::new(cx, settings::default_settings().as_ref());
-            cx.set_global(store);
-            theme_settings::init(theme::LoadThemes::JustBase, cx);
-            release_channel::init(semver::Version::new(0, 0, 0), cx);
-            editor::init(cx);
-            command_palette::init(cx);
-            search::init(cx);
-            vim::init(cx);
+            init_test_app(cx);
         });
 
         let gui = cx.add_window(|window, cx| RhoGui::new_for_test(window, cx));
@@ -4485,6 +4463,63 @@ mod tests {
         assert!(
             text.contains("tool_11"),
             "pending tool tail should remain visible: {text:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn rho_display_elision_can_be_opened_and_closed_with_helix_fold_keys(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            init_test_app(cx);
+            bind_rho_test_keymaps(cx);
+        });
+
+        let gui = cx.add_window(|window, cx| {
+            let gui = RhoGui::new_for_test(window, cx);
+            gui.focus_editor(window, cx);
+            gui
+        });
+
+        let collapsed_text = gui
+            .update(cx, |gui, window, cx| {
+                gui.render_rho_state(&pending_assistant_state(None), window, cx);
+                assert!(has_display_elision(gui, window, cx));
+                gui.editor.update(cx, |editor, cx| editor.display_text(cx))
+            })
+            .expect("update rho gui");
+        assert!(
+            !collapsed_text.contains("alpha"),
+            "rho working text should start collapsed: {collapsed_text:?}"
+        );
+
+        cx.simulate_keystrokes(*gui, "escape");
+        gui.update(cx, |gui, window, cx| {
+            let elision_start = gui.rho_working_elisions[0].range.start;
+            let elision_start = gui
+                .anchor_in_excerpt(elision_start, cx)
+                .expect("elision start should be in the editor excerpt");
+            gui.select_anchor(elision_start, window, cx);
+        })
+        .expect("update rho gui");
+        cx.simulate_keystrokes(*gui, "z o");
+        let expanded_text = gui
+            .update(cx, |gui, _, cx| {
+                gui.editor.update(cx, |editor, cx| editor.display_text(cx))
+            })
+            .expect("update rho gui");
+        assert!(
+            expanded_text.contains("alpha"),
+            "z o should expand the rho working elision: {expanded_text:?}"
+        );
+
+        cx.simulate_keystrokes(*gui, "z c");
+        let recollapsed_text = gui
+            .update(cx, |gui, _, cx| {
+                gui.editor.update(cx, |editor, cx| editor.display_text(cx))
+            })
+            .expect("update rho gui");
+        assert!(
+            !recollapsed_text.contains("alpha"),
+            "z c should collapse the rho working elision again: {recollapsed_text:?}"
         );
     }
 

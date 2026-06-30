@@ -2261,6 +2261,20 @@ impl DisplaySnapshot {
             .expanded_display_elisions_intersecting_range(range, inclusive)
     }
 
+    pub fn folded_display_elisions_intersecting_range<T>(
+        &self,
+        range: Range<T>,
+        inclusive: bool,
+    ) -> Vec<DisplayElisionId>
+    where
+        T: ToOffset,
+    {
+        let range = range.start.to_offset(self.buffer_snapshot())
+            ..range.end.to_offset(self.buffer_snapshot());
+        self.block_snapshot
+            .folded_display_elisions_intersecting_range(range, inclusive)
+    }
+
     pub fn sticky_header_excerpt(&self, row: f64) -> Option<StickyHeaderExcerpt<'_>> {
         self.block_snapshot.sticky_header_excerpt(row)
     }
