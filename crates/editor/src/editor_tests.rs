@@ -7861,6 +7861,107 @@ fn test_move_line_up_down_with_blocks(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn test_display_elision_limited_and_collapsed_modes(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+
+    let editor = cx.add_window(|window, cx| {
+        let buffer = MultiBuffer::build_simple("one\ntwo\nthree\nfour\nfive\nsix\nseven\n", cx);
+        build_editor(buffer, window, cx)
+    });
+
+    let _ = editor.update(cx, |editor, window, cx| {
+        let snapshot = editor.buffer.read(cx).snapshot(cx);
+        let range =
+            snapshot.anchor_after(Point::new(0, 0))..snapshot.anchor_after(Point::new(4, 0));
+        let ids = editor.insert_display_elisions(
+            [DisplayElisionProperties {
+                range,
+                tail_rows: 5,
+                height: Some(1),
+                style: BlockStyle::Flex,
+                render: Arc::new(|_| div().child("⋯").into_any_element()),
+                priority: 0,
+                type_tag: None,
+            }],
+            None,
+            cx,
+        );
+        assert_eq!(
+            editor.display_text(cx),
+            "one\ntwo\nthree\nfour\nfive\nsix\nseven\n"
+        );
+        let snapshot = editor.snapshot(window, cx);
+        assert!(
+            snapshot
+                .blocks_in_range(DisplayRow(0)..DisplayRow(10))
+                .all(|(_, block)| !matches!(block, Block::DisplayElision(_)))
+        );
+
+        editor.remove_display_elisions(ids.into_iter().collect(), None, cx);
+
+        let snapshot = editor.buffer.read(cx).snapshot(cx);
+        let range =
+            snapshot.anchor_after(Point::new(0, 0))..snapshot.anchor_after(Point::new(6, 0));
+        editor.insert_display_elisions(
+            [DisplayElisionProperties {
+                range,
+                tail_rows: 5,
+                height: Some(1),
+                style: BlockStyle::Flex,
+                render: Arc::new(|_| div().child("⋯").into_any_element()),
+                priority: 0,
+                type_tag: None,
+            }],
+            None,
+            cx,
+        );
+        assert_eq!(
+            editor.display_text(cx),
+            "\ntwo\nthree\nfour\nfive\nsix\nseven\n"
+        );
+        let snapshot = editor.snapshot(window, cx);
+        assert!(
+            snapshot
+                .blocks_in_range(DisplayRow(0)..DisplayRow(10))
+                .any(|(row, block)| row == DisplayRow(0)
+                    && matches!(block, Block::DisplayElision(_)))
+        );
+    });
+
+    let editor = cx.add_window(|window, cx| {
+        let buffer = MultiBuffer::build_simple("one\ntwo\nthree\n", cx);
+        build_editor(buffer, window, cx)
+    });
+
+    let _ = editor.update(cx, |editor, window, cx| {
+        let snapshot = editor.buffer.read(cx).snapshot(cx);
+        let range =
+            snapshot.anchor_after(Point::new(0, 0))..snapshot.anchor_after(Point::new(1, 0));
+        editor.insert_display_elisions(
+            [DisplayElisionProperties {
+                range,
+                tail_rows: 0,
+                height: Some(1),
+                style: BlockStyle::Flex,
+                render: Arc::new(|_| div().child("⋯").into_any_element()),
+                priority: 0,
+                type_tag: None,
+            }],
+            None,
+            cx,
+        );
+        assert_eq!(editor.display_text(cx), "\ntwo\nthree\n");
+        let snapshot = editor.snapshot(window, cx);
+        assert!(
+            snapshot
+                .blocks_in_range(DisplayRow(0)..DisplayRow(10))
+                .any(|(row, block)| row == DisplayRow(0)
+                    && matches!(block, Block::DisplayElision(_)))
+        );
+    });
+}
+
+#[gpui::test]
 async fn test_selections_and_replace_blocks(cx: &mut TestAppContext) {
     init_test(cx, |_| {});
 
