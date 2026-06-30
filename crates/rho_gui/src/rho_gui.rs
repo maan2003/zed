@@ -1093,8 +1093,6 @@ impl RhoGui {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.remove_rho_pending(cx);
-
         let first_changed = self
             .rho_state
             .as_ref()
@@ -1107,6 +1105,12 @@ impl RhoGui {
                     .unwrap_or_else(|| previous.blocks.len().min(state.blocks.len()))
             })
             .unwrap_or(0);
+        let blocks_changed =
+            first_changed < self.rho_inserted_blocks.len() || first_changed < state.blocks.len();
+
+        if blocks_changed {
+            self.remove_rho_pending(cx);
+        }
 
         if first_changed < self.rho_inserted_blocks.len() {
             self.remove_rho_rendered_blocks_from(first_changed, cx);
@@ -1119,7 +1123,11 @@ impl RhoGui {
         }
 
         let pending_spans = render_rho_pending_spans(&state.pending_response, &self.cli_theme, cx);
-        if !pending_spans.is_empty() {
+        if pending_spans.is_empty() {
+            self.remove_rho_pending(cx);
+        } else if !blocks_changed && let Some(inserted) = self.rho_pending_inserted.take() {
+            self.rho_pending_inserted = self.replace_rho_spans(inserted, pending_spans, cx);
+        } else {
             self.rho_pending_inserted = self.insert_rho_spans(pending_spans, cx);
         }
         self.elide_rho_working_blocks(state, cx);
@@ -1168,6 +1176,20 @@ impl RhoGui {
         cx: &mut Context<Self>,
     ) -> Option<InsertedTranscript> {
         self.insert_before_draft_spans(
+            spans.iter().map(|(text, style)| (text.as_str(), *style)),
+            cx,
+        )
+    }
+
+    fn replace_rho_spans(
+        &mut self,
+        inserted: InsertedTranscript,
+        spans: Vec<(String, HighlightStyle)>,
+        cx: &mut Context<Self>,
+    ) -> Option<InsertedTranscript> {
+        self.remove_transcript_highlights(inserted.highlight_keys);
+        self.replace_transcript_range_with_spans(
+            inserted.range,
             spans.iter().map(|(text, style)| (text.as_str(), *style)),
             cx,
         )
@@ -1263,6 +1285,10 @@ impl RhoGui {
     ) -> Vec<RhoWorkingElisionCandidate> {
         let mut ranges = Vec::new();
         let mut current: Option<(std::ops::Range<text::Anchor>, usize, u32)> = None;
+        let active_turn_has_pending_non_working_response = state
+            .pending_response
+            .iter()
+            .any(|item| !rho_pending_item_is_working(item));
 
         for (index, (block, inserted)) in state
             .blocks
@@ -1274,7 +1300,10 @@ impl RhoGui {
                 continue;
             };
             let turn_tool_count = rho_turn_tool_count(state, index);
-            let tail_rows = if rho_turn_has_non_working_response(state, index) {
+            let tail_rows = if rho_turn_has_non_working_response(state, index)
+                || (active_turn_has_pending_non_working_response
+                    && rho_block_is_in_active_turn(state, index))
+            {
                 0
             } else {
                 5
@@ -3460,6 +3489,14 @@ fn rho_turn_has_non_working_response(state: &RhoUiAgentState, block_index: usize
     })
 }
 
+fn rho_block_is_in_active_turn(state: &RhoUiAgentState, block_index: usize) -> bool {
+    state
+        .blocks
+        .iter()
+        .rposition(|block| matches!(block, RhoUiBlock::UserMessage { .. }))
+        .is_none_or(|turn_start| block_index >= turn_start)
+}
+
 fn rho_turn_range(state: &RhoUiAgentState, block_index: usize) -> std::ops::Range<usize> {
     let turn_start = state.blocks[..=block_index]
         .iter()
@@ -4099,6 +4136,25 @@ mod tests {
         }
     }
 
+    fn committed_commentary_plus_pending_final_state() -> RhoUiAgentState {
+        RhoUiAgentState {
+            blocks: vec![
+                RhoUiBlock::UserMessage {
+                    text: "do work".to_owned(),
+                },
+                RhoUiBlock::AssistantMessage {
+                    text: "working-one\nworking-two\nworking-three\n".to_owned(),
+                    phase: Some(RhoUiMessagePhase::Commentary),
+                },
+            ],
+            status: rho_ui_proto::remote::UiAgentStatus::Streaming,
+            pending_response: vec![RhoUiStreamingItem::AssistantMessage {
+                text: "final answer begins\n".to_owned(),
+                phase: Some(RhoUiMessagePhase::FinalAnswer),
+            }],
+        }
+    }
+
     fn has_display_elision(
         gui: &mut RhoGui,
         window: &mut Window,
@@ -4166,7 +4222,6 @@ mod tests {
                     window,
                     cx,
                 );
-                assert!(!has_display_elision(gui, window, cx));
                 gui.editor.update(cx, |editor, cx| editor.display_text(cx))
             })
             .expect("update rho gui");
@@ -4217,6 +4272,44 @@ mod tests {
         assert!(
             text.contains("pending-six"),
             "pending commentary should be part of the visible tail: {text:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn rho_rendering_collapses_working_items_when_final_answer_starts_streaming(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            assets::Assets.load_test_fonts(cx);
+            let store = SettingsStore::new(cx, settings::default_settings().as_ref());
+            cx.set_global(store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+            editor::init(cx);
+            command_palette::init(cx);
+            search::init(cx);
+            vim::init(cx);
+        });
+
+        let gui = cx.add_window(|window, cx| RhoGui::new_for_test(window, cx));
+
+        let text = gui
+            .update(cx, |gui, window, cx| {
+                gui.render_rho_state(&committed_commentary_plus_pending_final_state(), window, cx);
+                assert!(has_display_elision(gui, window, cx));
+                gui.editor.update(cx, |editor, cx| editor.display_text(cx))
+            })
+            .expect("update rho gui");
+
+        assert!(
+            !text.contains("working-one")
+                && !text.contains("working-two")
+                && !text.contains("working-three"),
+            "working commentary should collapse completely once final answer streams: {text:?}"
+        );
+        assert!(
+            text.contains("final answer begins"),
+            "streaming final answer should remain visible: {text:?}"
         );
     }
 
