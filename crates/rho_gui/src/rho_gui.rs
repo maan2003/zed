@@ -2693,7 +2693,7 @@ impl RhoGui {
     ) -> Option<InsertedTranscript> {
         let style = self.highlight_style(style, cx);
         let gap = self.user_message_leading_gap(cx);
-        let message = format!("{text}\n");
+        let message = format!("{text}\n\n");
         let inserted = if gap.is_empty() {
             self.insert_before_draft_highlighted(&message, style, cx)?
         } else {
@@ -3761,7 +3761,7 @@ fn rho_tool_name_style(cx: &App) -> HighlightStyle {
 
 fn rho_tool_args_style(cx: &App) -> HighlightStyle {
     HighlightStyle {
-        color: Some(cx.theme().colors().terminal_ansi_bright_black),
+        color: Some(cx.theme().colors().text_muted),
         ..HighlightStyle::default()
     }
 }
@@ -3773,7 +3773,7 @@ fn rho_tool_status_highlight_style(status: &str, cx: &App) -> HighlightStyle {
         "error" => colors.terminal_ansi_red,
         "cancelled" => colors.terminal_ansi_yellow,
         tau_proto::PROGRESS_INDICATOR_TEXT => colors.terminal_ansi_cyan,
-        _ => colors.terminal_ansi_bright_black,
+        _ => colors.text_muted,
     };
     HighlightStyle {
         color: Some(color),
@@ -4427,10 +4427,7 @@ mod tests {
         );
 
         assert_eq!(spans[0].0, "$ echo ok");
-        assert_eq!(
-            spans[0].1.color,
-            Some(cx.theme().colors().terminal_ansi_bright_black)
-        );
+        assert_eq!(spans[0].1.color, Some(cx.theme().colors().text_muted));
     }
 
     #[gpui::test]
@@ -4468,7 +4465,7 @@ mod tests {
 
         assert!(
             text.contains(&format!(
-                "{USER_MESSAGE_PREFIX}first\nanswer\n\n{USER_MESSAGE_PREFIX}second\n"
+                "{USER_MESSAGE_PREFIX}first\n\nanswer\n\n{USER_MESSAGE_PREFIX}second\n\n"
             )),
             "subsequent user messages should start a new turn with an empty line: {text:?}"
         );
