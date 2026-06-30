@@ -4155,6 +4155,31 @@ mod tests {
         }
     }
 
+    fn pending_tools_state(tool_count: usize) -> RhoUiAgentState {
+        RhoUiAgentState {
+            blocks: vec![RhoUiBlock::UserMessage {
+                text: "run tools".to_owned(),
+            }],
+            status: rho_ui_proto::remote::UiAgentStatus::Streaming,
+            pending_response: (0..tool_count)
+                .map(|ix| {
+                    RhoUiStreamingItem::Tool(RhoUiTool {
+                        id: format!("tool-{ix}"),
+                        name: format!("tool_{ix}"),
+                        arguments: format!("arg-{ix}"),
+                        preview: None,
+                        status: RhoUiToolStatus::Running,
+                        output: None,
+                        error: None,
+                        started_at: None,
+                        finished_at: None,
+                        metadata: None,
+                    })
+                })
+                .collect(),
+        }
+    }
+
     fn has_display_elision(
         gui: &mut RhoGui,
         window: &mut Window,
@@ -4310,6 +4335,80 @@ mod tests {
         assert!(
             text.contains("final answer begins"),
             "streaming final answer should remain visible: {text:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn rho_rendering_elides_burst_of_pending_tools(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            assets::Assets.load_test_fonts(cx);
+            let store = SettingsStore::new(cx, settings::default_settings().as_ref());
+            cx.set_global(store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+            editor::init(cx);
+            command_palette::init(cx);
+            search::init(cx);
+            vim::init(cx);
+        });
+
+        let gui = cx.add_window(|window, cx| RhoGui::new_for_test(window, cx));
+
+        let text = gui
+            .update(cx, |gui, window, cx| {
+                gui.render_rho_state(&pending_tools_state(8), window, cx);
+                assert!(has_display_elision(gui, window, cx));
+                gui.editor.update(cx, |editor, cx| editor.display_text(cx))
+            })
+            .expect("update rho gui");
+
+        assert!(
+            !text.contains("tool_0"),
+            "burst of pending tools should elide earliest tools immediately: {text:?}"
+        );
+        assert!(
+            text.contains("tool_7"),
+            "burst of pending tools should keep the tail visible: {text:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn rho_rendering_elides_pending_tools_when_stream_grows(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            assets::Assets.load_test_fonts(cx);
+            let store = SettingsStore::new(cx, settings::default_settings().as_ref());
+            cx.set_global(store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+            editor::init(cx);
+            command_palette::init(cx);
+            search::init(cx);
+            vim::init(cx);
+        });
+
+        let gui = cx.add_window(|window, cx| RhoGui::new_for_test(window, cx));
+
+        gui.update(cx, |gui, window, cx| {
+            gui.render_rho_state(&pending_tools_state(1), window, cx);
+            assert!(!has_display_elision(gui, window, cx));
+        })
+        .expect("update rho gui");
+
+        let text = gui
+            .update(cx, |gui, window, cx| {
+                gui.render_rho_state(&pending_tools_state(8), window, cx);
+                assert!(has_display_elision(gui, window, cx));
+                gui.editor.update(cx, |editor, cx| editor.display_text(cx))
+            })
+            .expect("update rho gui");
+
+        assert!(
+            !text.contains("tool_0"),
+            "grown pending tools should elide earliest tools after replacement: {text:?}"
+        );
+        assert!(
+            text.contains("tool_7"),
+            "grown pending tools should keep the tail visible: {text:?}"
         );
     }
 
