@@ -3216,7 +3216,7 @@ impl RhoGui {
         match style {
             TranscriptStyle::UserPrompt | TranscriptStyle::UserPromptQueued => {
                 return HighlightStyle {
-                    color: Some(cx.theme().colors().terminal_ansi_green),
+                    color: Some(cx.theme().colors().text_accent),
                     background_color: None,
                     font_weight: None,
                     font_style: None,
@@ -3795,7 +3795,7 @@ fn highlight_style_for_theme(
     match style {
         TranscriptStyle::UserPrompt | TranscriptStyle::UserPromptQueued => {
             return HighlightStyle {
-                color: Some(cx.theme().colors().terminal_ansi_green),
+                color: Some(cx.theme().colors().text_accent),
                 background_color: None,
                 font_weight: None,
                 font_style: None,
@@ -4534,6 +4534,22 @@ mod tests {
 
         assert_eq!(spans[0].0, "$ echo ok");
         assert_eq!(spans[0].1.color, Some(cx.theme().colors().text_muted));
+    }
+
+    #[gpui::test]
+    fn rho_user_messages_use_text_accent(cx: &mut App) {
+        init_test_app(cx);
+
+        let spans = render_rho_block_spans(
+            &RhoUiBlock::UserMessage {
+                text: "hello".to_owned(),
+            },
+            &cli_theme::select_theme(tau_config::settings::CliTheme::default()),
+            cx,
+        );
+
+        assert_eq!(spans[0].0, "hello\n");
+        assert_eq!(spans[0].1.color, Some(cx.theme().colors().text_accent));
     }
 
     #[gpui::test]
