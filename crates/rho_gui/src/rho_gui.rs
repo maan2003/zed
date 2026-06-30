@@ -188,6 +188,8 @@ fn init_app(cx: &mut App) -> Result<()> {
 }
 
 const PROMPT_PLACEHOLDER_INLAY_ID: usize = 0;
+const USER_MESSAGE_PREFIX_INLAY_ID_BASE: usize = 10_000;
+const USER_MESSAGE_PREFIX: &str = "▌";
 const DEFAULT_RHO_GUI_SETTINGS: &str = r#"// Rho GUI user settings. Values here override bundled defaults.
 {}
 "#;
@@ -1125,8 +1127,15 @@ impl RhoGui {
         }
 
         for block in &state.blocks[self.rho_inserted_blocks.len()..] {
-            let spans = render_rho_block_spans(block, &self.cli_theme, cx);
-            let inserted = self.insert_rho_spans(spans, cx);
+            let inserted = match block {
+                RhoUiBlock::UserMessage { text } => {
+                    self.insert_user_message(text, TranscriptStyle::UserPrompt, cx)
+                }
+                _ => {
+                    let spans = render_rho_block_spans(block, &self.cli_theme, cx);
+                    self.insert_rho_spans(spans, cx)
+                }
+            };
             self.rho_inserted_blocks.push(inserted);
         }
 
@@ -1166,14 +1175,14 @@ impl RhoGui {
     fn remove_rho_rendered_blocks_from(&mut self, index: usize, cx: &mut Context<Self>) {
         let removed = self.rho_inserted_blocks.split_off(index);
         for inserted in removed.into_iter().rev().flatten() {
-            self.remove_transcript_highlights(inserted.highlight_keys);
+            self.remove_transcript_highlights(inserted.highlight_keys, cx);
             self.remove_transcript_range(inserted.range, cx);
         }
     }
 
     fn remove_rho_pending(&mut self, cx: &mut Context<Self>) {
         if let Some(inserted) = self.rho_pending_inserted.take() {
-            self.remove_transcript_highlights(inserted.highlight_keys);
+            self.remove_transcript_highlights(inserted.highlight_keys, cx);
             self.remove_transcript_range(inserted.range, cx);
         }
     }
@@ -1195,7 +1204,7 @@ impl RhoGui {
         spans: Vec<(String, HighlightStyle)>,
         cx: &mut Context<Self>,
     ) -> Option<InsertedTranscript> {
-        self.remove_transcript_highlights(inserted.highlight_keys);
+        self.remove_transcript_highlights(inserted.highlight_keys, cx);
         self.replace_transcript_range_with_spans(
             inserted.range,
             spans.iter().map(|(text, style)| (text.as_str(), *style)),
@@ -1808,7 +1817,7 @@ impl RhoGui {
             Event::ShellCommandFinished(finished) => {
                 let include_in_context =
                     if let Some(state) = self.shell_state.take(finished.command_id.as_str()) {
-                        self.remove_transcript_highlights(state.inserted.highlight_keys);
+                        self.remove_transcript_highlights(state.inserted.highlight_keys, cx);
                         self.remove_transcript_range(state.inserted.range, cx);
                         state.include_in_context
                     } else {
@@ -2658,41 +2667,66 @@ impl RhoGui {
         if let Some(queued) = self.prompt_state.pop_matching_queued_prompt(text) {
             let text = queued.text.clone();
             self.remove_queued_prompt(queued, cx);
-            self.insert_before_draft_styled(
-                &format!("> {text}\n"),
-                TranscriptStyle::UserPrompt,
-                cx,
-            );
+            self.insert_user_message(&text, TranscriptStyle::UserPrompt, cx);
             return;
         }
-        self.insert_before_draft_styled(&format!("> {text}\n"), TranscriptStyle::UserPrompt, cx);
+        self.insert_user_message(text, TranscriptStyle::UserPrompt, cx);
     }
 
     fn handle_agent_prompt_queued(&mut self, text: &str, cx: &mut Context<Self>) {
-        let style = self.highlight_style(TranscriptStyle::UserPromptQueued, cx);
-        if let Some(inserted) =
-            self.insert_before_draft_highlighted(&format!("> {text} (queued)\n"), style, cx)
-        {
+        if let Some(inserted) = self.insert_user_message(
+            &format!("{text} (queued)"),
+            TranscriptStyle::UserPromptQueued,
+            cx,
+        ) {
             self.prompt_state
                 .push_queued_prompt(text.to_owned(), inserted);
         }
+    }
+
+    fn insert_user_message(
+        &mut self,
+        text: &str,
+        style: TranscriptStyle,
+        cx: &mut Context<Self>,
+    ) -> Option<InsertedTranscript> {
+        let style = self.highlight_style(style, cx);
+        let inserted = self.insert_before_draft_highlighted(&format!("{text}\n"), style, cx)?;
+        self.insert_user_message_prefix_inlay(&inserted, cx);
+        Some(inserted)
+    }
+
+    fn insert_user_message_prefix_inlay(
+        &mut self,
+        inserted: &InsertedTranscript,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(highlight_key) = inserted.highlight_keys.first().copied() else {
+            return;
+        };
+        let Some(range) = self
+            .transcript
+            .multibuffer_range(inserted.range.clone(), cx)
+        else {
+            return;
+        };
+        let id = USER_MESSAGE_PREFIX_INLAY_ID_BASE + highlight_key;
+        self.editor.update(cx, |editor, cx| {
+            editor.splice_inlays(
+                &[],
+                vec![Inlay::custom(id, range.start, USER_MESSAGE_PREFIX)],
+                cx,
+            );
+        });
     }
 
     fn handle_agent_prompt_steered(&mut self, text: &str, cx: &mut Context<Self>) {
         if let Some(queued) = self.prompt_state.pop_front_queued_prompt() {
             let text = queued.text.clone();
             self.remove_queued_prompt(queued, cx);
-            self.insert_before_draft_styled(
-                &format!("> {text}\n"),
-                TranscriptStyle::UserPrompt,
-                cx,
-            );
+            self.insert_user_message(&text, TranscriptStyle::UserPrompt, cx);
         } else {
-            self.insert_before_draft_styled(
-                &format!("> {text}\n"),
-                TranscriptStyle::UserPrompt,
-                cx,
-            );
+            self.insert_user_message(text, TranscriptStyle::UserPrompt, cx);
         }
     }
 
@@ -2700,16 +2734,12 @@ impl RhoGui {
         if let Some(queued) = self.prompt_state.pop_front_queued_prompt() {
             let text = queued.text.clone();
             self.remove_queued_prompt(queued, cx);
-            self.insert_before_draft_styled(
-                &format!("> {text}\n"),
-                TranscriptStyle::UserPrompt,
-                cx,
-            );
+            self.insert_user_message(&text, TranscriptStyle::UserPrompt, cx);
         }
     }
 
     fn remove_queued_prompt(&mut self, queued: QueuedPrompt, cx: &mut Context<Self>) {
-        self.remove_transcript_highlights(queued.inserted.highlight_keys);
+        self.remove_transcript_highlights(queued.inserted.highlight_keys, cx);
         self.remove_transcript_range(queued.inserted.range, cx);
     }
 
@@ -2733,17 +2763,12 @@ impl RhoGui {
     }
 
     fn upsert_live_response(&mut self, key: String, text: &str, cx: &mut Context<Self>) {
-        let block = tool_render::streaming_block(
-            &self.cli_theme,
-            tau_themes::names::AGENT_RESPONSE,
+        let spans = vec![(
             text.to_owned(),
-        );
-        let spans = block_spans(&block, cx)
-            .into_iter()
-            .map(|(text, style)| (text.to_owned(), style))
-            .collect::<Vec<_>>();
+            self.highlight_style(TranscriptStyle::AgentResponse, cx),
+        )];
         if let Some(inserted) = self.prompt_state.take_live_response(&key) {
-            self.remove_transcript_highlights(inserted.highlight_keys);
+            self.remove_transcript_highlights(inserted.highlight_keys, cx);
             if let Some(inserted) = self.replace_transcript_range_with_spans(
                 inserted.range,
                 spans.iter().map(|(text, style)| (text.as_str(), *style)),
@@ -2762,7 +2787,7 @@ impl RhoGui {
     fn finalize_live_response(&mut self, key: &str, text: &str, cx: &mut Context<Self>) {
         let style = self.highlight_style(TranscriptStyle::AgentResponse, cx);
         if let Some(inserted) = self.prompt_state.take_live_response(key) {
-            self.remove_transcript_highlights(inserted.highlight_keys);
+            self.remove_transcript_highlights(inserted.highlight_keys, cx);
             self.replace_transcript_range_with_spans(inserted.range, [(text, style)], cx);
         } else {
             self.insert_before_draft_styled(text, TranscriptStyle::AgentResponse, cx);
@@ -2793,7 +2818,7 @@ impl RhoGui {
 
     fn remove_live_compaction(&mut self, key: &str, cx: &mut Context<Self>) {
         if let Some(inserted) = self.prompt_state.take_live_compaction(key) {
-            self.remove_transcript_highlights(inserted.highlight_keys);
+            self.remove_transcript_highlights(inserted.highlight_keys, cx);
             self.remove_transcript_range(inserted.range, cx);
         }
     }
@@ -2801,11 +2826,11 @@ impl RhoGui {
     fn remove_live_response(&mut self, key: &str, cx: &mut Context<Self>) {
         let cleanup = self.prompt_state.remove_prompt(key);
         if let Some(inserted) = cleanup.live_compaction {
-            self.remove_transcript_highlights(inserted.highlight_keys);
+            self.remove_transcript_highlights(inserted.highlight_keys, cx);
             self.remove_transcript_range(inserted.range, cx);
         }
         if let Some(inserted) = cleanup.live_response {
-            self.remove_transcript_highlights(inserted.highlight_keys);
+            self.remove_transcript_highlights(inserted.highlight_keys, cx);
             self.remove_transcript_range(inserted.range, cx);
         }
     }
@@ -2868,7 +2893,14 @@ impl RhoGui {
         cx.notify();
     }
 
-    fn remove_transcript_highlights(&mut self, highlight_keys: Vec<usize>) {
+    fn remove_transcript_highlights(&mut self, highlight_keys: Vec<usize>, cx: &mut Context<Self>) {
+        let inlay_ids = highlight_keys
+            .iter()
+            .map(|key| InlayId::Custom(USER_MESSAGE_PREFIX_INLAY_ID_BASE + *key))
+            .collect::<Vec<_>>();
+        self.editor.update(cx, |editor, cx| {
+            editor.splice_inlays(&inlay_ids, Vec::new(), cx);
+        });
         self.transcript.remove_highlights(highlight_keys);
     }
 
@@ -2926,7 +2958,7 @@ impl RhoGui {
         block: tau_cli_term::StyledBlock,
         cx: &mut Context<Self>,
     ) -> Option<InsertedTranscript> {
-        self.remove_transcript_highlights(inserted.highlight_keys);
+        self.remove_transcript_highlights(inserted.highlight_keys, cx);
 
         let mut spans = Vec::new();
         let starts_with_newline = self.transcript.range_starts_with(&inserted.range, '\n', cx);
@@ -3132,6 +3164,22 @@ impl RhoGui {
     }
 
     fn highlight_style(&self, style: TranscriptStyle, cx: &App) -> HighlightStyle {
+        match style {
+            TranscriptStyle::UserPrompt | TranscriptStyle::UserPromptQueued => {
+                return HighlightStyle {
+                    color: Some(cx.theme().colors().terminal_ansi_green),
+                    background_color: None,
+                    font_weight: None,
+                    font_style: None,
+                    underline: None,
+                    strikethrough: None,
+                    fade_out: None,
+                };
+            }
+            TranscriptStyle::AgentResponse => return HighlightStyle::default(),
+            _ => {}
+        }
+
         let theme_style = self
             .cli_theme
             .resolve_style(&tau_themes::StyleName::new(style.style_name()));
@@ -3426,13 +3474,9 @@ fn push_rho_block_spans(
     cx: &App,
 ) {
     match block {
-        RhoUiBlock::UserMessage { text } => push_rho_styled_line(
-            spans,
-            &format!("> {text}\n"),
-            TranscriptStyle::UserPrompt,
-            theme,
-            cx,
-        ),
+        RhoUiBlock::UserMessage { text } => {
+            push_rho_styled_line(spans, text, TranscriptStyle::UserPrompt, theme, cx)
+        }
         RhoUiBlock::AssistantMessage { text, .. } => {
             push_rho_styled_line(spans, text, TranscriptStyle::AgentResponse, theme, cx)
         }
@@ -3452,14 +3496,7 @@ fn push_rho_pending_item_spans(
 ) {
     match item {
         RhoUiStreamingItem::AssistantMessage { text, .. } => {
-            let block =
-                tool_render::streaming_block(theme, tau_themes::names::AGENT_RESPONSE, text);
-            spans.extend(
-                block_spans(&block, cx)
-                    .into_iter()
-                    .map(|(text, style)| (text.to_owned(), style)),
-            );
-            push_rho_spans_trailing_newline(spans);
+            push_rho_styled_line(spans, text, TranscriptStyle::AgentResponse, theme, cx)
         }
         RhoUiStreamingItem::Reasoning { .. } => {}
         RhoUiStreamingItem::Tool(tool) => push_rho_tool_spans(spans, theme, tool, cx),
@@ -3606,6 +3643,22 @@ fn highlight_style_for_theme(
     style: TranscriptStyle,
     cx: &App,
 ) -> HighlightStyle {
+    match style {
+        TranscriptStyle::UserPrompt | TranscriptStyle::UserPromptQueued => {
+            return HighlightStyle {
+                color: Some(cx.theme().colors().terminal_ansi_green),
+                background_color: None,
+                font_weight: None,
+                font_style: None,
+                underline: None,
+                strikethrough: None,
+                fade_out: None,
+            };
+        }
+        TranscriptStyle::AgentResponse => return HighlightStyle::default(),
+        _ => {}
+    }
+
     let theme_style = theme.resolve_style(&tau_themes::StyleName::new(style.style_name()));
     HighlightStyle {
         color: theme_style.fg.map(|color| tau_color_to_hsla(color, cx)),
@@ -4298,9 +4351,19 @@ mod tests {
             .update(cx, |gui, window, cx| {
                 gui.render_rho_state(&pending_assistant_state(None), window, cx);
                 assert!(has_display_elision(gui, window, cx));
+                gui.prompt_buffer.update(cx, |buffer, _| {
+                    assert!(
+                        !buffer_text(buffer).contains("> do work"),
+                        "user prompt prefix should be an inlay, not buffer text"
+                    );
+                });
                 gui.editor.update(cx, |editor, cx| editor.display_text(cx))
             })
             .expect("update rho gui");
+        assert!(
+            unknown_phase_text.contains(&format!("{USER_MESSAGE_PREFIX}do work")),
+            "user prompt prefix should render as an inlay: {unknown_phase_text:?}"
+        );
         assert!(
             !unknown_phase_text.contains("alpha"),
             "unknown phase pending assistant should be elided: {unknown_phase_text:?}"
