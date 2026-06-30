@@ -3284,8 +3284,11 @@ impl EditorElement {
                 x_position = Some((text_x, text_x + text_hitbox.size.width.max(*scroll_width)));
                 let block_row_end = DisplayRow(block_row_start.0 + elision.height.unwrap_or(1));
                 let selected = selections.iter().any(|selection| {
-                    let head_row = selection.head().to_display_point(snapshot).row();
-                    (block_row_start..block_row_end).contains(&head_row)
+                    let start_row = selection.start.to_display_point(snapshot).row();
+                    let end_row = selection.end.to_display_point(snapshot).row();
+                    let selection_start = start_row.min(end_row);
+                    let selection_end = DisplayRow(start_row.max(end_row).0 + 1);
+                    selection_start < block_row_end && block_row_start < selection_end
                 });
                 div()
                     .size_full()

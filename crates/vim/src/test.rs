@@ -7,14 +7,17 @@ use std::{sync::Arc, time::Duration};
 use collections::HashMap;
 use command_palette::CommandPalette;
 use editor::{
-    AnchorRangeExt, DisplayPoint, Editor, EditorMode, MultiBuffer, MultiBufferOffset,
+    AnchorRangeExt, DisplayElisionProperties, DisplayPoint, Editor, EditorMode, MultiBuffer,
+    MultiBufferOffset, SelectionEffects,
     actions::{DeleteLine, WrapSelectionsInTag},
     code_context_menus::CodeContextMenu,
-    display_map::DisplayRow,
+    display_map::{BlockStyle, DisplayRow},
     test::editor_test_context::EditorTestContext,
 };
 use futures::StreamExt;
-use gpui::{KeyBinding, Modifiers, MouseButton, TestAppContext, px};
+use gpui::{
+    IntoElement, KeyBinding, Modifiers, MouseButton, ParentElement, TestAppContext, div, px,
+};
 use itertools::Itertools;
 use language::{CursorShape, Language, LanguageConfig, Point};
 pub use neovim_backed_test_context::*;
@@ -772,6 +775,56 @@ async fn test_folds(cx: &mut gpui::TestAppContext) {
           bazp()
         }
     "});
+}
+
+#[perf]
+#[gpui::test]
+async fn test_helix_display_elision_fold_bindings(cx: &mut gpui::TestAppContext) {
+    let mut cx = VimTestContext::new(cx, true).await;
+    cx.enable_helix();
+    cx.set_state(
+        "ˇone\ntwo\nthree\nfour\nfive\nsix\nseven\n",
+        Mode::HelixNormal,
+    );
+
+    cx.update_editor(|editor, window, cx| {
+        let snapshot = editor.buffer().read(cx).snapshot(cx);
+        let range =
+            snapshot.anchor_after(Point::new(0, 0))..snapshot.anchor_after(Point::new(6, 0));
+        editor.insert_display_elisions(
+            [DisplayElisionProperties {
+                range,
+                tail_rows: 5,
+                height: Some(1),
+                style: BlockStyle::Flex,
+                render: Arc::new(|_| div().child("⋯").into_any_element()),
+                priority: 0,
+                type_tag: None,
+            }],
+            None,
+            cx,
+        );
+        editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+            selections.select_ranges([Point::new(0, 0)..Point::new(0, 0)])
+        });
+    });
+
+    assert_eq!(
+        cx.update_editor(|editor, _, cx| editor.display_text(cx)),
+        "\ntwo\nthree\nfour\nfive\nsix\nseven\n"
+    );
+
+    cx.simulate_keystrokes("z o");
+    assert_eq!(
+        cx.update_editor(|editor, _, cx| editor.display_text(cx)),
+        "one\ntwo\nthree\nfour\nfive\nsix\nseven\n"
+    );
+
+    cx.simulate_keystrokes("z c");
+    assert_eq!(
+        cx.update_editor(|editor, _, cx| editor.display_text(cx)),
+        "\ntwo\nthree\nfour\nfive\nsix\nseven\n"
+    );
 }
 
 #[perf]

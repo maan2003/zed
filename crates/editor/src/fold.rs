@@ -101,8 +101,11 @@ impl Editor {
             .all::<Point>(display_map)
             .into_iter()
             .flat_map(|selection| {
-                let row = selection.head().to_display_point(display_map).row();
-                display_map.display_elisions_in_range(row..DisplayRow(row.0 + 1))
+                let start_row = selection.start.to_display_point(display_map).row();
+                let end_row = selection.end.to_display_point(display_map).row();
+                let start = start_row.min(end_row);
+                let end = DisplayRow(start_row.max(end_row).0 + 1);
+                display_map.display_elisions_in_range(start..end)
             })
             .collect()
     }
