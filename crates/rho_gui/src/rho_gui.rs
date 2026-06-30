@@ -3571,8 +3571,14 @@ fn render_rho_working_elision_block(
                 .h(cx.line_height)
                 .flex()
                 .items_center()
+                .gap_1()
                 .when(cx.selected, |this| this.bg(text_style.color.opacity(0.08)))
-                .child(format!("⋯ {label}")),
+                .child(
+                    Icon::new(IconName::ChevronRight)
+                        .size(IconSize::XSmall)
+                        .color(text_color.into()),
+                )
+                .child(label.to_owned()),
         )
 }
 
