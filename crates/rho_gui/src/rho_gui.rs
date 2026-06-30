@@ -470,6 +470,69 @@ impl RhoGui {
         this
     }
 
+    #[cfg(test)]
+    fn new_for_test(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let completion_state = Arc::new(Mutex::new(TauCompletionState::default()));
+        let this = cx.entity().downgrade();
+        let ui_state = Self::new_agent_ui_state(this, completion_state.clone(), window, cx);
+        let task_board = Self::new_task_board_ui_state(cx.entity().downgrade(), window, cx);
+        let editor = ui_state.editor.clone();
+        let prompt_buffer = ui_state.prompt_buffer.clone();
+        let multi_buffer = ui_state.multi_buffer.clone();
+        let transcript = ui_state.transcript;
+        let prompt_end = ui_state.prompt_end;
+        let draft_end = ui_state.draft_end;
+        let ui_subscriptions = ui_state._subscriptions;
+        let (_tx, rx) = mpsc::channel();
+        let (_rho_tx, rho_rx) = mpsc::channel();
+        let poll_task = cx.spawn(async move |_, _| {});
+
+        let mut this = Self {
+            editor,
+            prompt_buffer,
+            multi_buffer,
+            transcript,
+            prompt_end,
+            draft_end,
+            writer: None,
+            rx,
+            rho_agent: None,
+            rho_rx,
+            rho_state: None,
+            rho_inserted_blocks: Vec::new(),
+            rho_pending_inserted: None,
+            rho_working_elisions: Vec::new(),
+            _poll_task: poll_task,
+            _subscriptions: ui_subscriptions,
+            project_root: std::env::temp_dir(),
+            prompt_state: PromptState::default(),
+            cli_theme: cli_theme::select_theme(tau_config::settings::CliTheme::default()),
+            tool_state: ToolState::default(),
+            shell_state: ShellState::default(),
+            current_model: None,
+            current_role: None,
+            baseline_params: None,
+            role_state: RoleState::default(),
+            current_params: ModelParams::default(),
+            current_context_percent: None,
+            current_context_input_tokens: None,
+            current_context_window: None,
+            main_tool_activity: MainToolActivity::default(),
+            previous_provider_usage: None,
+            agents: AgentState::default(),
+            tasks: TaskState::default(),
+            task_board,
+            main_view: MainView::Agent,
+            completion_state,
+            displayed_agent_id: None,
+            no_agent_ui_state: None,
+            agent_ui_states: HashMap::new(),
+        };
+        this.update_prompt_inlay(cx);
+        this.update_status_line(cx);
+        this
+    }
+
     fn insert_rho_banner_block(&self, cx: &mut Context<Self>) {
         let anchor = self
             .multi_buffer
@@ -3966,9 +4029,55 @@ fn tau_color_to_hsla(color: tau_themes::Color, cx: &App) -> Hsla {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use editor::display_map::{Block, DisplayRow};
+    use gpui::TestAppContext;
 
     fn buffer_text(buffer: &Buffer) -> String {
         buffer.text_for_range(0..buffer.len()).collect()
+    }
+
+    fn long_assistant_text() -> String {
+        "alpha\nbravo\ncharlie\ndelta\necho\nfoxtrot\n".to_owned()
+    }
+
+    fn pending_assistant_state(phase: Option<RhoUiMessagePhase>) -> RhoUiAgentState {
+        RhoUiAgentState {
+            blocks: vec![
+                RhoUiBlock::UserMessage {
+                    text: "do work".to_owned(),
+                },
+                RhoUiBlock::Tool(RhoUiTool {
+                    id: "tool-1".to_owned(),
+                    name: "shell".to_owned(),
+                    arguments: "echo ok".to_owned(),
+                    preview: None,
+                    status: RhoUiToolStatus::Success,
+                    output: None,
+                    error: None,
+                    started_at: None,
+                    finished_at: None,
+                    metadata: None,
+                }),
+            ],
+            status: rho_ui_proto::remote::UiAgentStatus::Streaming,
+            pending_response: vec![RhoUiStreamingItem::AssistantMessage {
+                text: long_assistant_text(),
+                phase,
+            }],
+        }
+    }
+
+    fn has_display_elision(
+        gui: &mut RhoGui,
+        window: &mut Window,
+        cx: &mut Context<RhoGui>,
+    ) -> bool {
+        gui.editor.update(cx, |editor, cx| {
+            let snapshot = editor.snapshot(window, cx);
+            snapshot
+                .blocks_in_range(DisplayRow(0)..snapshot.max_point().row() + 1)
+                .any(|(_, block)| matches!(block, Block::DisplayElision(_)))
+        })
     }
 
     #[gpui::test]
@@ -3984,6 +4093,59 @@ mod tests {
             assert_eq!(left.to_offset(buffer), 1);
             assert_eq!(right.to_offset(buffer), 2);
         });
+    }
+
+    #[gpui::test]
+    fn rho_rendering_elides_pending_unknown_phase_but_not_final_answer(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            assets::Assets.load_test_fonts(cx);
+            let store = SettingsStore::new(cx, settings::default_settings().as_ref());
+            cx.set_global(store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+            editor::init(cx);
+            command_palette::init(cx);
+            search::init(cx);
+            vim::init(cx);
+        });
+
+        let gui = cx.add_window(|window, cx| RhoGui::new_for_test(window, cx));
+
+        let unknown_phase_text = gui
+            .update(cx, |gui, window, cx| {
+                gui.render_rho_state(&pending_assistant_state(None), window, cx);
+                assert!(has_display_elision(gui, window, cx));
+                gui.editor.update(cx, |editor, cx| editor.display_text(cx))
+            })
+            .expect("update rho gui");
+        assert!(
+            !unknown_phase_text.contains("alpha"),
+            "unknown phase pending assistant should be elided: {unknown_phase_text:?}"
+        );
+        assert!(
+            unknown_phase_text.contains("charlie"),
+            "limited elision should leave tail rows visible: {unknown_phase_text:?}"
+        );
+
+        let final_answer_text = gui
+            .update(cx, |gui, window, cx| {
+                gui.render_rho_state(
+                    &pending_assistant_state(Some(RhoUiMessagePhase::FinalAnswer)),
+                    window,
+                    cx,
+                );
+                assert!(!has_display_elision(gui, window, cx));
+                gui.editor.update(cx, |editor, cx| editor.display_text(cx))
+            })
+            .expect("update rho gui");
+        assert!(
+            final_answer_text.contains("alpha"),
+            "final answer pending assistant should not be elided: {final_answer_text:?}"
+        );
+        assert!(
+            final_answer_text.contains("foxtrot"),
+            "final answer pending assistant should render through the end: {final_answer_text:?}"
+        );
     }
 
     #[gpui::test]
