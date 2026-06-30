@@ -3551,6 +3551,11 @@ fn render_rho_working_elision_block(
     cx: &mut BlockContext<'_, '_>,
 ) -> impl IntoElement {
     let text_style = cx.editor_style.text.clone();
+    let text_color = if cx.selected {
+        text_style.color
+    } else {
+        text_style.color.opacity(0.65)
+    };
     div()
         .block_mouse_except_scroll()
         .pl(cx.anchor_x)
@@ -3560,7 +3565,8 @@ fn render_rho_working_elision_block(
         .font_family(text_style.font_family.clone())
         .text_size(text_style.font_size)
         .line_height(text_style.line_height)
-        .text_color(text_style.color.opacity(0.65))
+        .text_color(text_color)
+        .when(cx.selected, |this| this.bg(text_style.color.opacity(0.08)))
         .child(format!("⋯ {label}"))
 }
 

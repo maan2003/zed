@@ -554,6 +554,11 @@
       "[": ["vim::PushHelixPrevious", { "around": true }],
       "ctrl-s": "editor::SaveLocation",
       "g q": "vim::PushRewrap",
+
+      // Fold-like display elision controls.
+      "z a": "editor::ToggleFold",
+      "z c": "editor::Fold",
+      "z o": "editor::UnfoldLines",
     },
   },
   {
