@@ -7962,6 +7962,65 @@ fn test_display_elision_limited_and_collapsed_modes(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn test_display_elision_updates_when_buffer_is_edited(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+
+    let editor = cx.add_window(|window, cx| {
+        let buffer = MultiBuffer::build_simple("one\ntwo\nthree\nfour\n", cx);
+        build_editor(buffer, window, cx)
+    });
+
+    let _ = editor.update(cx, |editor, window, cx| {
+        let snapshot = editor.buffer.read(cx).snapshot(cx);
+        let range =
+            snapshot.anchor_before(Point::new(0, 0))..snapshot.anchor_before(Point::new(3, 0));
+        editor.insert_display_elisions(
+            [DisplayElisionProperties {
+                range,
+                tail_rows: 5,
+                height: Some(1),
+                style: BlockStyle::Flex,
+                render: Arc::new(|_| div().child("⋯").into_any_element()),
+                priority: 0,
+                type_tag: None,
+            }],
+            None,
+            cx,
+        );
+
+        assert_eq!(editor.display_text(cx), "one\ntwo\nthree\nfour\n");
+        let snapshot = editor.snapshot(window, cx);
+        assert!(
+            snapshot
+                .blocks_in_range(DisplayRow(0)..DisplayRow(10))
+                .all(|(_, block)| !matches!(block, Block::DisplayElision(_)))
+        );
+
+        editor.buffer.update(cx, |buffer, cx| {
+            let snapshot = buffer.snapshot(cx);
+            let offset = snapshot.anchor_after(Point::new(2, 0)).to_offset(&snapshot);
+            buffer.edit(
+                [(offset..offset, "inserted-a\ninserted-b\ninserted-c\n")],
+                None,
+                cx,
+            );
+        });
+
+        assert_eq!(
+            editor.display_text(cx),
+            "\ntwo\ninserted-a\ninserted-b\ninserted-c\nthree\nfour\n"
+        );
+        let snapshot = editor.snapshot(window, cx);
+        assert!(
+            snapshot
+                .blocks_in_range(DisplayRow(0)..DisplayRow(10))
+                .any(|(row, block)| row == DisplayRow(0)
+                    && matches!(block, Block::DisplayElision(_)))
+        );
+    });
+}
+
+#[gpui::test]
 async fn test_selections_and_replace_blocks(cx: &mut TestAppContext) {
     init_test(cx, |_| {});
 

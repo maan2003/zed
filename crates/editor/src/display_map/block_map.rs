@@ -879,6 +879,15 @@ impl BlockMap {
             }]);
         }
 
+        if !self.display_elisions.is_empty() && !edits.is_empty() {
+            let old_max_row = self.wrap_snapshot.borrow().max_point().row() + WrapRow(1);
+            let new_max_row = max_point.row() + WrapRow(1);
+            edits = Patch::new(vec![WrapEdit {
+                old: WrapRow(0)..old_max_row,
+                new: WrapRow(0)..new_max_row,
+            }]);
+        }
+
         // Pull in companion edits to ensure we recompute spacers in ranges that have changed in the companion.
         if let Some(CompanionView {
             companion_wrap_snapshot: companion_new_snapshot,
