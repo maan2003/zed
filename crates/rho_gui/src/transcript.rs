@@ -15,6 +15,7 @@ struct HighlightedRange {
 pub(crate) struct InsertedTranscript {
     pub(crate) range: std::ops::Range<Anchor>,
     pub(crate) highlight_keys: Vec<usize>,
+    pub(crate) highlight_ranges: Vec<std::ops::Range<Anchor>>,
 }
 
 pub(crate) struct Transcript {
@@ -111,6 +112,10 @@ impl Transcript {
             .count()
     }
 
+    pub(crate) fn is_empty<T>(&self, cx: &Context<T>) -> bool {
+        self.end.to_offset(&self.buffer.read(cx)) == 0
+    }
+
     pub(crate) fn insert_spans<'a, T>(
         &mut self,
         spans: impl IntoIterator<Item = (&'a str, HighlightStyle)>,
@@ -131,15 +136,18 @@ impl Transcript {
             let inserted_len = text.len();
             let mut span_start = offset;
             let mut highlight_keys = Vec::new();
+            let mut highlight_ranges = Vec::new();
             for (span_text, style) in spans {
                 let span_end = span_start + span_text.len();
+                let range = buffer.anchor_before(span_start)..buffer.anchor_before(span_end);
                 let highlight_key = self.next_highlight_key;
                 self.ranges.push(HighlightedRange {
-                    range: buffer.anchor_before(span_start)..buffer.anchor_before(span_end),
+                    range: range.clone(),
                     highlight_key,
                     style,
                 });
                 highlight_keys.push(highlight_key);
+                highlight_ranges.push(range);
                 self.next_highlight_key = self.next_highlight_key.saturating_add(1);
                 span_start = span_end;
             }
@@ -148,6 +156,7 @@ impl Transcript {
             InsertedTranscript {
                 range: buffer.anchor_before(offset)..buffer.anchor_before(end),
                 highlight_keys,
+                highlight_ranges,
             }
         });
         self.apply_highlights(cx);
@@ -178,15 +187,18 @@ impl Transcript {
             buffer.edit([(start..end, text.as_str())], None, cx);
             let mut span_start = start;
             let mut highlight_keys = Vec::new();
+            let mut highlight_ranges = Vec::new();
             for (span_text, style) in spans {
                 let span_end = span_start + span_text.len();
+                let range = buffer.anchor_before(span_start)..buffer.anchor_before(span_end);
                 let highlight_key = self.next_highlight_key;
                 self.ranges.push(HighlightedRange {
-                    range: buffer.anchor_before(span_start)..buffer.anchor_before(span_end),
+                    range: range.clone(),
                     highlight_key,
                     style,
                 });
                 highlight_keys.push(highlight_key);
+                highlight_ranges.push(range);
                 self.next_highlight_key = self.next_highlight_key.saturating_add(1);
                 span_start = span_end;
             }
@@ -201,6 +213,7 @@ impl Transcript {
             InsertedTranscript {
                 range: buffer.anchor_before(start)..buffer.anchor_before(start + new_len),
                 highlight_keys,
+                highlight_ranges,
             }
         });
         self.apply_highlights(cx);

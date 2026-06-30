@@ -2692,9 +2692,32 @@ impl RhoGui {
         cx: &mut Context<Self>,
     ) -> Option<InsertedTranscript> {
         let style = self.highlight_style(style, cx);
-        let inserted = self.insert_before_draft_highlighted(&format!("{text}\n"), style, cx)?;
+        let gap = self.user_message_leading_gap(cx);
+        let message = format!("{text}\n");
+        let inserted = if gap.is_empty() {
+            self.insert_before_draft_highlighted(&message, style, cx)?
+        } else {
+            self.insert_before_draft_spans(
+                [
+                    (gap.as_str(), HighlightStyle::default()),
+                    (message.as_str(), style),
+                ],
+                cx,
+            )?
+        };
         self.insert_user_message_prefix_inlay(&inserted, cx);
         Some(inserted)
+    }
+
+    fn user_message_leading_gap(&self, cx: &mut Context<Self>) -> String {
+        if self.transcript.is_empty(cx) {
+            return String::new();
+        }
+        match self.transcript_trailing_newlines(cx) {
+            0 => "\n\n".to_owned(),
+            1 => "\n".to_owned(),
+            _ => String::new(),
+        }
     }
 
     fn insert_user_message_prefix_inlay(
@@ -2702,12 +2725,15 @@ impl RhoGui {
         inserted: &InsertedTranscript,
         cx: &mut Context<Self>,
     ) {
-        let Some(highlight_key) = inserted.highlight_keys.first().copied() else {
+        let Some(highlight_key) = inserted.highlight_keys.last().copied() else {
+            return;
+        };
+        let Some(highlight_range) = inserted.highlight_ranges.last() else {
             return;
         };
         let Some(range) = self
             .transcript
-            .multibuffer_range(inserted.range.clone(), cx)
+            .multibuffer_range(highlight_range.clone(), cx)
         else {
             return;
         };
@@ -4404,6 +4430,51 @@ mod tests {
         assert_eq!(
             spans[0].1.color,
             Some(cx.theme().colors().terminal_ansi_bright_black)
+        );
+    }
+
+    #[gpui::test]
+    fn rho_user_messages_have_turn_gap_after_first(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            init_test_app(cx);
+        });
+
+        let gui = cx.add_window(|window, cx| RhoGui::new_for_test(window, cx));
+        let text = gui
+            .update(cx, |gui, window, cx| {
+                gui.render_rho_state(
+                    &RhoUiAgentState {
+                        blocks: vec![
+                            RhoUiBlock::UserMessage {
+                                text: "first".to_owned(),
+                            },
+                            RhoUiBlock::AssistantMessage {
+                                text: "answer".to_owned(),
+                                phase: Some(RhoUiMessagePhase::FinalAnswer),
+                            },
+                            RhoUiBlock::UserMessage {
+                                text: "second".to_owned(),
+                            },
+                        ],
+                        status: rho_ui_proto::remote::UiAgentStatus::Streaming,
+                        pending_response: Vec::new(),
+                    },
+                    window,
+                    cx,
+                );
+                gui.editor.update(cx, |editor, cx| editor.display_text(cx))
+            })
+            .expect("update rho gui");
+
+        assert!(
+            text.contains(&format!(
+                "{USER_MESSAGE_PREFIX}first\nanswer\n\n{USER_MESSAGE_PREFIX}second\n"
+            )),
+            "subsequent user messages should start a new turn with an empty line: {text:?}"
+        );
+        assert!(
+            !text.starts_with('\n'),
+            "first user message should not get a leading gap: {text:?}"
         );
     }
 
