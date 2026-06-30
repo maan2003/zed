@@ -1306,10 +1306,6 @@ impl RhoGui {
             }
         }
 
-        if let Some(previous) = current {
-            ranges.push(previous);
-        }
-
         if !state.pending_response.is_empty()
             && state
                 .pending_response
@@ -1323,7 +1319,24 @@ impl RhoGui {
                     .iter()
                     .filter(|item| matches!(item, RhoUiStreamingItem::Tool(_)))
                     .count();
-            ranges.push((inserted.range.clone(), tool_count, 5));
+            let range = inserted.range.clone();
+            match current.take() {
+                Some((current_range, current_tool_count, current_tail_rows))
+                    if current_tool_count == tool_count && current_tail_rows == 5 =>
+                {
+                    current = Some((current_range.start..range.end, current_tool_count, 5));
+                }
+                previous => {
+                    if let Some(previous) = previous {
+                        ranges.push(previous);
+                    }
+                    current = Some((range, tool_count, 5));
+                }
+            }
+        }
+
+        if let Some(previous) = current {
+            ranges.push(previous);
         }
 
         ranges
@@ -4067,6 +4080,25 @@ mod tests {
         }
     }
 
+    fn committed_plus_pending_commentary_state() -> RhoUiAgentState {
+        RhoUiAgentState {
+            blocks: vec![
+                RhoUiBlock::UserMessage {
+                    text: "do work".to_owned(),
+                },
+                RhoUiBlock::AssistantMessage {
+                    text: "committed-one\ncommitted-two\ncommitted-three\n".to_owned(),
+                    phase: Some(RhoUiMessagePhase::Commentary),
+                },
+            ],
+            status: rho_ui_proto::remote::UiAgentStatus::Streaming,
+            pending_response: vec![RhoUiStreamingItem::AssistantMessage {
+                text: "pending-four\npending-five\npending-six\n".to_owned(),
+                phase: Some(RhoUiMessagePhase::Commentary),
+            }],
+        }
+    }
+
     fn has_display_elision(
         gui: &mut RhoGui,
         window: &mut Window,
@@ -4145,6 +4177,46 @@ mod tests {
         assert!(
             final_answer_text.contains("foxtrot"),
             "final answer pending assistant should render through the end: {final_answer_text:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn rho_rendering_merges_pending_commentary_into_active_working_elision(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            assets::Assets.load_test_fonts(cx);
+            let store = SettingsStore::new(cx, settings::default_settings().as_ref());
+            cx.set_global(store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+            editor::init(cx);
+            command_palette::init(cx);
+            search::init(cx);
+            vim::init(cx);
+        });
+
+        let gui = cx.add_window(|window, cx| RhoGui::new_for_test(window, cx));
+
+        let text = gui
+            .update(cx, |gui, window, cx| {
+                gui.render_rho_state(&committed_plus_pending_commentary_state(), window, cx);
+                assert!(has_display_elision(gui, window, cx));
+                gui.editor.update(cx, |editor, cx| editor.display_text(cx))
+            })
+            .expect("update rho gui");
+
+        assert!(
+            !text.contains("committed-one"),
+            "combined committed+pending commentary should elide from the start: {text:?}"
+        );
+        assert!(
+            text.contains("committed-three"),
+            "limited elision should leave combined tail rows visible: {text:?}"
+        );
+        assert!(
+            text.contains("pending-six"),
+            "pending commentary should be part of the visible tail: {text:?}"
         );
     }
 
