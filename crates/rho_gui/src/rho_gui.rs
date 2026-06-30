@@ -190,7 +190,7 @@ fn init_app(cx: &mut App) -> Result<()> {
 
 const PROMPT_PLACEHOLDER_INLAY_ID: usize = 0;
 const USER_MESSAGE_PREFIX_INLAY_ID_BASE: usize = 10_000;
-const USER_MESSAGE_PREFIX: &str = "▌";
+const USER_MESSAGE_PREFIX: &str = "▌ ";
 const DEFAULT_RHO_GUI_SETTINGS: &str = r#"// Rho GUI user settings. Values here override bundled defaults.
 {}
 "#;
@@ -2692,32 +2692,31 @@ impl RhoGui {
         cx: &mut Context<Self>,
     ) -> Option<InsertedTranscript> {
         let style = self.highlight_style(style, cx);
-        let gap = self.user_message_leading_gap(cx);
-        let message = format!("{text}\n\n");
-        let inserted = if gap.is_empty() {
-            self.insert_before_draft_highlighted(&message, style, cx)?
-        } else {
-            self.insert_before_draft_spans(
-                [
-                    (gap.as_str(), HighlightStyle::default()),
-                    (message.as_str(), style),
-                ],
-                cx,
-            )?
-        };
+        let spans = self.user_message_spans(text, style, cx);
+        let inserted = self.insert_before_draft_spans(
+            spans.iter().map(|(text, style)| (text.as_str(), *style)),
+            cx,
+        )?;
         self.insert_user_message_prefix_inlay(&inserted, cx);
         Some(inserted)
     }
 
-    fn user_message_leading_gap(&self, cx: &mut Context<Self>) -> String {
-        if self.transcript.is_empty(cx) {
-            return String::new();
+    fn user_message_spans(
+        &self,
+        text: &str,
+        style: HighlightStyle,
+        cx: &mut Context<Self>,
+    ) -> Vec<(String, HighlightStyle)> {
+        let mut spans = Vec::new();
+        if !self.transcript.is_empty(cx) {
+            match self.transcript_trailing_newlines(cx) {
+                0 => spans.push(("\n\n".to_owned(), HighlightStyle::default())),
+                1 => spans.push(("\n".to_owned(), HighlightStyle::default())),
+                _ => {}
+            }
         }
-        match self.transcript_trailing_newlines(cx) {
-            0 => "\n\n".to_owned(),
-            1 => "\n".to_owned(),
-            _ => String::new(),
-        }
+        spans.push((format!("{text}\n\n"), style));
+        spans
     }
 
     fn insert_user_message_prefix_inlay(
