@@ -1289,6 +1289,11 @@ impl RhoGui {
             .pending_response
             .iter()
             .any(|item| !rho_pending_item_is_working(item));
+        let pending_tool_count = state
+            .pending_response
+            .iter()
+            .filter(|item| matches!(item, RhoUiStreamingItem::Tool(_)))
+            .count();
 
         for (index, (block, inserted)) in state
             .blocks
@@ -1299,7 +1304,10 @@ impl RhoGui {
             let Some(inserted) = inserted else {
                 continue;
             };
-            let turn_tool_count = rho_turn_tool_count(state, index);
+            let mut turn_tool_count = rho_turn_tool_count(state, index);
+            if rho_block_is_in_active_turn(state, index) {
+                turn_tool_count += pending_tool_count;
+            }
             let tail_rows = if rho_turn_has_non_working_response(state, index)
                 || (active_turn_has_pending_non_working_response
                     && rho_block_is_in_active_turn(state, index))
@@ -1342,12 +1350,7 @@ impl RhoGui {
                 .all(rho_pending_item_is_working)
             && let Some(inserted) = &self.rho_pending_inserted
         {
-            let tool_count = rho_active_turn_tool_count(state)
-                + state
-                    .pending_response
-                    .iter()
-                    .filter(|item| matches!(item, RhoUiStreamingItem::Tool(_)))
-                    .count();
+            let tool_count = rho_active_turn_tool_count(state) + pending_tool_count;
             let range = inserted.range.clone();
             match current.take() {
                 Some((current_range, current_tool_count, current_tail_rows))
@@ -4180,6 +4183,18 @@ mod tests {
         }
     }
 
+    fn committed_commentary_plus_pending_tools_state(tool_count: usize) -> RhoUiAgentState {
+        let mut state = pending_tools_state(tool_count);
+        state.blocks.insert(
+            1,
+            RhoUiBlock::AssistantMessage {
+                text: "before-tools-one\nbefore-tools-two\nbefore-tools-three\n".to_owned(),
+                phase: Some(RhoUiMessagePhase::Commentary),
+            },
+        );
+        state
+    }
+
     fn has_display_elision(
         gui: &mut RhoGui,
         window: &mut Window,
@@ -4409,6 +4424,44 @@ mod tests {
         assert!(
             text.contains("tool_7"),
             "grown pending tools should keep the tail visible: {text:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn rho_rendering_merges_committed_commentary_with_pending_tools(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            assets::Assets.load_test_fonts(cx);
+            let store = SettingsStore::new(cx, settings::default_settings().as_ref());
+            cx.set_global(store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+            editor::init(cx);
+            command_palette::init(cx);
+            search::init(cx);
+            vim::init(cx);
+        });
+
+        let gui = cx.add_window(|window, cx| RhoGui::new_for_test(window, cx));
+
+        let text = gui
+            .update(cx, |gui, window, cx| {
+                gui.render_rho_state(
+                    &committed_commentary_plus_pending_tools_state(8),
+                    window,
+                    cx,
+                );
+                assert!(has_display_elision(gui, window, cx));
+                gui.editor.update(cx, |editor, cx| editor.display_text(cx))
+            })
+            .expect("update rho gui");
+
+        assert!(
+            !text.contains("before-tools-one"),
+            "committed commentary before pending tools should be part of the same elision: {text:?}"
+        );
+        assert!(
+            text.contains("tool_7"),
+            "pending tool tail should remain visible: {text:?}"
         );
     }
 
