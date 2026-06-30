@@ -3843,7 +3843,7 @@ fn tool_display_from_call(call: &ToolCallItem) -> tau_proto::ToolUseState {
     let args = match call.name.as_str() {
         "read" | "write" | "edit" | "ls" => cbor_text_field(&call.arguments, "path"),
         "grep" | "glob" => cbor_text_field(&call.arguments, "pattern"),
-        "shell" => cbor_text_field(&call.arguments, "command"),
+        "shell" | "shell_command" => cbor_text_field(&call.arguments, "command"),
         "agent_start" => cbor_text_field(&call.arguments, "task_name"),
         _ => cbor_text_field(&call.arguments, "path")
             .or_else(|| cbor_text_field(&call.arguments, "pattern"))

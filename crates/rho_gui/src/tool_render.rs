@@ -846,10 +846,20 @@ pub(crate) fn render_tool_block(
     let mode = themed.add_style(names::TOOL_MODE);
     let args = themed.add_style(names::TOOL_ARGS);
 
-    let mut children = vec![SpanTree::span(
-        name,
-        vec![SpanTree::text(display.tool_name.clone())],
-    )];
+    let is_shell_command = matches!(display.tool_name.as_str(), "shell" | "shell_command");
+    let mut children = if is_shell_command {
+        let mut text = "$".to_owned();
+        if !display.args.is_empty() {
+            text.push(' ');
+            text.push_str(&abbreviate_inline_text(&display.args));
+        }
+        vec![SpanTree::span(args, vec![SpanTree::text(text)])]
+    } else {
+        vec![SpanTree::span(
+            name,
+            vec![SpanTree::text(display.tool_name.clone())],
+        )]
+    };
     if !display.mode.is_empty() {
         children.push(SpanTree::span(args, vec![SpanTree::text(" ")]));
         children.push(SpanTree::span(
@@ -857,7 +867,7 @@ pub(crate) fn render_tool_block(
             vec![SpanTree::text(abbreviate_inline_text(&display.mode))],
         ));
     }
-    if !display.args.is_empty() {
+    if !display.args.is_empty() && !is_shell_command {
         children.push(SpanTree::span(
             args,
             vec![
@@ -1031,7 +1041,6 @@ pub(crate) fn render_shell_block(
     use tau_cli_term::{Span, StyledBlock, StyledText};
     use tau_themes::names;
 
-    let name_style = resolve(theme, names::TOOL_NAME);
     let args_style = resolve(theme, names::TOOL_ARGS);
     let status_name = match status_suffix {
         Some(s) if s.starts_with("[0]") => names::TOOL_STATUS_SUCCESS,
@@ -1040,11 +1049,10 @@ pub(crate) fn render_shell_block(
     };
     let status_style = resolve(theme, status_name);
 
-    let mut spans = vec![
-        Span::new("shell", name_style),
-        Span::new(" ", args_style),
-        Span::new(abbreviate_inline_text(command), args_style),
-    ];
+    let mut spans = vec![Span::new(
+        format!("$ {}", abbreviate_inline_text(command)),
+        args_style,
+    )];
     if let Some(suffix) = status_suffix {
         spans.push(Span::new(" ", args_style));
         spans.push(Span::new(abbreviate_inline_text(suffix), status_style));
