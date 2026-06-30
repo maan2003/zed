@@ -380,12 +380,14 @@ struct RhoWorkingElision {
     id: DisplayElisionId,
     range: std::ops::Range<text::Anchor>,
     tool_count: usize,
+    tail_rows: u32,
 }
 
 #[derive(Clone)]
 struct RhoWorkingElisionCandidate {
     range: std::ops::Range<text::Anchor>,
     tool_count: usize,
+    tail_rows: u32,
 }
 
 impl RhoGui {
@@ -1143,6 +1145,7 @@ impl RhoGui {
             let Some(properties) = self.rho_working_elision_properties(
                 candidate.range.clone(),
                 candidate.tool_count,
+                candidate.tail_rows,
                 cx,
             ) else {
                 if let Some(elision) = self.rho_working_elisions.get(index) {
@@ -1152,13 +1155,17 @@ impl RhoGui {
             };
 
             if let Some(elision) = self.rho_working_elisions.get(index) {
-                if elision.range != candidate.range || elision.tool_count != candidate.tool_count {
+                if elision.range != candidate.range
+                    || elision.tool_count != candidate.tool_count
+                    || elision.tail_rows != candidate.tail_rows
+                {
                     updates.push((elision.id, properties));
                 }
                 elisions.push(RhoWorkingElision {
                     id: elision.id,
                     range: candidate.range.clone(),
                     tool_count: candidate.tool_count,
+                    tail_rows: candidate.tail_rows,
                 });
             } else {
                 inserted_candidates.push(candidate.clone());
@@ -1181,6 +1188,7 @@ impl RhoGui {
                 id,
                 range: candidate.range,
                 tool_count: candidate.tool_count,
+                tail_rows: candidate.tail_rows,
             },
         ));
         self.rho_working_elisions = elisions;
@@ -1191,7 +1199,7 @@ impl RhoGui {
         state: &RhoUiAgentState,
     ) -> Vec<RhoWorkingElisionCandidate> {
         let mut ranges = Vec::new();
-        let mut current: Option<(std::ops::Range<text::Anchor>, usize)> = None;
+        let mut current: Option<(std::ops::Range<text::Anchor>, usize, u32)> = None;
 
         for (index, (block, inserted)) in state
             .blocks
@@ -1203,6 +1211,11 @@ impl RhoGui {
                 continue;
             };
             let turn_tool_count = rho_turn_tool_count(state, index);
+            let tail_rows = if rho_turn_has_non_working_response(state, index) {
+                0
+            } else {
+                5
+            };
             let range = if rho_block_is_working(block) {
                 Some(inserted.range.clone())
             } else {
@@ -1210,16 +1223,20 @@ impl RhoGui {
             };
 
             match (range, current.take()) {
-                (Some(range), Some((current_range, current_tool_count)))
-                    if current_tool_count == turn_tool_count =>
+                (Some(range), Some((current_range, current_tool_count, current_tail_rows)))
+                    if current_tool_count == turn_tool_count && current_tail_rows == tail_rows =>
                 {
-                    current = Some((current_range.start..range.end, current_tool_count));
+                    current = Some((
+                        current_range.start..range.end,
+                        current_tool_count,
+                        current_tail_rows,
+                    ));
                 }
                 (Some(range), previous) => {
                     if let Some(previous) = previous {
                         ranges.push(previous);
                     }
-                    current = Some((range, turn_tool_count));
+                    current = Some((range, turn_tool_count, tail_rows));
                 }
                 (None, Some(previous)) => ranges.push(previous),
                 (None, None) => {}
@@ -1243,12 +1260,18 @@ impl RhoGui {
                     .iter()
                     .filter(|item| matches!(item, RhoUiStreamingItem::Tool(_)))
                     .count();
-            ranges.push((inserted.range.clone(), tool_count));
+            ranges.push((inserted.range.clone(), tool_count, 5));
         }
 
         ranges
             .into_iter()
-            .map(|(range, tool_count)| RhoWorkingElisionCandidate { range, tool_count })
+            .map(
+                |(range, tool_count, tail_rows)| RhoWorkingElisionCandidate {
+                    range,
+                    tool_count,
+                    tail_rows,
+                },
+            )
             .collect()
     }
 
@@ -1256,6 +1279,7 @@ impl RhoGui {
         &self,
         range: std::ops::Range<text::Anchor>,
         tool_count: usize,
+        tail_rows: u32,
         cx: &Context<Self>,
     ) -> Option<DisplayElisionProperties<multi_buffer::Anchor>> {
         let label = rho_working_elision_label(tool_count);
@@ -1263,7 +1287,7 @@ impl RhoGui {
             .multibuffer_range(range, cx)
             .map(|range| DisplayElisionProperties {
                 range,
-                tail_rows: 5,
+                tail_rows,
                 height: Some(1),
                 style: BlockStyle::Flex,
                 render: Arc::new(move |cx| {
@@ -3346,6 +3370,21 @@ fn rho_pending_item_is_working(item: &RhoUiStreamingItem) -> bool {
 }
 
 fn rho_turn_tool_count(state: &RhoUiAgentState, block_index: usize) -> usize {
+    let turn_range = rho_turn_range(state, block_index);
+    state.blocks[turn_range]
+        .iter()
+        .filter(|block| matches!(block, RhoUiBlock::Tool(_)))
+        .count()
+}
+
+fn rho_turn_has_non_working_response(state: &RhoUiAgentState, block_index: usize) -> bool {
+    let turn_range = rho_turn_range(state, block_index);
+    state.blocks[turn_range].iter().any(|block| {
+        !matches!(block, RhoUiBlock::UserMessage { .. }) && !rho_block_is_working(block)
+    })
+}
+
+fn rho_turn_range(state: &RhoUiAgentState, block_index: usize) -> std::ops::Range<usize> {
     let turn_start = state.blocks[..=block_index]
         .iter()
         .rposition(|block| matches!(block, RhoUiBlock::UserMessage { .. }))
@@ -3355,11 +3394,7 @@ fn rho_turn_tool_count(state: &RhoUiAgentState, block_index: usize) -> usize {
         .position(|block| matches!(block, RhoUiBlock::UserMessage { .. }))
         .map(|offset| block_index + 1 + offset)
         .unwrap_or(state.blocks.len());
-
-    state.blocks[turn_start..turn_end]
-        .iter()
-        .filter(|block| matches!(block, RhoUiBlock::Tool(_)))
-        .count()
+    turn_start..turn_end
 }
 
 fn rho_active_turn_tool_count(state: &RhoUiAgentState) -> usize {

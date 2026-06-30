@@ -1136,7 +1136,7 @@ impl BlockMap {
                 let buffer = wrap_snapshot.buffer_snapshot();
                 let mut start = elision.range.start.to_point(buffer);
                 let end = elision.range.end.to_point(buffer);
-                if start >= end || elision.tail_rows == 0 {
+                if start >= end {
                     return None;
                 }
 
