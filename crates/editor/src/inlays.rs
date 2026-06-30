@@ -175,7 +175,7 @@ impl Editor {
         cx.notify();
     }
 
-    pub(crate) fn highlight_inlays(
+    pub fn highlight_inlays(
         &mut self,
         key: HighlightKey,
         highlights: Vec<InlayHighlight>,

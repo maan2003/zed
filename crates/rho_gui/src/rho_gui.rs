@@ -9,9 +9,10 @@ use anyhow::{Context as _, Result, anyhow};
 use audio::{Audio, Sound};
 use clap::Parser;
 use editor::{
-    DisplayElisionId, DisplayElisionProperties, Editor, EditorMode, EditorRightPrompt, Inlay,
-    SelectionEffects, SizingBehavior,
+    DisplayElisionId, DisplayElisionProperties, Editor, EditorMode, EditorRightPrompt,
+    HighlightKey, Inlay, SelectionEffects, SizingBehavior,
     display_map::{BlockContext, BlockPlacement, BlockProperties, BlockStyle},
+    hover_links::InlayHighlight,
     scroll::AutoscrollStrategy,
 };
 use gpui::{
@@ -2711,10 +2712,22 @@ impl RhoGui {
             return;
         };
         let id = USER_MESSAGE_PREFIX_INLAY_ID_BASE + highlight_key;
+        let style = self.highlight_style(TranscriptStyle::UserPrompt, cx);
+        let inlay_id = InlayId::Custom(id);
         self.editor.update(cx, |editor, cx| {
             editor.splice_inlays(
                 &[],
                 vec![Inlay::custom(id, range.start, USER_MESSAGE_PREFIX)],
+                cx,
+            );
+            editor.highlight_inlays(
+                HighlightKey::SyntaxTreeView(highlight_key),
+                vec![InlayHighlight {
+                    inlay: inlay_id,
+                    inlay_position: range.start,
+                    range: 0..USER_MESSAGE_PREFIX.len(),
+                }],
+                style,
                 cx,
             );
         });
@@ -2900,6 +2913,9 @@ impl RhoGui {
             .collect::<Vec<_>>();
         self.editor.update(cx, |editor, cx| {
             editor.splice_inlays(&inlay_ids, Vec::new(), cx);
+            for key in &highlight_keys {
+                editor.clear_highlights(HighlightKey::SyntaxTreeView(*key), cx);
+            }
         });
         self.transcript.remove_highlights(highlight_keys);
     }
