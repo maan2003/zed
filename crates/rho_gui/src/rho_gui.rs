@@ -3314,7 +3314,7 @@ fn push_rho_pending_item_spans(
                     .into_iter()
                     .map(|(text, style)| (text.to_owned(), style)),
             );
-            spans.push(("\n".to_owned(), HighlightStyle::default()));
+            push_rho_spans_trailing_newline(spans);
         }
         RhoUiStreamingItem::Reasoning { .. } => {}
         RhoUiStreamingItem::Tool(tool) => push_rho_tool_spans(spans, theme, tool, cx),
@@ -3465,7 +3465,13 @@ fn push_rho_tool_spans(
             .into_iter()
             .map(|(text, style)| (text.to_owned(), style)),
     );
-    spans.push(("\n".to_owned(), HighlightStyle::default()));
+    push_rho_spans_trailing_newline(spans);
+}
+
+fn push_rho_spans_trailing_newline(spans: &mut Vec<(String, HighlightStyle)>) {
+    if !spans.last().is_some_and(|(text, _)| text.ends_with('\n')) {
+        spans.push(("\n".to_owned(), HighlightStyle::default()));
+    }
 }
 
 fn rho_tool_status_label(status: &RhoUiToolStatus) -> &'static str {
