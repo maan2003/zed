@@ -390,6 +390,8 @@ struct RhoWorkingElisionCandidate {
     tail_rows: u32,
 }
 
+const RHO_LIMITED_TAIL_ROWS: u32 = 9;
+
 impl RhoGui {
     fn new(attach_target: AttachTarget, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let completion_state = Arc::new(Mutex::new(TauCompletionState::default()));
@@ -1314,7 +1316,7 @@ impl RhoGui {
             {
                 0
             } else {
-                5
+                RHO_LIMITED_TAIL_ROWS
             };
             let range = if rho_block_is_working(block) {
                 Some(inserted.range.clone())
@@ -1354,15 +1356,20 @@ impl RhoGui {
             let range = inserted.range.clone();
             match current.take() {
                 Some((current_range, current_tool_count, current_tail_rows))
-                    if current_tool_count == tool_count && current_tail_rows == 5 =>
+                    if current_tool_count == tool_count
+                        && current_tail_rows == RHO_LIMITED_TAIL_ROWS =>
                 {
-                    current = Some((current_range.start..range.end, current_tool_count, 5));
+                    current = Some((
+                        current_range.start..range.end,
+                        current_tool_count,
+                        RHO_LIMITED_TAIL_ROWS,
+                    ));
                 }
                 previous => {
                     if let Some(previous) = previous {
                         ranges.push(previous);
                     }
-                    current = Some((range, tool_count, 5));
+                    current = Some((range, tool_count, RHO_LIMITED_TAIL_ROWS));
                 }
             }
         }
@@ -4090,7 +4097,8 @@ mod tests {
     }
 
     fn long_assistant_text() -> String {
-        "alpha\nbravo\ncharlie\ndelta\necho\nfoxtrot\n".to_owned()
+        "alpha\nbravo\ncharlie\ndelta\necho\nfoxtrot\ngolf\nhotel\nindia\njuliet\nkilo\nlima\n"
+            .to_owned()
     }
 
     fn pending_assistant_state(phase: Option<RhoUiMessagePhase>) -> RhoUiAgentState {
@@ -4127,13 +4135,15 @@ mod tests {
                     text: "do work".to_owned(),
                 },
                 RhoUiBlock::AssistantMessage {
-                    text: "committed-one\ncommitted-two\ncommitted-three\n".to_owned(),
+                    text: "committed-one\ncommitted-two\ncommitted-three\ncommitted-four\ncommitted-five\n"
+                        .to_owned(),
                     phase: Some(RhoUiMessagePhase::Commentary),
                 },
             ],
             status: rho_ui_proto::remote::UiAgentStatus::Streaming,
             pending_response: vec![RhoUiStreamingItem::AssistantMessage {
-                text: "pending-four\npending-five\npending-six\n".to_owned(),
+                text: "pending-six\npending-seven\npending-eight\npending-nine\npending-ten\npending-eleven\n"
+                    .to_owned(),
                 phase: Some(RhoUiMessagePhase::Commentary),
             }],
         }
@@ -4187,10 +4197,11 @@ mod tests {
         let mut state = pending_tools_state(tool_count);
         state.blocks.insert(
             1,
-            RhoUiBlock::AssistantMessage {
-                text: "before-tools-one\nbefore-tools-two\nbefore-tools-three\n".to_owned(),
-                phase: Some(RhoUiMessagePhase::Commentary),
-            },
+                RhoUiBlock::AssistantMessage {
+                    text: "before-tools-one\nbefore-tools-two\nbefore-tools-three\nbefore-tools-four\nbefore-tools-five\n"
+                        .to_owned(),
+                    phase: Some(RhoUiMessagePhase::Commentary),
+                },
         );
         state
     }
@@ -4251,7 +4262,7 @@ mod tests {
             "unknown phase pending assistant should be elided: {unknown_phase_text:?}"
         );
         assert!(
-            unknown_phase_text.contains("charlie"),
+            unknown_phase_text.contains("echo"),
             "limited elision should leave tail rows visible: {unknown_phase_text:?}"
         );
 
@@ -4306,7 +4317,7 @@ mod tests {
             "combined committed+pending commentary should elide from the start: {text:?}"
         );
         assert!(
-            text.contains("committed-three"),
+            text.contains("committed-four"),
             "limited elision should leave combined tail rows visible: {text:?}"
         );
         assert!(
@@ -4371,7 +4382,7 @@ mod tests {
 
         let text = gui
             .update(cx, |gui, window, cx| {
-                gui.render_rho_state(&pending_tools_state(8), window, cx);
+                gui.render_rho_state(&pending_tools_state(12), window, cx);
                 assert!(has_display_elision(gui, window, cx));
                 gui.editor.update(cx, |editor, cx| editor.display_text(cx))
             })
@@ -4382,7 +4393,7 @@ mod tests {
             "burst of pending tools should elide earliest tools immediately: {text:?}"
         );
         assert!(
-            text.contains("tool_7"),
+            text.contains("tool_11"),
             "burst of pending tools should keep the tail visible: {text:?}"
         );
     }
@@ -4411,7 +4422,7 @@ mod tests {
 
         let text = gui
             .update(cx, |gui, window, cx| {
-                gui.render_rho_state(&pending_tools_state(8), window, cx);
+                gui.render_rho_state(&pending_tools_state(12), window, cx);
                 assert!(has_display_elision(gui, window, cx));
                 gui.editor.update(cx, |editor, cx| editor.display_text(cx))
             })
@@ -4422,7 +4433,7 @@ mod tests {
             "grown pending tools should elide earliest tools after replacement: {text:?}"
         );
         assert!(
-            text.contains("tool_7"),
+            text.contains("tool_11"),
             "grown pending tools should keep the tail visible: {text:?}"
         );
     }
@@ -4446,7 +4457,7 @@ mod tests {
         let text = gui
             .update(cx, |gui, window, cx| {
                 gui.render_rho_state(
-                    &committed_commentary_plus_pending_tools_state(8),
+                    &committed_commentary_plus_pending_tools_state(12),
                     window,
                     cx,
                 );
@@ -4460,7 +4471,7 @@ mod tests {
             "committed commentary before pending tools should be part of the same elision: {text:?}"
         );
         assert!(
-            text.contains("tool_7"),
+            text.contains("tool_11"),
             "pending tool tail should remain visible: {text:?}"
         );
     }
