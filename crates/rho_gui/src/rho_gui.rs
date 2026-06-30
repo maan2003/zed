@@ -190,7 +190,7 @@ fn init_app(cx: &mut App) -> Result<()> {
 
 const PROMPT_PLACEHOLDER_INLAY_ID: usize = 0;
 const USER_MESSAGE_PREFIX_INLAY_ID_BASE: usize = 10_000;
-const USER_MESSAGE_PREFIX: &str = "▌ ";
+const USER_MESSAGE_PREFIX: &str = "▎";
 const DEFAULT_RHO_GUI_SETTINGS: &str = r#"// Rho GUI user settings. Values here override bundled defaults.
 {}
 "#;
