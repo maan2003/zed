@@ -3689,36 +3689,70 @@ fn highlight_style_for_theme(
 
 fn push_rho_tool_spans(
     spans: &mut Vec<(String, HighlightStyle)>,
-    theme: &tau_themes::Theme,
+    _theme: &tau_themes::Theme,
     tool: &RhoUiTool,
     cx: &App,
 ) {
     let status = rho_tool_status_label(&tool.status);
-    let display = tool_render::ToolCallDisplay {
-        tool_name: tool.name.clone(),
-        mode: String::new(),
-        args: tool.arguments.clone(),
-        range: None,
-        suffixes: vec![tool_render::ToolSuffixSegment {
-            text: status.to_owned(),
-            status: rho_tool_status_style(status),
-            no_leading_space: false,
-        }],
-        payload: tool
-            .preview
-            .as_deref()
-            .or(tool.output.as_deref())
-            .map(|text| tau_proto::ToolUsePayload::Text {
-                text: text.to_owned(),
-            }),
+    let is_shell_command = matches!(tool.name.as_str(), "shell" | "shell_command");
+    let label = if is_shell_command {
+        if tool.arguments.is_empty() {
+            "$".to_owned()
+        } else {
+            format!("$ {}", tool.arguments)
+        }
+    } else if tool.arguments.is_empty() {
+        tool.name.clone()
+    } else {
+        format!("{} {}", tool.name, tool.arguments)
     };
-    let block = tool_render::render_tool_block(theme, &display);
-    spans.extend(
-        block_spans(&block, cx)
-            .into_iter()
-            .map(|(text, style)| (text.to_owned(), style)),
-    );
+    spans.push((
+        label,
+        if is_shell_command {
+            rho_tool_args_style(cx)
+        } else {
+            rho_tool_name_style(cx)
+        },
+    ));
+    spans.push((" ".to_owned(), rho_tool_args_style(cx)));
+    spans.push((
+        status.to_owned(),
+        rho_tool_status_highlight_style(status, cx),
+    ));
+    if let Some(text) = tool.preview.as_deref().or(tool.output.as_deref()) {
+        spans.push(("\n".to_owned(), rho_tool_args_style(cx)));
+        spans.push((text.to_owned(), rho_tool_args_style(cx)));
+    }
     push_rho_spans_trailing_newline(spans);
+}
+
+fn rho_tool_name_style(cx: &App) -> HighlightStyle {
+    HighlightStyle {
+        color: Some(cx.theme().colors().terminal_ansi_yellow),
+        ..HighlightStyle::default()
+    }
+}
+
+fn rho_tool_args_style(cx: &App) -> HighlightStyle {
+    HighlightStyle {
+        color: Some(cx.theme().colors().terminal_ansi_bright_black),
+        ..HighlightStyle::default()
+    }
+}
+
+fn rho_tool_status_highlight_style(status: &str, cx: &App) -> HighlightStyle {
+    let colors = cx.theme().colors();
+    let color = match status {
+        "ok" => colors.terminal_ansi_green,
+        "error" => colors.terminal_ansi_red,
+        "cancelled" => colors.terminal_ansi_yellow,
+        tau_proto::PROGRESS_INDICATOR_TEXT => colors.terminal_ansi_cyan,
+        _ => colors.terminal_ansi_bright_black,
+    };
+    HighlightStyle {
+        color: Some(color),
+        ..HighlightStyle::default()
+    }
 }
 
 fn push_rho_spans_trailing_newline(spans: &mut Vec<(String, HighlightStyle)>) {
@@ -3733,16 +3767,6 @@ fn rho_tool_status_label(status: &RhoUiToolStatus) -> &'static str {
         RhoUiToolStatus::Success => "ok",
         RhoUiToolStatus::Error => "error",
         RhoUiToolStatus::Cancelled => "cancelled",
-    }
-}
-
-fn rho_tool_status_style(status: &str) -> tool_render::ToolStatus {
-    match status {
-        "ok" => tool_render::ToolStatus::Success,
-        "error" => tool_render::ToolStatus::Error,
-        "cancelled" => tool_render::ToolStatus::Warning,
-        tau_proto::PROGRESS_INDICATOR_TEXT => tool_render::ToolStatus::Progress,
-        _ => tool_render::ToolStatus::Info,
     }
 }
 
@@ -4353,6 +4377,34 @@ mod tests {
             assert_eq!(left.to_offset(buffer), 1);
             assert_eq!(right.to_offset(buffer), 2);
         });
+    }
+
+    #[gpui::test]
+    fn rho_shell_command_tool_uses_editor_grey(cx: &mut App) {
+        init_test_app(cx);
+
+        let spans = render_rho_block_spans(
+            &RhoUiBlock::Tool(RhoUiTool {
+                id: "tool-1".to_owned(),
+                name: "shell_command".to_owned(),
+                arguments: "echo ok".to_owned(),
+                preview: None,
+                status: RhoUiToolStatus::Running,
+                output: None,
+                error: None,
+                started_at: None,
+                finished_at: None,
+                metadata: None,
+            }),
+            &cli_theme::select_theme(tau_config::settings::CliTheme::default()),
+            cx,
+        );
+
+        assert_eq!(spans[0].0, "$ echo ok");
+        assert_eq!(
+            spans[0].1.color,
+            Some(cx.theme().colors().terminal_ansi_bright_black)
+        );
     }
 
     #[gpui::test]
