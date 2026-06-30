@@ -1029,6 +1029,9 @@ impl RhoGui {
         if self.agents.current_agent_id().is_none() {
             self.agents.select(agent_id.clone());
             self.show_agent_transcript(Some(agent_id.clone()), window, cx);
+            if self.main_view == MainView::Agent {
+                self.focus_editor(window, cx);
+            }
         }
         if self.displayed_agent_id.as_deref() == Some(agent_id.as_str()) {
             self.render_rho_state(&state, window, cx);
@@ -1050,6 +1053,9 @@ impl RhoGui {
         if self.agents.current_agent_id().is_none() {
             self.agents.select(agent_id.clone());
             self.show_agent_transcript(Some(agent_id.clone()), window, cx);
+            if self.main_view == MainView::Agent {
+                self.focus_editor(window, cx);
+            }
         }
         if self.displayed_agent_id.as_deref() == Some(agent_id.as_str()) {
             let mut state = self
