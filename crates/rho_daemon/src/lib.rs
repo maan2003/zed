@@ -1,20 +1,21 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::str::FromStr as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Context as _;
 use futures::StreamExt as _;
 use rho_agent::Agent;
-use rho_agent::db::{AgentId, AgentReadTxnExt as _, AgentWriteTxnExt as _};
+use rho_agent::db::{AgentId, AgentReadTxnExt as _, AgentWriteTxnExt as _, TopicId, TopicStatus};
 use rho_core::text_content;
 use rho_db::RhoDb;
 use rho_inference::InferenceAuth;
 use rho_inference::config::InferenceConfig;
 use rho_ui_proto::remote::AgentRemoteEncoder;
 use rho_ui_proto::server::{Server, ServerConnection};
-use rho_ui_proto::{ClientMessage, ServerMessage, read_frame_counted, write_frame_counted};
+use rho_ui_proto::{
+    ClientMessage, ServerMessage, UiTopic, UiTopicStatus, read_frame_counted, write_frame_counted,
+};
 use tokio::sync::{Mutex, Notify, mpsc};
 
 pub fn default_socket_path() -> anyhow::Result<PathBuf> {
@@ -90,8 +91,7 @@ struct AgentRegistry {
     db: RhoDb,
     auth: InferenceAuth,
     inference_config: InferenceConfig,
-    agents: Mutex<HashMap<String, Agent>>,
-    known_agent_ids: Mutex<Vec<String>>,
+    agents: Mutex<HashMap<AgentId, Agent>>,
 }
 
 impl AgentRegistry {
@@ -99,88 +99,94 @@ impl AgentRegistry {
         let mut write = db.write().await;
         write.init_agent_tables();
         write.commit();
-        let mut known_agent_ids = db
-            .read()
-            .list_agents()
-            .into_iter()
-            .map(|(agent_id, _)| agent_id.to_string())
-            .collect::<Vec<_>>();
-        known_agent_ids.sort();
+        if db.read().list_topics().is_empty() {
+            let mut write = db.write().await;
+            write.create_topic(rho_core::UnixMs::now(), None, TopicStatus::Normal);
+            write.commit();
+        }
         Self {
             db,
             auth,
             inference_config,
             agents: Mutex::new(HashMap::new()),
-            known_agent_ids: Mutex::new(known_agent_ids),
         }
     }
 
-    async fn known_agent_ids(&self) -> Vec<String> {
-        self.known_agent_ids.lock().await.clone()
+    fn topics(&self) -> Vec<UiTopic> {
+        let read = self.db.read();
+        let mut topics = read
+            .list_topics()
+            .into_iter()
+            .map(|(topic_id, topic)| UiTopic {
+                topic_id,
+                display_name: topic.display_name,
+                status: ui_topic_status(topic.status),
+                agent_ids: read.list_topic_agents(topic_id).into_iter().collect(),
+            })
+            .collect::<Vec<_>>();
+        topics.sort_by(|left, right| left.topic_id.cmp(&right.topic_id));
+        topics
     }
 
-    async fn remember_agent_id(&self, agent_id: String) {
-        let mut known_agent_ids = self.known_agent_ids.lock().await;
-        if !known_agent_ids.contains(&agent_id) {
-            known_agent_ids.push(agent_id);
-            known_agent_ids.sort();
-        }
-    }
-
-    async fn loaded(&self) -> Vec<(String, Agent)> {
+    async fn loaded(&self) -> Vec<(AgentId, Agent)> {
         let mut agents = self
             .agents
             .lock()
             .await
             .iter()
-            .map(|(agent_id, agent)| (agent_id.clone(), agent.clone()))
+            .map(|(agent_id, agent)| (*agent_id, agent.clone()))
             .collect::<Vec<_>>();
-        agents.sort_by(|(left, _), (right, _)| left.cmp(right));
+        agents.sort_by_key(|(agent_id, _)| *agent_id);
         agents
     }
 
-    async fn get(&self, agent_id: &str) -> Option<Agent> {
-        self.agents.lock().await.get(agent_id).cloned()
+    async fn get(&self, agent_id: AgentId) -> Option<Agent> {
+        self.agents.lock().await.get(&agent_id).cloned()
     }
 
-    async fn create(&self) -> (String, Agent) {
-        let (agent_id, agent) = Agent::create_with_id(
+    async fn create_topic(&self, display_name: Option<String>) -> UiTopic {
+        let mut write = self.db.write().await;
+        let topic_id =
+            write.create_topic(rho_core::UnixMs::now(), display_name, TopicStatus::Normal);
+        write.commit();
+        UiTopic {
+            topic_id,
+            display_name: self.db.read().get_topic(topic_id).display_name,
+            status: UiTopicStatus::Normal,
+            agent_ids: Vec::new(),
+        }
+    }
+
+    async fn create(&self, topic_id: TopicId) -> anyhow::Result<(TopicId, AgentId, Agent)> {
+        self.db.read().get_topic(topic_id);
+        let (agent_id, agent) = Agent::create_in_topic_with_id(
             self.db.clone(),
             self.auth.clone(),
             self.inference_config.clone(),
+            topic_id,
             None,
         )
         .await;
-        let agent_id = agent_id.to_string();
-        self.agents
-            .lock()
-            .await
-            .insert(agent_id.clone(), agent.clone());
-        self.remember_agent_id(agent_id.clone()).await;
-        (agent_id, agent)
+        self.agents.lock().await.insert(agent_id, agent.clone());
+        Ok((topic_id, agent_id, agent))
     }
 
-    async fn load(&self, agent_id: &str) -> anyhow::Result<(String, Agent, bool)> {
-        if let Some(agent) = self.agents.lock().await.get(agent_id).cloned() {
-            return Ok((agent_id.to_owned(), agent, false));
+    async fn load(&self, agent_id: AgentId) -> anyhow::Result<(AgentId, Agent, bool)> {
+        if let Some(agent) = self.agents.lock().await.get(&agent_id).cloned() {
+            return Ok((agent_id, agent, false));
         }
-        let parsed = AgentId::from_str(agent_id)
-            .map_err(|_| anyhow::anyhow!("invalid agent id: {agent_id}"))?;
-        let canonical_agent_id = parsed.to_string();
         if !self
-            .known_agent_ids
-            .lock()
-            .await
-            .contains(&canonical_agent_id)
+            .db
+            .read()
+            .list_agents()
+            .into_iter()
+            .any(|(id, _)| id == agent_id)
         {
             anyhow::bail!("unknown agent id: {agent_id}");
         }
-        let agent = Agent::load(self.db.clone(), self.auth.clone(), parsed);
-        self.agents
-            .lock()
-            .await
-            .insert(canonical_agent_id.clone(), agent.clone());
-        Ok((canonical_agent_id, agent, true))
+        let agent = Agent::load(self.db.clone(), self.auth.clone(), agent_id);
+        self.agents.lock().await.insert(agent_id, agent.clone());
+        Ok((agent_id, agent, true))
     }
 }
 
@@ -207,7 +213,7 @@ async fn serve_connection(
     });
 
     let _ = outgoing_tx.send(ServerMessage::Ready {
-        agent_ids: agents.known_agent_ids().await,
+        topics: agents.topics(),
     });
 
     for (agent_id, agent) in agents.loaded().await {
@@ -221,20 +227,36 @@ async fn serve_connection(
                 let _ = outgoing_tx.send(ServerMessage::Pong);
             }
             ClientMessage::Subscribe => {}
-            ClientMessage::NewAgent { content } => {
-                let (agent_id, agent) = agents.create().await;
+            ClientMessage::NewTopic { display_name } => {
+                let topic = agents.create_topic(display_name).await;
+                let _ = outgoing_tx.send(ServerMessage::TopicCreated { topic });
+                let _ = outgoing_tx.send(ServerMessage::Ready {
+                    topics: agents.topics(),
+                });
+            }
+            ClientMessage::NewAgent { topic_id, content } => {
+                let (topic_id, agent_id, agent) = match agents.create(topic_id).await {
+                    Ok(created) => created,
+                    Err(error) => {
+                        let _ = outgoing_tx.send(ServerMessage::Error {
+                            message: error.to_string(),
+                        });
+                        continue;
+                    }
+                };
                 subscribe_agent(agent_id.clone(), agent.clone(), outgoing_tx.clone());
                 let _ = outgoing_tx.send(ServerMessage::AgentCreated {
+                    topic_id,
                     agent_id: agent_id.clone(),
                 });
                 let _ = outgoing_tx.send(ServerMessage::Ready {
-                    agent_ids: agents.known_agent_ids().await,
+                    topics: agents.topics(),
                 });
                 if let Some(content) = content {
                     agent.send_user_message(text_content(&content));
                 }
             }
-            ClientMessage::LoadAgent { agent_id } => match agents.load(&agent_id).await {
+            ClientMessage::LoadAgent { agent_id } => match agents.load(agent_id).await {
                 Ok((agent_id, agent, loaded_now)) => {
                     if loaded_now {
                         subscribe_agent(agent_id.clone(), agent, outgoing_tx.clone());
@@ -248,7 +270,7 @@ async fn serve_connection(
                 }
             },
             ClientMessage::SendUserMessage { agent_id, content } => {
-                let agent = match agents.get(&agent_id).await {
+                let agent = match agents.get(agent_id).await {
                     Some(agent) => agent,
                     None => {
                         let _ = outgoing_tx.send(ServerMessage::Error {
@@ -260,7 +282,7 @@ async fn serve_connection(
                 agent.send_user_message(text_content(&content));
             }
             ClientMessage::CancelTurn { agent_id } => {
-                if let Some(agent) = agents.get(&agent_id).await {
+                if let Some(agent) = agents.get(agent_id).await {
                     agent.cancel();
                     let _ = outgoing_tx.send(ServerMessage::TurnCancelled { agent_id });
                 }
@@ -269,7 +291,11 @@ async fn serve_connection(
     }
 }
 
-fn subscribe_agent(agent_id: String, agent: Agent, state_tx: mpsc::UnboundedSender<ServerMessage>) {
+fn subscribe_agent(
+    agent_id: AgentId,
+    agent: Agent,
+    state_tx: mpsc::UnboundedSender<ServerMessage>,
+) {
     tokio::spawn(async move {
         let changes = agent.subscribe();
         let mut encoder = AgentRemoteEncoder::new();
@@ -290,4 +316,12 @@ fn subscribe_agent(agent_id: String, agent: Agent, state_tx: mpsc::UnboundedSend
             }
         }
     });
+}
+
+fn ui_topic_status(status: TopicStatus) -> UiTopicStatus {
+    match status {
+        TopicStatus::Normal => UiTopicStatus::Normal,
+        TopicStatus::Pinned => UiTopicStatus::Pinned,
+        TopicStatus::Archived => UiTopicStatus::Archived,
+    }
 }

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::str::FromStr as _;
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -33,6 +34,7 @@ use rho_ui_proto::remote::{
     UiBlock as RhoUiBlock, UiMessagePhase as RhoUiMessagePhase,
     UiStreamingItem as RhoUiStreamingItem, UiTool as RhoUiTool, UiToolStatus as RhoUiToolStatus,
 };
+use rho_ui_proto::{AgentId as RhoAgentId, UiTopic as RhoUiTopic};
 use settings::SettingsStore;
 use tau_proto::{
     CborValue, ContentPart, ContextItem, ContextRole, Event, HarnessInputMessage, ModelParams,
@@ -297,6 +299,7 @@ enum MainView {
 
 enum RhoEvent {
     Connected(RhoAgentClient),
+    Topics(Vec<RhoUiTopic>),
     KnownAgents(Vec<String>),
     State(String, RhoUiAgentState),
     Frame(String, RhoAgentRemoteFrame),
@@ -350,6 +353,7 @@ struct RhoGui {
     writer: Option<Writer>,
     rx: mpsc::Receiver<SocketEvent>,
     rho_agent: Option<RhoAgentClient>,
+    rho_topics: Vec<RhoUiTopic>,
     rho_rx: mpsc::Receiver<RhoEvent>,
     rho_state: Option<RhoUiAgentState>,
     rho_inserted_blocks: Vec<Option<InsertedTranscript>>,
@@ -441,6 +445,7 @@ impl RhoGui {
             writer,
             rx,
             rho_agent: None,
+            rho_topics: Vec::new(),
             rho_rx,
             rho_state: None,
             rho_inserted_blocks: Vec::new(),
@@ -506,6 +511,7 @@ impl RhoGui {
             writer: None,
             rx,
             rho_agent: None,
+            rho_topics: Vec::new(),
             rho_rx,
             rho_state: None,
             rho_inserted_blocks: Vec::new(),
@@ -592,20 +598,35 @@ impl RhoGui {
                 if tx.send(RhoEvent::Connected(agent.clone())).is_err() {
                     return;
                 }
+                if tx.send(RhoEvent::Topics(agent.topics())).is_err() {
+                    return;
+                }
                 if tx
-                    .send(RhoEvent::KnownAgents(agent.known_agent_ids()))
+                    .send(RhoEvent::KnownAgents(
+                        agent
+                            .known_agent_ids()
+                            .into_iter()
+                            .map(|agent_id| agent_id.to_string())
+                            .collect(),
+                    ))
                     .is_err()
                 {
                     return;
                 }
                 for (agent_id, state) in agent.states() {
-                    if tx.send(RhoEvent::State(agent_id, state)).is_err() {
+                    if tx
+                        .send(RhoEvent::State(agent_id.to_string(), state))
+                        .is_err()
+                    {
                         return;
                     }
                 }
                 let mut frames = Box::pin(agent.subscribe_frames());
                 while let Some((agent_id, frame)) = futures::StreamExt::next(&mut frames).await {
-                    if tx.send(RhoEvent::Frame(agent_id, frame)).is_err() {
+                    if tx
+                        .send(RhoEvent::Frame(agent_id.to_string(), frame))
+                        .is_err()
+                    {
                         return;
                     }
                 }
@@ -998,6 +1019,9 @@ impl RhoGui {
                 self.current_role = Some("rho".to_owned());
                 self.current_model = None;
                 self.update_status_line(cx);
+            }
+            RhoEvent::Topics(topics) => {
+                self.rho_topics = topics;
             }
             RhoEvent::KnownAgents(agent_ids) => {
                 for agent_id in agent_ids {
@@ -2058,7 +2082,9 @@ impl RhoGui {
         if text == "/cancel" {
             if let Some(agent) = &self.rho_agent {
                 if let Some(agent_id) = self.agents.current_agent_id_owned() {
-                    agent.cancel(agent_id);
+                    if let Ok(agent_id) = RhoAgentId::from_str(&agent_id) {
+                        agent.cancel(agent_id);
+                    }
                 }
                 return true;
             }
@@ -2126,7 +2152,15 @@ impl RhoGui {
                 return true;
             }
             if let Some(agent) = &self.rho_agent {
-                agent.load_agent(agent_id.to_owned());
+                let Ok(parsed_agent_id) = RhoAgentId::from_str(agent_id) else {
+                    self.insert_before_draft_styled(
+                        "/load <agent-id>: invalid agent id\n",
+                        TranscriptStyle::SystemInfo,
+                        cx,
+                    );
+                    return true;
+                };
+                agent.load_agent(parsed_agent_id);
                 self.agents.remember(agent_id.to_owned());
                 self.agents.select(agent_id.to_owned());
                 self.show_agent_transcript(Some(agent_id.to_owned()), window, cx);
@@ -2522,9 +2556,19 @@ impl RhoGui {
 
         if let Some(agent) = self.rho_agent.clone() {
             if let Some(agent_id) = self.agents.current_agent_id_owned() {
-                agent.send_user_message(agent_id, text);
+                if let Ok(agent_id) = RhoAgentId::from_str(&agent_id) {
+                    agent.send_user_message(agent_id, text);
+                }
             } else {
-                agent.new_agent_with_user_message(text);
+                let Some(topic_id) = self.rho_topics.first().map(|topic| topic.topic_id) else {
+                    self.insert_before_draft_styled(
+                        "no rho topic is available\n",
+                        TranscriptStyle::SystemInfo,
+                        cx,
+                    );
+                    return;
+                };
+                agent.new_agent_with_user_message_in_topic(topic_id, text);
             }
             self.clear_prompt_draft(window, cx);
             return;
