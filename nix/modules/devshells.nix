@@ -44,6 +44,9 @@
           passthru.env = attrs.env;
         })).env; # exfil `env`; it's not in drvAttrs
 
+      # Musl cross-compiler for building remote_server
+      muslCross = pkgs.pkgsCross.musl64;
+
       # Cargo build timings wrapper script
       wrappedCargo = pkgs.writeShellApplication {
         name = "cargo";
@@ -60,16 +63,24 @@
     {
       devShells.default = (pkgs.mkShell.override { inherit (zed-editor) stdenv; }) {
         name = "zed-editor-dev";
+        inputsFrom = [ zed-editor ];
+
         packages =
           with pkgs;
           [
             wrappedCargo # must be first, to shadow the `cargo` provided by `rustToolchain`
             rustToolchain # cargo, rustc, and rust-toolchain.toml components included
-            cmake
+            cargo-nextest
+            cargo-hakari
+            cargo-machete
+            cargo-zigbuild
+            # TODO: package protobuf-language-server for editing zed.proto
+            # TODO: add other tools used in our scripts
+
+            # `build.nix` adds this to the `zed-editor` wrapper (see `postFixup`)
+            # we'll just put it on `$PATH`:
             nodejs_22
-            perl
-            pkg-config
-            protobuf
+            zig
 
             # Documentation tooling: `nix develop -c mdbook build docs`
             mdbook
@@ -84,34 +95,6 @@
             ]))
           ]
           ++ lib.optionals stdenv.hostPlatform.isLinux [ accerciser ];
-
-        buildInputs = with pkgs; [
-          curl
-          fontconfig
-          freetype
-          libgit2
-          openssl
-          sqlite
-          zlib
-          zstd
-        ] ++ lib.optionals stdenv.hostPlatform.isLinux [
-          alsa-lib
-          glib
-          libdrm
-          libgbm
-          libglvnd
-          libva
-          libx11
-          libxcb
-          libxcomposite
-          libxdamage
-          libxext
-          libxfixes
-          libxkbcommon
-          libxrandr
-          vulkan-loader
-          wayland
-        ];
 
         env =
           (removeAttrs baseEnv [
