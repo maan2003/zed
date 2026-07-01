@@ -11707,7 +11707,7 @@ impl EditorSnapshot {
             && let Some(ch_width) = cx.text_system().ch_width(font_id, font_size).log_err()
         {
             GutterDimensions {
-                width: ch_width,
+                width: ch_width * 0.5,
                 ..Default::default()
             }
         } else if self.show_gutter

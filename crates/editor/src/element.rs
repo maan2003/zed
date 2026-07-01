@@ -5547,7 +5547,12 @@ impl EditorElement {
             self.paint_gutter_diff_hunks(layout, self.split_side, window, cx)
         }
 
-        let highlight_width = 0.275 * layout.position_map.line_height;
+        let compact_gutter = layout.position_map.snapshot.show_compact_gutter;
+        let highlight_width = if compact_gutter {
+            (layout.position_map.em_advance * 0.125).max(px(1.))
+        } else {
+            0.275 * layout.position_map.line_height
+        };
         let highlight_corner_radii = Corners::all(0.05 * layout.position_map.line_height);
         window.paint_layer(layout.gutter_hitbox.bounds, |window| {
             for (range, color) in &layout.highlighted_gutter_ranges {
@@ -5574,9 +5579,14 @@ impl EditorElement {
                             * ScrollPixelOffset::from(layout.position_map.line_height)
                             - layout.position_map.scroll_pixel_position.y,
                     );
+                let highlight_left = if compact_gutter {
+                    layout.gutter_hitbox.right() - highlight_width
+                } else {
+                    layout.gutter_hitbox.left()
+                };
                 let bounds = Bounds::from_corners(
-                    point(layout.gutter_hitbox.left(), start_y),
-                    point(layout.gutter_hitbox.left() + highlight_width, end_y),
+                    point(highlight_left, start_y),
+                    point(highlight_left + highlight_width, end_y),
                 );
                 window.paint_quad(fill(bounds, *color).corner_radii(highlight_corner_radii));
             }
