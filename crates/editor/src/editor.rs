@@ -984,6 +984,7 @@ pub struct Editor {
     mode: EditorMode,
     breadcrumbs_visibility: BreadcrumbsVisibility,
     show_gutter: bool,
+    show_compact_gutter: bool,
     show_scrollbars: ScrollbarAxes,
     minimap_visibility: MinimapVisibility,
     offset_content: bool,
@@ -1226,6 +1227,7 @@ impl NextScrollCursorCenterTopBottom {
 pub struct EditorSnapshot {
     pub mode: EditorMode,
     show_gutter: bool,
+    show_compact_gutter: bool,
     offset_content: bool,
     show_line_numbers: Option<bool>,
     number_deleted_lines: bool,
@@ -2207,6 +2209,7 @@ impl Editor {
             offset_content: !matches!(mode, EditorMode::SingleLine),
             breadcrumbs_visibility: BreadcrumbsVisibility::from_settings(cx),
             show_gutter: full_mode,
+            show_compact_gutter: false,
             show_line_numbers: (!full_mode).then_some(false),
             use_relative_line_numbers: None,
             disable_expand_excerpt_buttons: !full_mode,
@@ -2924,6 +2927,7 @@ impl Editor {
         EditorSnapshot {
             mode: self.mode.clone(),
             show_gutter: self.show_gutter,
+            show_compact_gutter: self.show_compact_gutter,
             offset_content: self.offset_content,
             show_line_numbers: self.show_line_numbers,
             number_deleted_lines: self.number_deleted_lines,
@@ -9283,6 +9287,18 @@ impl Editor {
         self.sorted_background_highlights_in_range(start..end, &snapshot, cx.theme())
     }
 
+    pub fn all_gutter_highlights(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<(Range<DisplayPoint>, Hsla)> {
+        let snapshot = self.snapshot(window, cx);
+        let buffer = snapshot.buffer_snapshot();
+        let start = buffer.anchor_before(MultiBufferOffset(0));
+        let end = buffer.anchor_after(buffer.len());
+        self.gutter_highlights_in_range(start..end, &snapshot.display_snapshot, cx)
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn sorted_background_highlights_in_range(
         &self,
@@ -11687,7 +11703,14 @@ impl EditorSnapshot {
         window: &mut Window,
         cx: &App,
     ) -> GutterDimensions {
-        if self.show_gutter
+        if self.show_compact_gutter
+            && let Some(ch_width) = cx.text_system().ch_width(font_id, font_size).log_err()
+        {
+            GutterDimensions {
+                width: ch_width,
+                ..Default::default()
+            }
+        } else if self.show_gutter
             && let Some(ch_width) = cx.text_system().ch_width(font_id, font_size).log_err()
             && let Some(ch_advance) = cx.text_system().ch_advance(font_id, font_size).log_err()
         {

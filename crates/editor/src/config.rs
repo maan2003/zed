@@ -139,6 +139,13 @@ impl Editor {
         cx.notify();
     }
 
+    /// Shows only the gutter strip used for gutter highlights, without reserving
+    /// space for line numbers, folds, git hunks, or other gutter indicators.
+    pub fn set_show_compact_gutter(&mut self, show_compact_gutter: bool, cx: &mut Context<Self>) {
+        self.show_compact_gutter = show_compact_gutter;
+        cx.notify();
+    }
+
     pub fn set_show_vertical_scrollbar(&mut self, show: bool, cx: &mut Context<Self>) {
         self.show_scrollbars.vertical = show;
         cx.notify();
