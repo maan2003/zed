@@ -5579,11 +5579,7 @@ impl EditorElement {
                             * ScrollPixelOffset::from(layout.position_map.line_height)
                             - layout.position_map.scroll_pixel_position.y,
                     );
-                let highlight_left = if compact_gutter {
-                    layout.gutter_hitbox.right() - highlight_width
-                } else {
-                    layout.gutter_hitbox.left()
-                };
+                let highlight_left = layout.gutter_hitbox.left();
                 let bounds = Bounds::from_corners(
                     point(highlight_left, start_y),
                     point(highlight_left + highlight_width, end_y),
