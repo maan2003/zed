@@ -2150,6 +2150,7 @@ impl Project {
                 visible: true,
                 abs_path: abs_path.to_string(),
                 root_repo_common_dir: None,
+                root_repo_is_linked_worktree: false,
             },
             client,
             PathStyle::Posix,
@@ -5683,7 +5684,7 @@ impl Project {
                 }
             });
 
-            while let Some(buffer) = new_matches.next().await {
+            while let Some((buffer, _)) = new_matches.next().await {
                 let buffer_id = this.update(cx, |this, cx| {
                     this.create_buffer_for_peer(&buffer, peer_id, cx).to_proto()
                 });
