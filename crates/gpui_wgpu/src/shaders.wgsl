@@ -238,39 +238,9 @@ fn srgba_to_linear(color: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(srgb_to_linear(color.rgb), color.a);
 }
 
-/// Hsla to linear RGBA conversion.
-fn hsla_to_rgba(hsla: Hsla) -> vec4<f32> {
-    let h = hsla.h * 6.0; // Now, it's an angle but scaled in [0, 6) range
-    let s = hsla.s;
-    let l = hsla.l;
-    let a = hsla.a;
-
-    let c = (1.0 - abs(2.0 * l - 1.0)) * s;
-    let x = c * (1.0 - abs(h % 2.0 - 1.0));
-    let m = l - c / 2.0;
-    var color = vec3<f32>(m);
-
-    if (h >= 0.0 && h < 1.0) {
-        color.r += c;
-        color.g += x;
-    } else if (h >= 1.0 && h < 2.0) {
-        color.r += x;
-        color.g += c;
-    } else if (h >= 2.0 && h < 3.0) {
-        color.g += c;
-        color.b += x;
-    } else if (h >= 3.0 && h < 4.0) {
-        color.g += x;
-        color.b += c;
-    } else if (h >= 4.0 && h < 5.0) {
-        color.r += x;
-        color.b += c;
-    } else {
-        color.r += c;
-        color.b += x;
-    }
-
-    return vec4<f32>(color, a);
+/// GPUI colors are stored as extended linear sRGB / scRGB RGBA.
+fn hsla_to_rgba(color: Hsla) -> vec4<f32> {
+    return vec4<f32>(color.h, color.s, color.l, color.a);
 }
 
 /// Convert a linear sRGB to Oklab space.
