@@ -79,6 +79,8 @@ pub struct WgpuSurfaceConfig {
     /// Mobile platforms may prefer `Mailbox` (triple-buffering) to avoid
     /// blocking in `get_current_texture()` during lifecycle transitions.
     pub preferred_present_mode: Option<wgpu::PresentMode>,
+    /// Prefer a wide-gamut presentation surface when the platform reports one.
+    pub prefer_wide_gamut: bool,
 }
 
 struct WgpuPipelines {
@@ -266,22 +268,18 @@ impl WgpuRenderer {
         atlas: Arc<WgpuAtlas>,
     ) -> anyhow::Result<Self> {
         let surface_caps = surface.get_capabilities(&context.adapter);
-        let preferred_formats = [
-            wgpu::TextureFormat::Bgra8Unorm,
-            wgpu::TextureFormat::Rgba8Unorm,
-        ];
-        let surface_format = preferred_formats
-            .iter()
-            .find(|f| surface_caps.formats.contains(f))
-            .copied()
-            .or_else(|| surface_caps.formats.iter().find(|f| !f.is_srgb()).copied())
-            .or_else(|| surface_caps.formats.first().copied())
+        let surface_format = Self::select_surface_format(&surface_caps, config.prefer_wide_gamut)
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Surface reports no supported texture formats for adapter {:?}",
-                    context.adapter.get_info().name
-                )
-            })?;
+            anyhow::anyhow!(
+                "Surface reports no supported texture formats for adapter {:?}",
+                context.adapter.get_info().name
+            )
+        })?;
+        if surface_format == wgpu::TextureFormat::Rgba16Float {
+            log::info!(
+                "Using Rgba16Float wide-gamut surface format (EXTENDED_SRGB_LINEAR_EXT on Vulkan/Wayland)."
+            );
+        }
 
         let pick_alpha_mode =
             |preferences: &[wgpu::CompositeAlphaMode]| -> anyhow::Result<wgpu::CompositeAlphaMode> {
@@ -489,6 +487,34 @@ impl WgpuRenderer {
             surface_configured: true,
             needs_redraw: false,
         })
+    }
+
+    fn select_surface_format(
+        surface_caps: &wgpu::SurfaceCapabilities,
+        prefer_wide_gamut: bool,
+    ) -> Option<wgpu::TextureFormat> {
+        if prefer_wide_gamut
+            && surface_caps
+                .formats
+                .contains(&wgpu::TextureFormat::Rgba16Float)
+        {
+            // wgpu's Vulkan backend presents Rgba16Float swapchains with
+            // EXTENDED_SRGB_LINEAR_EXT, which lets Wayland compositors perform
+            // wide-gamut output mapping instead of forcing the final image
+            // through an 8-bit sRGB swapchain.
+            return Some(wgpu::TextureFormat::Rgba16Float);
+        }
+
+        let preferred_formats = [
+            wgpu::TextureFormat::Bgra8Unorm,
+            wgpu::TextureFormat::Rgba8Unorm,
+        ];
+        preferred_formats
+            .iter()
+            .find(|f| surface_caps.formats.contains(f))
+            .copied()
+            .or_else(|| surface_caps.formats.iter().find(|f| !f.is_srgb()).copied())
+            .or_else(|| surface_caps.formats.first().copied())
     }
 
     fn create_bind_group_layouts(device: &wgpu::Device) -> WgpuBindGroupLayouts {
@@ -1825,6 +1851,7 @@ impl WgpuRenderer {
             },
             transparent: self.surface_config.alpha_mode != wgpu::CompositeAlphaMode::Opaque,
             preferred_present_mode: Some(self.surface_config.present_mode),
+            prefer_wide_gamut: self.surface_config.format == wgpu::TextureFormat::Rgba16Float,
         };
         let gpu_context = Rc::clone(gpu_context);
         let ctx_ref = gpu_context.borrow();

@@ -349,6 +349,7 @@ impl WaylandWindowState {
                 transparent: true,
                 // Prefer Mailbox to avoid blocking. Falls back to FIFO if Mailbox is unsupported.
                 preferred_present_mode: Some(wgpu::PresentMode::Mailbox),
+                prefer_wide_gamut: true,
             };
             WgpuRenderer::new(gpu_context, &raw_window, config, compositor_gpu)?
         };
