@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::{Editor, HighlightKey};
 use collections::{HashMap, HashSet};
-use gpui::{AppContext as _, Context, HighlightStyle, Hsla};
+use gpui::{AppContext as _, Color, Context, HighlightStyle, Hsla};
 use language::{BufferRow, BufferSnapshot, language_settings::LanguageSettings};
 use multi_buffer::{Anchor, BufferOffset, ExcerptRange, MultiBufferSnapshot};
 use text::OffsetRangeExt as _;
@@ -127,7 +127,7 @@ impl Editor {
                             continue;
                         };
                         let style = HighlightStyle {
-                            color: Some(bracket_color),
+                            color: Some(bracket_color.into()),
                             ..HighlightStyle::default()
                         };
 
@@ -155,6 +155,19 @@ const LIGHTNESS_CLAMP_MIN: f32 = 0.18;
 const LIGHTNESS_CLAMP_MAX: f32 = 0.92;
 
 pub(crate) fn bracket_colorization_accents(
+    accents: &[Color],
+    appearance: Appearance,
+    background: Color,
+) -> Arc<[Color]> {
+    let hsla_accents = accents.iter().copied().map(Hsla::from).collect::<Vec<_>>();
+    bracket_colorization_hsla_accents(&hsla_accents, appearance, background.into())
+        .iter()
+        .copied()
+        .map(Color::from)
+        .collect()
+}
+
+fn bracket_colorization_hsla_accents(
     accents: &[Hsla],
     appearance: Appearance,
     background: Hsla,

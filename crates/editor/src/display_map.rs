@@ -1549,9 +1549,9 @@ impl<'a> HighlightedChunk<'a> {
                 text = suffix;
                 if let Some(replacement) = replacement(ch) {
                     let invisible_highlight = HighlightStyle {
-                        background_color: Some(editor_style.status.hint_background),
+                        background_color: Some(editor_style.status.hint_background.into()),
                         underline: Some(UnderlineStyle {
-                            color: Some(editor_style.status.hint),
+                            color: Some(editor_style.status.hint.into()),
                             thickness: px(1.),
                             wavy: false,
                         }),
@@ -1571,9 +1571,9 @@ impl<'a> HighlightedChunk<'a> {
                     });
                 } else {
                     let invisible_highlight = HighlightStyle {
-                        background_color: Some(editor_style.status.hint_background),
+                        background_color: Some(editor_style.status.hint_background.into()),
                         underline: Some(UnderlineStyle {
-                            color: Some(editor_style.status.hint),
+                            color: Some(editor_style.status.hint.into()),
                             thickness: px(1.),
                             wavy: false,
                         }),
@@ -2587,11 +2587,11 @@ impl DisplaySnapshot {
 
 fn diagnostic_style(severity: lsp::DiagnosticSeverity, colors: &StatusColors) -> Hsla {
     match severity {
-        lsp::DiagnosticSeverity::ERROR => colors.error,
-        lsp::DiagnosticSeverity::WARNING => colors.warning,
-        lsp::DiagnosticSeverity::INFORMATION => colors.info,
-        lsp::DiagnosticSeverity::HINT => colors.hint,
-        _ => colors.ignored,
+        lsp::DiagnosticSeverity::ERROR => colors.error.into(),
+        lsp::DiagnosticSeverity::WARNING => colors.warning.into(),
+        lsp::DiagnosticSeverity::INFORMATION => colors.info.into(),
+        lsp::DiagnosticSeverity::HINT => colors.hint.into(),
+        _ => colors.ignored.into(),
     }
 }
 

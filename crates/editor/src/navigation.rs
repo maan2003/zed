@@ -2132,7 +2132,7 @@ impl Editor {
                 editor.highlight_background(
                     HighlightKey::Editor,
                     &ranges,
-                    |_, theme| theme.colors().editor_highlighted_line_background,
+                    |_, theme| theme.colors().editor_highlighted_line_background.into(),
                     cx,
                 );
             }

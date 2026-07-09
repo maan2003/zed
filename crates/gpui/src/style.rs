@@ -880,6 +880,12 @@ impl From<Rgba> for Fill {
     }
 }
 
+impl From<Color> for Fill {
+    fn from(color: Color) -> Self {
+        Self::Color(color.into())
+    }
+}
+
 impl From<Background> for Fill {
     fn from(background: Background) -> Self {
         Self::Color(background)

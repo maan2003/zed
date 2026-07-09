@@ -251,7 +251,7 @@ impl EditorPreview {
 
             editor.highlight_rows::<SearchMatchLineHighlight>(
                 range.clone(),
-                |cx| cx.theme().colors().editor_active_line_background,
+                |cx| cx.theme().colors().editor_active_line_background.into(),
                 RowHighlightOptions::default(),
                 cx,
             );
@@ -259,7 +259,7 @@ impl EditorPreview {
             editor.highlight_background(
                 HighlightKey::PickerPreview,
                 &[range],
-                |_, theme| theme.colors().search_match_background,
+                |_, theme| theme.colors().search_match_background.into(),
                 cx,
             );
         });

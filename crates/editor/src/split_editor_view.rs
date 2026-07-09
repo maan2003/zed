@@ -165,7 +165,8 @@ impl RenderOnce for SplitEditorView {
 
         let separator_color = cx.theme().colors().border_variant;
 
-        let resize_handle = render_resize_handle(&self.split_state, separator_color, window, cx);
+        let resize_handle =
+            render_resize_handle(&self.split_state, separator_color.into(), window, cx);
 
         let state_for_drag = self.split_state.downgrade();
         let state_for_drop = self.split_state.downgrade();

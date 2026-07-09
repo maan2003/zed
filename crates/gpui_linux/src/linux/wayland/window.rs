@@ -37,7 +37,7 @@ use gpui::{
     WindowDecorations, WindowKind, WindowParams, layer_shell::LayerShellNotSupportedError, px,
     size,
 };
-use gpui_wgpu::{CompositorGpuHint, WgpuRenderer, WgpuSurfaceConfig, wgpu};
+use gpui_wgpu::{CompositorGpuHint, WgpuOutputColorSpace, WgpuRenderer, WgpuSurfaceConfig, wgpu};
 
 #[derive(Default)]
 pub(crate) struct Callbacks {
@@ -317,6 +317,35 @@ pub struct WaylandWindowStatePtr {
     callbacks: Rc<RefCell<Callbacks>>,
 }
 
+fn wide_gamut_enabled() -> bool {
+    std::env::var("GPUI_WIDE_GAMUT")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
+fn choose_wide_gamut_color_space(globals: &Globals) -> Option<WgpuOutputColorSpace> {
+    if !wide_gamut_enabled() {
+        return None;
+    }
+
+    let capabilities = globals.color_manager_capabilities.borrow();
+    if globals.color_manager.is_none() || !capabilities.done {
+        log::info!(
+            "Wayland color-manager capabilities are unavailable; trying WGPU surface color-space negotiation for wide-gamut output"
+        );
+        return Some(WgpuOutputColorSpace::DisplayP3);
+    }
+
+    if capabilities.supports_display_p3_primaries && capabilities.supports_srgb_transfer {
+        Some(WgpuOutputColorSpace::DisplayP3)
+    } else {
+        log::warn!(
+            "Wayland compositor does not advertise Display P3 SDR support ({capabilities:?}); using sRGB output"
+        );
+        None
+    }
+}
+
 impl WaylandWindowState {
     pub(crate) fn new(
         handle: AnyWindowHandle,
@@ -331,6 +360,8 @@ impl WaylandWindowState {
         options: WindowParams,
         parent: Option<WaylandWindowStatePtr>,
     ) -> anyhow::Result<Self> {
+        let wide_gamut_color_space = choose_wide_gamut_color_space(&globals);
+
         let renderer = {
             let raw_window = RawWindow {
                 window: surface.id().as_ptr().cast::<c_void>(),
@@ -349,7 +380,7 @@ impl WaylandWindowState {
                 transparent: true,
                 // Prefer Mailbox to avoid blocking. Falls back to FIFO if Mailbox is unsupported.
                 preferred_present_mode: Some(wgpu::PresentMode::Mailbox),
-                prefer_wide_gamut: true,
+                wide_gamut_color_space,
             };
             WgpuRenderer::new(gpu_context, &raw_window, config, compositor_gpu)?
         };

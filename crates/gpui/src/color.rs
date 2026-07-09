@@ -47,10 +47,11 @@ pub struct Rgba {
     pub a: f32,
 }
 
-/// A renderer-ready color in extended linear sRGB / scRGB space.
+/// A renderer-ready color in linear Display P3 space.
 ///
-/// Components are linear-light values and may be outside `0.0..=1.0` for
-/// wide-gamut colors. Alpha remains in `0.0..=1.0`.
+/// Components are linear-light Display P3 values. Alpha remains in
+/// `0.0..=1.0`. Theme inputs in other color spaces are converted at the edge
+/// so rendering and blending can use one wide-gamut working space.
 #[derive(PartialEq, Clone, Copy, Default)]
 #[repr(C)]
 pub struct Color {
@@ -68,15 +69,15 @@ impl fmt::Debug for Color {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "color(linear-srgb {:.4} {:.4} {:.4} / {:.4})",
+            "color(linear-display-p3 {:.4} {:.4} {:.4} / {:.4})",
             self.r, self.g, self.b, self.a
         )
     }
 }
 
 impl Color {
-    /// Construct a color from extended linear sRGB / scRGB components.
-    pub fn linear_srgb(r: f32, g: f32, b: f32, a: f32) -> Self {
+    /// Construct a color from linear Display P3 components.
+    pub fn linear_display_p3(r: f32, g: f32, b: f32, a: f32) -> Self {
         Self {
             r,
             g,
@@ -85,19 +86,21 @@ impl Color {
         }
     }
 
+    /// Construct a color from linear sRGB components.
+    pub fn linear_srgb(r: f32, g: f32, b: f32, a: f32) -> Self {
+        let [r, g, b] = linear_srgb_to_linear_display_p3([r, g, b]);
+        Self::linear_display_p3(r, g, b, a)
+    }
+
     /// Construct a color from Display P3 components.
     ///
     /// Components use the same transfer function as sRGB and are converted to
-    /// extended linear sRGB / scRGB without gamut clipping.
+    /// linear Display P3 without gamut clipping.
     pub fn display_p3(r: f32, g: f32, b: f32, a: f32) -> Self {
-        let r = srgb_to_linear_component(r);
-        let g = srgb_to_linear_component(g);
-        let b = srgb_to_linear_component(b);
-
-        Self::linear_srgb(
-            1.2247455 * r - 0.22490445 * g,
-            -0.04205808 * r + 1.042081 * g,
-            -0.01964226 * r - 0.07865488 * g + 1.0985371 * b,
+        Self::linear_display_p3(
+            srgb_to_linear_component(r),
+            srgb_to_linear_component(g),
+            srgb_to_linear_component(b),
             a,
         )
     }
@@ -129,6 +132,22 @@ impl Color {
     /// Returns true if this color is fully transparent.
     pub fn is_transparent(&self) -> bool {
         self.a == 0.0
+    }
+
+    /// Alpha-blend `other` over this color in linear Display P3 space.
+    pub fn blend(self, other: Color) -> Color {
+        Color::linear_display_p3(
+            self.r * (1.0 - other.a) + other.r * other.a,
+            self.g * (1.0 - other.a) + other.g * other.a,
+            self.b * (1.0 - other.a) + other.b * other.a,
+            self.a,
+        )
+    }
+
+    /// Fade out the color by `factor`, where `0.0` leaves it unchanged and
+    /// `1.0` makes it fully transparent.
+    pub fn fade_out(&mut self, factor: f32) {
+        self.a *= 1.0 - factor.clamp(0.0, 1.0);
     }
 }
 
@@ -234,6 +253,22 @@ fn srgb_to_linear_component(srgb: f32) -> f32 {
     } else {
         ((srgb + 0.055) / 1.055).powf(2.4)
     }
+}
+
+fn linear_srgb_to_linear_display_p3([r, g, b]: [f32; 3]) -> [f32; 3] {
+    [
+        0.8224621 * r + 0.177538 * g,
+        0.0331941 * r + 0.9668058 * g,
+        0.0170827 * r + 0.0723974 * g + 0.9105199 * b,
+    ]
+}
+
+fn linear_display_p3_to_linear_srgb([r, g, b]: [f32; 3]) -> [f32; 3] {
+    [
+        1.2247455 * r - 0.22490445 * g,
+        -0.04205808 * r + 1.042081 * g,
+        -0.01964226 * r - 0.07865488 * g + 1.0985371 * b,
+    ]
 }
 
 fn linear_to_srgb_component(linear: f32) -> f32 {
@@ -362,10 +397,11 @@ impl From<Hsla> for Color {
 
 impl From<Color> for Rgba {
     fn from(color: Color) -> Self {
+        let [r, g, b] = linear_display_p3_to_linear_srgb([color.r, color.g, color.b]);
         Rgba {
-            r: linear_to_srgb_component(color.r).clamp(0.0, 1.0),
-            g: linear_to_srgb_component(color.g).clamp(0.0, 1.0),
-            b: linear_to_srgb_component(color.b).clamp(0.0, 1.0),
+            r: linear_to_srgb_component(r).clamp(0.0, 1.0),
+            g: linear_to_srgb_component(g).clamp(0.0, 1.0),
+            b: linear_to_srgb_component(b).clamp(0.0, 1.0),
             a: color.a,
         }
     }
@@ -1350,7 +1386,7 @@ mod tests {
     }
 
     #[test]
-    fn test_deserialize_display_p3_to_extended_linear_color() {
+    fn test_deserialize_display_p3_to_linear_display_p3_color() {
         let actual: Color = serde_json::from_value(json!("color(display-p3 1 0 0 / 75%)")).unwrap();
         let expected = Color::display_p3(1.0, 0.0, 0.0, 0.75);
 

@@ -28795,7 +28795,7 @@ async fn test_edit_prediction_text(cx: &mut TestAppContext) {
             assert_eq!(highlighted_edits.highlights[0].0, 6..16);
             assert_eq!(
                 highlighted_edits.highlights[0].1.background_color,
-                Some(cx.theme().status().created_background)
+                Some(cx.theme().status().created_background.into())
             );
         },
     )
@@ -28813,7 +28813,7 @@ async fn test_edit_prediction_text(cx: &mut TestAppContext) {
             assert_eq!(highlighted_edits.highlights[0].0, 0..4);
             assert_eq!(
                 highlighted_edits.highlights[0].1.background_color,
-                Some(cx.theme().status().created_background)
+                Some(cx.theme().status().created_background.into())
             );
         },
     )
@@ -28835,11 +28835,11 @@ async fn test_edit_prediction_text(cx: &mut TestAppContext) {
             assert_eq!(highlighted_edits.highlights[1].0, 16..29);
             assert_eq!(
                 highlighted_edits.highlights[0].1.background_color,
-                Some(cx.theme().status().created_background)
+                Some(cx.theme().status().created_background.into())
             );
             assert_eq!(
                 highlighted_edits.highlights[1].1.background_color,
-                Some(cx.theme().status().created_background)
+                Some(cx.theme().status().created_background.into())
             );
         },
     )
@@ -28870,7 +28870,7 @@ async fn test_edit_prediction_text(cx: &mut TestAppContext) {
             for highlight in &highlighted_edits.highlights {
                 assert_eq!(
                     highlight.1.background_color,
-                    Some(cx.theme().status().created_background)
+                    Some(cx.theme().status().created_background.into())
                 );
             }
         },
@@ -28894,7 +28894,7 @@ async fn test_edit_prediction_text_with_deletions(cx: &mut TestAppContext) {
             assert_eq!(highlighted_edits.highlights[0].0, 5..11);
             assert_eq!(
                 highlighted_edits.highlights[0].1.background_color,
-                Some(cx.theme().status().deleted_background)
+                Some(cx.theme().status().deleted_background.into())
             );
         },
     )
@@ -28911,7 +28911,7 @@ async fn test_edit_prediction_text_with_deletions(cx: &mut TestAppContext) {
             assert_eq!(highlighted_edits.highlights[0].0, 6..14);
             assert_eq!(
                 highlighted_edits.highlights[0].1.background_color,
-                Some(cx.theme().status().created_background)
+                Some(cx.theme().status().created_background.into())
             );
         },
     )

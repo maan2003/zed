@@ -128,11 +128,11 @@ impl LineNumberStyle {
 
     fn color(self, colors: &theme::ThemeColors) -> Hsla {
         match self {
-            Self::Breakpoint => colors.debugger_accent,
-            Self::DiffAdded => colors.version_control_added,
-            Self::DiffDeleted => colors.version_control_deleted,
-            Self::Active => colors.editor_active_line_number,
-            Self::Inactive => colors.editor_line_number,
+            Self::Breakpoint => colors.debugger_accent.into(),
+            Self::DiffAdded => colors.version_control_added.into(),
+            Self::DiffDeleted => colors.version_control_deleted.into(),
+            Self::Active => colors.editor_active_line_number.into(),
+            Self::Inactive => colors.editor_line_number.into(),
         }
     }
 }
@@ -958,7 +958,7 @@ impl EditorElement {
             ) {
                 add_cursor(
                     remote_selection.selection.head(),
-                    remote_selection.color.cursor,
+                    remote_selection.color.cursor.into(),
                 );
                 if Some(remote_selection.collaborator_id) == editor.leader_id {
                     skip_local = true;
@@ -967,7 +967,7 @@ impl EditorElement {
         }
         // Local cursors
         if !skip_local {
-            let color = cx.theme().players().local().cursor;
+            let color: Hsla = cx.theme().players().local().cursor.into();
             editor
                 .selections
                 .disjoint_anchors()
@@ -1038,9 +1038,9 @@ impl EditorElement {
                     let cursor_color = if selection.is_local {
                         cursor_row_layout
                             .color_for_index(cursor_column)
-                            .unwrap_or(player_color.cursor)
+                            .unwrap_or(player_color.cursor.into())
                     } else {
-                        player_color.cursor
+                        player_color.cursor.into()
                     };
                     let mut block_text = None;
                     let is_cursor_in_redacted_range = redacted_ranges
@@ -1083,7 +1083,7 @@ impl EditorElement {
                                     Appearance::Light => Hsla::white(),
                                 }
                             } else {
-                                cx.theme().colors().editor_background
+                                cx.theme().colors().editor_background.into()
                             };
 
                             let shaped = window.text_system().shape_line(
@@ -2972,7 +2972,7 @@ impl EditorElement {
         }
         let highlight_iter = highlight_ranges.into_iter();
         let selection_iter = selections.iter().flat_map(|(player_color, layouts)| {
-            let color = player_color.selection;
+            let color = player_color.selection.into();
             layouts.iter().filter_map(move |selection_layout| {
                 if selection_layout.range.start != selection_layout.range.end {
                     Some((selection_layout.range.clone(), color))
@@ -3144,7 +3144,7 @@ impl EditorElement {
                     let run = TextRun {
                         len: line.len(),
                         font: style.text.font(),
-                        color: placeholder_color,
+                        color: placeholder_color.into(),
                         ..Default::default()
                     };
                     let line = window.text_system().shape_line(
@@ -4713,7 +4713,7 @@ impl EditorElement {
                     }
                 };
 
-                highlighted_ranges.push((range, background_color));
+                highlighted_ranges.push((range, background_color.into()));
             }
         }
     }
@@ -5179,27 +5179,28 @@ impl EditorElement {
             let line_color = match (settings.coloring, indent_guide.active) {
                 (IndentGuideColoring::Disabled, _) => None,
                 (IndentGuideColoring::Fixed, false) => {
-                    Some(cx.theme().colors().editor_indent_guide)
+                    Some(cx.theme().colors().editor_indent_guide.into())
                 }
                 (IndentGuideColoring::Fixed, true) => {
-                    Some(cx.theme().colors().editor_indent_guide_active)
+                    Some(cx.theme().colors().editor_indent_guide_active.into())
                 }
                 (IndentGuideColoring::IndentAware, false) => {
-                    Some(faded_color(indent_accent_colors, INDENT_AWARE_ALPHA))
+                    Some(faded_color(indent_accent_colors.into(), INDENT_AWARE_ALPHA))
                 }
-                (IndentGuideColoring::IndentAware, true) => {
-                    Some(faded_color(indent_accent_colors, INDENT_AWARE_ACTIVE_ALPHA))
-                }
+                (IndentGuideColoring::IndentAware, true) => Some(faded_color(
+                    indent_accent_colors.into(),
+                    INDENT_AWARE_ACTIVE_ALPHA,
+                )),
             };
 
             let background_color = match (settings.background_coloring, indent_guide.active) {
                 (IndentGuideBackgroundColoring::Disabled, _) => None,
                 (IndentGuideBackgroundColoring::IndentAware, false) => Some(faded_color(
-                    indent_accent_colors,
+                    indent_accent_colors.into(),
                     INDENT_AWARE_BACKGROUND_ALPHA,
                 )),
                 (IndentGuideBackgroundColoring::IndentAware, true) => Some(faded_color(
-                    indent_accent_colors,
+                    indent_accent_colors.into(),
                     INDENT_AWARE_BACKGROUND_ACTIVE_ALPHA,
                 )),
             };
@@ -5253,7 +5254,8 @@ impl EditorElement {
                 let Some(()) = (if !is_singleton && hitbox.is_hovered(window) {
                     let color = cx.theme().colors().editor_hover_line_number;
 
-                    let line = self.shape_line_number(shaped_line.text.clone(), color, window);
+                    let line =
+                        self.shape_line_number(shaped_line.text.clone(), color.into(), window);
                     line.paint(
                         hitbox.origin,
                         line_height,
@@ -5701,7 +5703,7 @@ impl EditorElement {
                     self.paint_highlighted_range(
                         selection.range.clone(),
                         true,
-                        player_color.selection,
+                        player_color.selection.into(),
                         corner_radius,
                         corner_radius * 2.,
                         layout,
@@ -6152,7 +6154,7 @@ impl EditorElement {
                                         ColoredRange {
                                             start: start_display_row,
                                             end: end_display_row,
-                                            color,
+                                            color: color.into(),
                                         }
                                     });
 
@@ -6190,7 +6192,7 @@ impl EditorElement {
                                         ColoredRange {
                                             start: display_start.row(),
                                             end: display_end.row(),
-                                            color,
+                                            color: color.into(),
                                         }
                                     });
                                     marker_quads.extend(
@@ -6252,7 +6254,7 @@ impl EditorElement {
                                     ColoredRange {
                                         start: start_display.row(),
                                         end: end_display.row(),
-                                        color,
+                                        color: color.into(),
                                     }
                                 });
                                 marker_quads.extend(
@@ -6872,7 +6874,7 @@ pub fn render_breadcrumb_text(
             text_style.font_style = font.style;
             text_style.font_weight = font.weight;
         }
-        text_style.color = Color::Muted.color(cx);
+        text_style.color = Color::Muted.color(cx).into();
 
         if index == 0
             && !workspace::TabBarSettings::get_global(cx).show
@@ -7012,7 +7014,7 @@ fn apply_dirty_filename_style(
     if filename_position == 0 {
         let mut filename_style = text_style.clone();
         filename_style.font_weight = bold_weight;
-        filename_style.color = default_color;
+        filename_style.color = default_color.into();
 
         return Some(
             StyledText::new(text)
@@ -7023,7 +7025,7 @@ fn apply_dirty_filename_style(
 
     let highlight_style = gpui::HighlightStyle {
         font_weight: Some(bold_weight),
-        color: Some(default_color),
+        color: Some(default_color.into()),
         ..Default::default()
     };
 
@@ -7088,7 +7090,12 @@ fn render_blame_entry(
     cx: &mut App,
 ) -> Option<AnyElement> {
     let index: u32 = blame_entry.sha.into();
-    let mut sha_color = cx.theme().players().color_for_participant(index).cursor;
+    let mut sha_color: Hsla = cx
+        .theme()
+        .players()
+        .color_for_participant(index)
+        .cursor
+        .into();
 
     // If the last color we used is the same as the one we get for this line, but
     // the commit SHAs are different, then we try again to get a different color.
@@ -7096,7 +7103,12 @@ fn render_blame_entry(
         && sha != blame_entry.sha
         && color == sha_color
     {
-        sha_color = cx.theme().players().color_for_participant(index + 1).cursor;
+        sha_color = cx
+            .theme()
+            .players()
+            .color_for_participant(index + 1)
+            .cursor
+            .into();
     }
     last_used_color.replace((sha_color, blame_entry.sha));
 
@@ -8365,17 +8377,17 @@ impl Element for EditorElement {
 
                     let colors = cx.theme().colors();
                     let added_diff_hunk_colors = DiffHunkHighlightColors {
-                        filled_background: colors.editor_diff_hunk_added_background,
-                        hollow_background: colors.editor_diff_hunk_added_hollow_background,
-                        hollow_border: colors.editor_diff_hunk_added_hollow_border,
+                        filled_background: colors.editor_diff_hunk_added_background.into(),
+                        hollow_background: colors.editor_diff_hunk_added_hollow_background.into(),
+                        hollow_border: colors.editor_diff_hunk_added_hollow_border.into(),
                     };
                     let deleted_diff_hunk_colors = DiffHunkHighlightColors {
-                        filled_background: colors.editor_diff_hunk_deleted_background,
-                        hollow_background: colors.editor_diff_hunk_deleted_hollow_background,
-                        hollow_border: colors.editor_diff_hunk_deleted_hollow_border,
+                        filled_background: colors.editor_diff_hunk_deleted_background.into(),
+                        hollow_background: colors.editor_diff_hunk_deleted_hollow_background.into(),
+                        hollow_border: colors.editor_diff_hunk_deleted_hollow_border.into(),
                     };
-                    let drag_highlight_color = colors.editor_active_line_background;
-                    let drag_border_color = colors.border_focused;
+                    let drag_highlight_color: Hsla = colors.editor_active_line_background.into();
+                    let drag_border_color: Hsla = colors.border_focused.into();
 
                     for (ix, row_info) in row_infos.iter().enumerate() {
                         let Some(diff_status) = row_info.diff_status else {
@@ -9419,7 +9431,7 @@ impl Element for EditorElement {
                         &[TextRun {
                             len: tab_len,
                             font: self.style.text.font(),
-                            color: cx.theme().colors().editor_invisible,
+                            color: cx.theme().colors().editor_invisible.into(),
                             ..Default::default()
                         }],
                         None,
@@ -9433,7 +9445,7 @@ impl Element for EditorElement {
                         &[TextRun {
                             len: space_len,
                             font: self.style.text.font(),
-                            color: cx.theme().colors().editor_invisible,
+                            color: cx.theme().colors().editor_invisible.into(),
                             ..Default::default()
                         }],
                         None,

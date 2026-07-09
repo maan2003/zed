@@ -576,7 +576,7 @@ pub fn make_inlay_hints_style(cx: &App) -> HighlightStyle {
         .unwrap_or_default();
 
     if style.color.is_none() {
-        style.color = Some(cx.theme().status().hint);
+        style.color = Some(cx.theme().status().hint.into());
     }
 
     if !show_background {
@@ -585,7 +585,7 @@ pub fn make_inlay_hints_style(cx: &App) -> HighlightStyle {
     }
 
     if style.background_color.is_none() {
-        style.background_color = Some(cx.theme().status().hint_background);
+        style.background_color = Some(cx.theme().status().hint_background.into());
     }
 
     style
@@ -3610,7 +3610,7 @@ impl Editor {
                 editor.highlight_background(
                     HighlightKey::Editor,
                     &ranges_to_highlight,
-                    |_, theme| theme.colors().editor_highlighted_line_background,
+                    |_, theme| theme.colors().editor_highlighted_line_background.into(),
                     cx,
                 );
             });
@@ -3706,13 +3706,23 @@ impl Editor {
                     this.highlight_background(
                         HighlightKey::DocumentHighlightRead,
                         &read_ranges,
-                        |_, theme| theme.colors().editor_document_highlight_read_background,
+                        |_, theme| {
+                            theme
+                                .colors()
+                                .editor_document_highlight_read_background
+                                .into()
+                        },
                         cx,
                     );
                     this.highlight_background(
                         HighlightKey::DocumentHighlightWrite,
                         &write_ranges,
-                        |_, theme| theme.colors().editor_document_highlight_write_background,
+                        |_, theme| {
+                            theme
+                                .colors()
+                                .editor_document_highlight_write_background
+                                .into()
+                        },
                         cx,
                     );
                     cx.notify();
@@ -3844,7 +3854,12 @@ impl Editor {
                         editor.highlight_background(
                             HighlightKey::SelectedTextHighlight,
                             &match_ranges,
-                            |_, theme| theme.colors().editor_document_highlight_bracket_background,
+                            |_, theme| {
+                                theme
+                                    .colors()
+                                    .editor_document_highlight_bracket_background
+                                    .into()
+                            },
                             cx,
                         )
                     }
@@ -6526,7 +6541,12 @@ impl Editor {
 
             self.go_to_line::<ActiveDebugLine>(
                 multibuffer_anchor,
-                |cx| cx.theme().colors().editor_debugger_active_line_background,
+                |cx| {
+                    cx.theme()
+                        .colors()
+                        .editor_debugger_active_line_background
+                        .into()
+                },
                 window,
                 cx,
             );
@@ -7990,7 +8010,7 @@ impl Editor {
                                         .child(EditorElement::new(
                                             &rename_editor,
                                             EditorStyle {
-                                                background: cx.theme().system().transparent,
+                                                background: cx.theme().system().transparent.into(),
                                                 local_player: cx.editor_style.local_player,
                                                 text: text_style,
                                                 scrollbar_width: cx.editor_style.scrollbar_width,
@@ -9179,7 +9199,12 @@ impl Editor {
         self.highlight_background(
             HighlightKey::SearchWithinRange,
             ranges,
-            |_, colors| colors.colors().editor_document_highlight_read_background,
+            |_, colors| {
+                colors
+                    .colors()
+                    .editor_document_highlight_read_background
+                    .into()
+            },
             cx,
         )
     }
@@ -11049,7 +11074,7 @@ impl Editor {
 
         let mut text_style = match self.mode {
             EditorMode::SingleLine | EditorMode::AutoHeight { .. } => TextStyle {
-                color: cx.theme().colors().editor_foreground,
+                color: cx.theme().colors().editor_foreground.into(),
                 font_family: settings.ui_font.family.clone(),
                 font_features: settings.ui_font.features.clone(),
                 font_fallbacks: settings.ui_font.fallbacks.clone(),
@@ -11059,7 +11084,7 @@ impl Editor {
                 ..Default::default()
             },
             EditorMode::Full { .. } | EditorMode::Minimap { .. } => TextStyle {
-                color: cx.theme().colors().editor_foreground,
+                color: cx.theme().colors().editor_foreground.into(),
                 font_family: settings.buffer_font.family.clone(),
                 font_features: settings.buffer_font.features.clone(),
                 font_fallbacks: settings.buffer_font.fallbacks.clone(),
@@ -11081,8 +11106,8 @@ impl Editor {
         };
 
         EditorStyle {
-            background,
-            border: cx.theme().colors().border,
+            background: background.into(),
+            border: cx.theme().colors().border.into(),
             local_player: cx.theme().players().local(),
             text: text_style,
             scrollbar_width: EditorElement::SCROLLBAR_WIDTH,
@@ -12191,11 +12216,11 @@ impl ui_input::ErasedEditor for ErasedEditorImpl {
             font_weight: settings.ui_font.weight,
             font_style: FontStyle::Normal,
             line_height: relative(1.2),
-            color: theme_color.text,
+            color: theme_color.text.into(),
             ..Default::default()
         };
         let editor_style = EditorStyle {
-            background: theme_color.ghost_element_background,
+            background: theme_color.ghost_element_background.into(),
             local_player: cx.theme().players().local(),
             syntax: cx.theme().syntax().clone(),
             text: text_style,
@@ -12307,12 +12332,12 @@ pub fn styled_runs_for_code_label<'a>(
             .flat_map(move |(ix, (range, highlight_id))| {
                 let style = if *highlight_id == language::HighlightId::TABSTOP_INSERT_ID {
                     HighlightStyle {
-                        color: Some(local_player.cursor),
+                        color: Some(local_player.cursor.into()),
                         ..Default::default()
                     }
                 } else if *highlight_id == language::HighlightId::TABSTOP_REPLACE_ID {
                     HighlightStyle {
-                        background_color: Some(local_player.selection),
+                        background_color: Some(local_player.selection.into()),
                         ..Default::default()
                     }
                 } else if let Some(style) = syntax_theme.get(*highlight_id).cloned() {
@@ -12583,9 +12608,9 @@ impl PromptEditor {
         let settings = ThemeSettings::get_global(cx);
         let text_style = TextStyle {
             color: if self.prompt.read(cx).read_only(cx) {
-                cx.theme().colors().text_disabled
+                cx.theme().colors().text_disabled.into()
             } else {
-                cx.theme().colors().text
+                cx.theme().colors().text.into()
             },
             font_family: settings.buffer_font.family.clone(),
             font_fallbacks: settings.buffer_font.fallbacks.clone(),
@@ -12597,7 +12622,7 @@ impl PromptEditor {
         EditorElement::new(
             &self.prompt,
             EditorStyle {
-                background: cx.theme().colors().editor_background,
+                background: cx.theme().colors().editor_background.into(),
                 local_player: cx.theme().players().local(),
                 text: text_style,
                 ..Default::default()
