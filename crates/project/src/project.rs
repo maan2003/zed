@@ -3323,6 +3323,18 @@ impl Project {
             .update(cx, |buffer_store, cx| buffer_store.save_buffer(buffer, cx))
     }
 
+    /// Saves only if the host still sees the file state from which this
+    /// buffer was loaded or last saved.
+    pub fn save_buffer_checked(
+        &self,
+        buffer: Entity<Buffer>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        self.buffer_store.update(cx, |buffer_store, cx| {
+            buffer_store.save_buffer_checked(buffer, cx)
+        })
+    }
+
     pub fn save_buffer_as(
         &mut self,
         buffer: Entity<Buffer>,

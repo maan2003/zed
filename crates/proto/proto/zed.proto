@@ -96,6 +96,7 @@ message Envelope {
     UpdateBuffer update_buffer = 60;
     UpdateBufferFile update_buffer_file = 61;
     SaveBuffer save_buffer = 62;
+    SaveBufferChecked save_buffer_checked = 462;
     BufferSaved buffer_saved = 63;
     BufferReloaded buffer_reloaded = 64;
     ReloadBuffers reload_buffers = 65;
@@ -552,6 +553,7 @@ enum ErrorCode {
   RemoteUpgradeRequired = 17;
   RateLimitExceeded = 18;
   CommitFailed = 19;
+  SaveConflict = 20;
   reserved 6;
   reserved 14 to 15;
 }
