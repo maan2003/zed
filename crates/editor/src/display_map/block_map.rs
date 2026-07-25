@@ -856,6 +856,24 @@ impl BlockMap {
     }
 
     #[ztracing::instrument(skip_all, fields(edits = ?edits))]
+    /// The rows an elision covers, or `None` if it covers nothing.
+    fn elision_wrap_rows(
+        &self,
+        elision: &DisplayElision,
+        wrap_snapshot: &WrapSnapshot,
+    ) -> Option<Range<WrapRow>> {
+        let buffer = wrap_snapshot.buffer_snapshot();
+        let mut start = elision.range.start.to_point(buffer);
+        let end = elision.range.end.to_point(buffer);
+        if start >= end {
+            return None;
+        }
+        start.column = 0;
+        let start_row = wrap_snapshot.make_wrap_point(start, Bias::Left).row();
+        let end_row = wrap_snapshot.make_wrap_point(end, Bias::Left).row() + WrapRow(1);
+        Some(start_row..end_row)
+    }
+
     fn sync(
         &self,
         wrap_snapshot: &WrapSnapshot,
@@ -884,13 +902,28 @@ impl BlockMap {
             }]);
         }
 
+        // An elision replaces a run of rows with one block, so an edit
+        // inside one has to rebuild the whole run. Edits elsewhere leave it
+        // standing: rebuilding every block instead would make each
+        // keystroke cost the length of the document.
         if !self.display_elisions.is_empty() && !edits.is_empty() {
-            let old_max_row = self.wrap_snapshot.borrow().max_point().row() + WrapRow(1);
-            let new_max_row = max_point.row() + WrapRow(1);
-            edits = Patch::new(vec![WrapEdit {
-                old: WrapRow(0)..old_max_row,
-                new: WrapRow(0)..new_max_row,
-            }]);
+            let elided_rows = self
+                .display_elisions
+                .iter()
+                .filter(|elision| !elision.expanded)
+                .filter_map(|elision| self.elision_wrap_rows(elision, wrap_snapshot))
+                .filter(|rows| {
+                    edits
+                        .edits()
+                        .iter()
+                        .any(|edit| edit.new.start < rows.end && rows.start < edit.new.end)
+                })
+                .map(|rows| WrapEdit {
+                    old: rows.clone(),
+                    new: rows,
+                })
+                .collect::<Vec<_>>();
+            edits = edits.compose(elided_rows);
         }
 
         // Pull in companion edits to ensure we recompute spacers in ranges that have changed in the companion.
@@ -2317,10 +2350,17 @@ impl BlockMapWriter<'_> {
         let mut ranges = Vec::new();
         let mut companion_buffer_ids = HashSet::default();
         for buffer_id in buffer_ids {
-            if fold {
-                self.block_map.folded_buffers.insert(buffer_id);
+            // A buffer that was already in the asked-for state needs no
+            // resync. Editing a buffer unfolds it, so without this an edit
+            // rebuilds every block over that buffer's range - on every
+            // keystroke, for a buffer nobody ever folded.
+            let toggled = if fold {
+                self.block_map.folded_buffers.insert(buffer_id)
             } else {
-                self.block_map.folded_buffers.remove(&buffer_id);
+                self.block_map.folded_buffers.remove(&buffer_id)
+            };
+            if !toggled {
+                continue;
             }
             ranges.extend(multi_buffer_snapshot.range_for_buffer(buffer_id));
             if let Some(companion) = &self.companion
@@ -2336,6 +2376,9 @@ impl BlockMapWriter<'_> {
                     companion_buffer_ids.insert(companion_buffer_id);
                 }
             }
+        }
+        if ranges.is_empty() && companion_buffer_ids.is_empty() {
+            return;
         }
         ranges.sort_unstable_by_key(|range| range.start);
 
