@@ -28,6 +28,20 @@ impl Editor {
         let Some(accent_data) = self.accent_data.as_ref() else {
             return;
         };
+        // Nothing to colorize if no buffer here asks for it. The setting is
+        // read again per visible excerpt below, but only after the snapshots,
+        // and those are the expensive part of this: an editor over buffers
+        // that all opted out would take them on every buffer event and throw
+        // every one of them away.
+        if !self
+            .buffer()
+            .read(cx)
+            .all_buffers()
+            .iter()
+            .any(|buffer| LanguageSettings::for_buffer(buffer.read(cx), cx).colorize_brackets)
+        {
+            return;
+        }
         let accents = accent_data.colors.0.clone();
         let multi_buffer_snapshot = self.buffer().read(cx).snapshot(cx);
 
