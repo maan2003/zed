@@ -902,28 +902,44 @@ impl BlockMap {
             }]);
         }
 
-        // An elision replaces a run of rows with one block, so an edit
-        // inside one has to rebuild the whole run. Edits elsewhere leave it
-        // standing: rebuilding every block instead would make each
-        // keystroke cost the length of the document.
-        if !self.display_elisions.is_empty() && !edits.is_empty() {
-            let elided_rows = self
-                .display_elisions
-                .iter()
-                .filter(|elision| !elision.expanded)
-                .filter_map(|elision| self.elision_wrap_rows(elision, wrap_snapshot))
-                .filter(|rows| {
-                    edits
-                        .edits()
-                        .iter()
-                        .any(|edit| edit.new.start < rows.end && rows.start < edit.new.end)
-                })
-                .map(|rows| WrapEdit {
-                    old: rows.clone(),
-                    new: rows,
-                })
-                .collect::<Vec<_>>();
-            edits = edits.compose(elided_rows);
+        // An elision replaces a run of rows with one block, so an edit inside
+        // one invalidates the whole elision, not just the rows it landed on.
+        // Widening the edit to span the elisions it touches is enough, and
+        // widening it to the whole document instead - which is what elisions
+        // that may overlap each other tempt you into - would make every
+        // keystroke cost the length of the transcript.
+        let touched = (!edits.is_empty())
+            .then(|| {
+                self.display_elisions
+                    .iter()
+                    .filter(|elision| !elision.expanded)
+                    .filter_map(|elision| self.elision_wrap_rows(elision, wrap_snapshot))
+                    .filter(|rows| {
+                        edits
+                            .edits()
+                            .iter()
+                            .any(|edit| edit.new.start < rows.end && rows.start < edit.new.end)
+                    })
+                    .reduce(|bounds, rows| bounds.start.min(rows.start)..bounds.end.max(rows.end))
+            })
+            .flatten();
+        if let Some(touched) = touched {
+            // One edit, so there is nothing for it to overlap or sort against.
+            // The rows outside the patch did not change, they only moved by a
+            // fixed number of rows, so the outermost edits carry the widened
+            // bounds from new coordinates back to old ones.
+            let first = edits.edits().first().expect("edits is not empty").clone();
+            let last = edits.edits().last().expect("edits is not empty").clone();
+            // The unchanged rows ahead of the first edit run out where old
+            // coordinates do, which is the furthest back this can reach.
+            let floor = WrapRow(first.new.start.0.saturating_sub(first.old.start.0));
+            let new_start = touched.start.clamp(floor, first.new.start);
+            let new_end = touched.end.max(last.new.end);
+            edits = Patch::new(vec![WrapEdit {
+                old: (first.old.start - (first.new.start - new_start))
+                    ..(last.old.end + (new_end - last.new.end)),
+                new: new_start..new_end,
+            }]);
         }
 
         // Pull in companion edits to ensure we recompute spacers in ranges that have changed in the companion.
