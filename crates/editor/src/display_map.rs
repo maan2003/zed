@@ -234,6 +234,9 @@ pub struct DisplayMap {
     pub semantic_token_highlights: SemanticTokensHighlights,
     /// A container for explicitly foldable ranges, which supersede indentation based fold range suggestions.
     crease_map: CreaseMap,
+    /// Rows that render at a multiple of the editor's font size, as anchors
+    /// so they follow the text they cover. See [`Self::set_row_scales`].
+    row_scales: Vec<(Range<Anchor>, f32)>,
     pub(crate) fold_placeholder: FoldPlaceholder,
     pub clip_at_line_ends: bool,
     pub(crate) masked: bool,
@@ -401,6 +404,7 @@ impl DisplayMap {
             wrap_map,
             block_map,
             crease_map,
+            row_scales: Vec::new(),
             fold_placeholder,
             diagnostics_max_severity,
             text_highlights: Default::default(),
@@ -555,6 +559,53 @@ impl DisplayMap {
         self.companion.as_ref().map(|(_, c)| c)
     }
 
+    /// Renders the given ranges of rows at a multiple of the editor's font
+    /// size, leaving row height alone - so the editor's leading has to cover
+    /// the largest scale in use, or tall rows will collide with their
+    /// neighbours.
+    ///
+    /// Ranges cover whole rows: every row from the start's to the end's,
+    /// inclusive. They must be ascending and non-overlapping. Rows re-wrap
+    /// when they are edited, so a caller that scales rows it has already
+    /// written needs [`Self::rewrap`] to follow.
+    pub fn set_row_scales(&mut self, row_scales: Vec<(Range<Anchor>, f32)>) {
+        self.row_scales = row_scales;
+    }
+
+    fn buffer_row_scales(&self, cx: &App) -> Arc<[(Range<u32>, f32)]> {
+        if self.row_scales.is_empty() {
+            return Arc::from([]);
+        }
+        let buffer = self.buffer.read(cx).snapshot(cx);
+        self.resolve_row_scales(&buffer, |row| row)
+    }
+
+    fn resolve_row_scales(
+        &self,
+        buffer: &MultiBufferSnapshot,
+        map_row: impl Fn(u32) -> u32,
+    ) -> Arc<[(Range<u32>, f32)]> {
+        let mut resolved = Vec::with_capacity(self.row_scales.len());
+        for (range, scale) in &self.row_scales {
+            let start = range.start.to_point(buffer);
+            let end = range.end.to_point(buffer);
+            if end < start {
+                continue;
+            }
+            let rows = map_row(start.row)..map_row(end.row) + 1;
+            // Rows a fold joined can land in two ranges at once; the first
+            // one to claim a row wins, which keeps the list searchable.
+            match resolved.last_mut() {
+                Some((last, _)) if *last == rows => continue,
+                Some((last @ Range { .. }, _)) if last.end > rows.start => {
+                    last.end = last.end.max(rows.end);
+                }
+                _ => resolved.push((rows, *scale)),
+            }
+        }
+        Arc::from(resolved)
+    }
+
     fn sync_through_wrap(&mut self, cx: &mut App) -> (WrapSnapshot, WrapPatch) {
         let tab_size = Self::tab_size(&self.buffer, cx);
         let buffer_snapshot = self.buffer.read(cx).snapshot(cx);
@@ -563,8 +614,20 @@ impl DisplayMap {
         let (snapshot, edits) = self.inlay_map.sync(buffer_snapshot, edits);
         let (snapshot, edits) = self.fold_map.read(snapshot, edits);
         let (snapshot, edits) = self.tab_map.sync(snapshot, edits, tab_size);
-        self.wrap_map
-            .update(cx, |map, cx| map.sync(snapshot, edits, cx))
+        let row_scales = if self.row_scales.is_empty() {
+            Arc::from([])
+        } else {
+            let buffer = snapshot.buffer_snapshot().clone();
+            self.resolve_row_scales(&buffer, |row| {
+                snapshot
+                    .point_to_tab_point(Point::new(row, 0), Bias::Left)
+                    .row()
+            })
+        };
+        self.wrap_map.update(cx, |map, cx| {
+            map.set_row_scales(row_scales);
+            map.sync(snapshot, edits, cx)
+        })
     }
 
     fn with_synced_companion_mut<R>(
@@ -662,6 +725,7 @@ impl DisplayMap {
             semantic_token_highlights: self.semantic_token_highlights.clone(),
             clip_at_line_ends: self.clip_at_line_ends,
             masked: self.masked,
+            row_scales: self.buffer_row_scales(cx),
             use_lsp_folding_ranges: !self.lsp_folding_crease_ids.is_empty(),
             fold_placeholder: self.fold_placeholder.clone(),
         }
@@ -686,6 +750,7 @@ impl DisplayMap {
             semantic_token_highlights: self.semantic_token_highlights.clone(),
             clip_at_line_ends: self.clip_at_line_ends,
             masked: self.masked,
+            row_scales: self.buffer_row_scales(cx),
             use_lsp_folding_ranges: !self.lsp_folding_crease_ids.is_empty(),
             fold_placeholder: self.fold_placeholder.clone(),
         }
@@ -1624,6 +1689,10 @@ pub struct DisplaySnapshot {
     clip_at_line_ends: bool,
     masked: bool,
     diagnostics_max_severity: DiagnosticSeverity,
+    /// Buffer rows that render at a multiple of the editor's font size,
+    /// ascending. Resolved once per snapshot so painting a row costs a
+    /// search rather than an anchor resolution.
+    row_scales: Arc<[(Range<u32>, f32)]>,
     pub(crate) fold_placeholder: FoldPlaceholder,
     /// When true, LSP folding ranges are used via the crease map and the
     /// indent-based fallback in `crease_for_buffer_row` is skipped.
@@ -1792,6 +1861,15 @@ impl DisplaySnapshot {
             block_point_cursor: self.block_snapshot.block_point_cursor(),
             prev_end: None,
         }
+    }
+
+    /// The multiple of the editor's font size this row renders at.
+    pub fn row_scale(&self, row: DisplayRow) -> f32 {
+        if self.row_scales.is_empty() {
+            return 1.0;
+        }
+        let point = self.display_point_to_point(DisplayPoint::new(row, 0), Bias::Left);
+        crate::display_map::wrap_map::scale_for(&self.row_scales, point.row)
     }
 
     pub fn display_point_to_point(&self, point: DisplayPoint, bias: Bias) -> Point {

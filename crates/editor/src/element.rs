@@ -3170,6 +3170,7 @@ impl EditorElement {
                 diagnostics: true,
             };
             let chunks = snapshot.highlighted_chunks(rows.clone(), language_aware, style);
+            let first_row = rows.start;
             LineWithInvisibles::from_chunks(
                 chunks,
                 style,
@@ -3178,6 +3179,7 @@ impl EditorElement {
                 &snapshot.mode,
                 editor_width,
                 is_row_soft_wrapped,
+                |row| snapshot.row_scale(first_row + DisplayRow(row as u32)),
                 bg_segments_per_row,
                 window,
                 cx,
@@ -7170,6 +7172,7 @@ impl LineWithInvisibles {
         editor_mode: &EditorMode,
         text_width: Pixels,
         is_row_soft_wrapped: impl Copy + Fn(usize) -> bool,
+        row_scale: impl Copy + Fn(usize) -> f32,
         bg_segments_per_row: &[Vec<(Range<DisplayPoint>, Hsla)>],
         window: &mut Window,
         cx: &mut App,
@@ -7189,7 +7192,12 @@ impl LineWithInvisibles {
         let mut non_whitespace_added = false;
         let mut row = 0;
         let mut line_exceeded_max_len = false;
-        let font_size = text_style.font_size.to_pixels(window.rem_size());
+        // Rows may render at a multiple of the editor's font size, so this
+        // follows `row` rather than being fixed for the whole layout. Row
+        // height does not follow it: the editor's leading has to cover the
+        // largest scale in use.
+        let base_font_size = text_style.font_size.to_pixels(window.rem_size());
+        let mut font_size = base_font_size * row_scale(0);
         let min_contrast = EditorSettings::get_global(cx).minimum_contrast_for_highlights;
 
         let ellipsis = SharedString::from("⋯");
@@ -7328,6 +7336,7 @@ impl LineWithInvisibles {
                         line_byte_offset = 0;
                         styles.clear();
                         row += 1;
+                        font_size = base_font_size * row_scale(row);
                         line_exceeded_max_len = false;
                         non_whitespace_added = false;
                         if row == max_line_count {
@@ -10436,6 +10445,7 @@ pub fn layout_line(
         &snapshot.mode,
         text_width,
         is_row_soft_wrapped,
+        |_| snapshot.row_scale(row),
         &[],
         window,
         cx,
@@ -11784,6 +11794,7 @@ mod tests {
                     &editor_mode,
                     px(500.),
                     |_| false,
+                    |_| 1.0,
                     &[],
                     window,
                     cx,
