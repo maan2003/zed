@@ -3,6 +3,7 @@ use gpui::HighlightStyle;
 use language::{Chunk, LanguageAwareStyling};
 use multi_buffer::{MultiBufferChunks, MultiBufferOffset, MultiBufferSnapshot};
 use std::{cmp, ops::Range};
+use text::Bias;
 
 use crate::display_map::{HighlightKey, SemanticTokensHighlights, TextHighlights};
 
@@ -104,9 +105,15 @@ impl<'a> CustomHighlightsChunks<'a> {
 
         cmp::max(
             new_range.end,
-            cmp::min(
-                MultiBufferOffset(new_range.start.0 + LOOKAHEAD),
-                self.multibuffer_snapshot.len(),
+            self.multibuffer_snapshot.clip_offset(
+                MultiBufferOffset(
+                    new_range
+                        .start
+                        .0
+                        .saturating_add(LOOKAHEAD)
+                        .min(self.multibuffer_snapshot.len().0),
+                ),
+                Bias::Right,
             ),
         )
     }
@@ -326,9 +333,32 @@ mod tests {
 
     use super::*;
     use crate::MultiBuffer;
+    use collections::HashMap;
     use gpui::App;
     use rand::prelude::*;
     use util::RandomCharIter;
+
+    #[gpui::test]
+    fn test_seek_lookahead_ends_at_char_boundary(cx: &mut App) {
+        let text = format!("{}—", "a".repeat(8191));
+        let buffer = MultiBuffer::build_simple(&text, cx);
+        let snapshot = buffer.read(cx).snapshot(cx);
+        let highlights = Arc::new(HashMap::default());
+        let mut chunks = CustomHighlightsChunks::new(
+            MultiBufferOffset(0)..MultiBufferOffset(1),
+            LanguageAwareStyling {
+                tree_sitter: false,
+                diagnostics: false,
+            },
+            Some(&highlights),
+            None,
+            &snapshot,
+        );
+
+        chunks.seek(MultiBufferOffset(0)..MultiBufferOffset(2));
+
+        assert_eq!(chunks.highlighted_range.end, snapshot.len());
+    }
 
     #[gpui::test(iterations = 100)]
     fn test_random_chunk_bitmaps(cx: &mut App, mut rng: StdRng) {
